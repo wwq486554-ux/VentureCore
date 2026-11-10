@@ -14,12 +14,15 @@ It is a template, not a mod: it deliberately contains **no gameplay features**.
 > **Status: v0.2.0-experimental** - an empty base plus two Example modules.  The
 > base machinery (startup, logging, config, extension storage with savegame
 > persistence, event channel, command registration, lineage detection, host
-> detection) is complete and verified; host-specific (T1-T3) features, Phobos
-> interop and AE are roadmap items, listed below.
+> detection) is implemented; the automated checks for each layer are named in
+> this README and in `docs/` and do not replace the in-game check.  Host-specific
+> (T1-T3) features, Phobos interop and AE are roadmap items, listed below.
 
 ## What this sample provides
 
-Everything below is implemented and exercised by the sample build:
+Everything below is implemented; the automated checks that cover a layer are
+named with it (an in-game run is still the only end-to-end check - see
+[Verifying a build](#verifying-a-build)).
 
 * **Platform identity and versioning** - `src/Core/PlatformConfig.h` is the single
   header that renames the platform; the DLL, INI, log, savegame id and version
@@ -30,9 +33,11 @@ Everything below is implemented and exercised by the sample build:
   applies the lineage check and initializes every registered feature.
 * **File logging** - `<Platform>.log` next to `rules.ini`, level-filtered
   (`[Platform] LogLevel=error|warn|info|debug`), one per-process separator header,
-  no unconditional `OutputDebugString` in release builds and a crash-proof
-  fallback; the source-hygiene check in `scripts/verify_build.py` keeps it that
-  way (see `docs/Logging.md`).
+  no unconditional `OutputDebugString` in release builds; a failed open falls
+  back to the gated debugger helper and a failed write is reported once and the
+  line dropped.  `tests/test_logging.cpp` covers the file I/O and
+  `scripts/verify_build.py`'s source check covers where the debugger API may be
+  called; neither is a game run (see `docs/Logging.md`).
 * **INI layer** - typed getters over `<Platform>.ini`, typed reads over the
   engine-parsed `rules(md).ini` / `art(md).ini`, and a **rules-INI takeover**: when
   a feature switch is on, the platform-owned keys are removed from the parsed
@@ -193,8 +198,10 @@ must be done by a human.  See `docs/HookCatalogue.md` for what each hook does an
    status, log level, hosts and tier, lineage, feature switches, registered
    commands and event types, then `startup complete`.
 
-The base has no unload hook; the log is flushed as lines are written and the
-process ends normally.
+The base has no unload hook; every line is written immediately with a synchronous
+`WriteFile` (no user-mode buffering), so a normal process exit does not lose
+lines.  There is no `FlushFileBuffers` call: the data sits in the OS file cache,
+which a normal exit flushes, and only a power loss / blue screen can drop it.
 
 ## Configuration
 

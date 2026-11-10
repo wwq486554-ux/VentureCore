@@ -2,9 +2,10 @@
 //
 // TEST_DEPS:
 // (header-only test: the pure rules live in src/Core/LogPolicy.h, so this test
-// links no non-test source.  The logger around them - file writes, the per-process
-// separator header and the gated debugger output - is verified by
-// scripts/verify_build.py's source check and by loading the built DLL.)
+// links no non-test source.  The compiled logger around them - file I/O, the
+// per-process separator header and the gated debugger output - is covered by
+// tests/test_logging.cpp, which links src/Core/Log.cpp; scripts/verify_build.py
+// only enforces where OutputDebugStringA may appear, it does not test log I/O.)
 
 #include <cstdio>
 #include <string>

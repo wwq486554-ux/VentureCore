@@ -90,6 +90,8 @@ cl_flags=(
 failed=0
 passed=0
 declare -a failed_names=()
+declare -a warning_tests=()
+total_warnings=0
 
 vcs_lock_toolchain
 
@@ -137,6 +139,18 @@ for test in "${selected[@]}"; do
   fi
   (( verbose )) || printf 'ok\n'
 
+  # A test compiles with /W4 and warnings do not fail the build (/WX-), so
+  # surface them even when the compile succeeds - otherwise a new warning in a
+  # test is invisible until someone opens the build log.  (-a: MSVC's localized
+  # messages make the log look like a binary file to grep.)
+  test_warnings="$(grep -acE 'warning C[0-9]+' "$log" 2>/dev/null || true)"
+  if [[ ${test_warnings:-0} -gt 0 ]]; then
+    total_warnings=$((total_warnings + test_warnings))
+    warning_tests+=("$name")
+    (( verbose )) || printf '      %d compiler warning(s)\n' "$test_warnings"
+    grep -aE 'warning C[0-9]+' "$log" 2>/dev/null | sed -n '1,3p' | sed 's/^/      /' >&2 || true
+  fi
+
   if (( no_run )); then
     passed=$((passed + 1))
     continue
@@ -165,6 +179,11 @@ for test in "${selected[@]}"; do
 done
 
 printf '\n'
+if (( total_warnings > 0 )); then
+  vcs_warn "compiler diagnostics: $total_warnings warning(s) in ${#warning_tests[@]} test build(s): ${warning_tests[*]}"
+else
+  vcs_info "compiler diagnostics: 0 warnings in ${#selected[@]} test build(s)"
+fi
 if (( failed == 0 )); then
   vcs_info "tests: $passed/$((passed + failed)) passed"
   exit 0

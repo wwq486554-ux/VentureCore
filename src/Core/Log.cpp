@@ -14,6 +14,11 @@ HANDLE g_file = INVALID_HANDLE_VALUE;
 venture::LogLevel g_minLevel = venture::LogLevel::Info;
 bool g_debugOutput = false;
 
+// A failing file write is reported to the (gated) debugger helper at most once
+// per process: a full disk would otherwise emit one diagnostic per log line,
+// which is worse than the dropped lines it reports.
+bool g_writeFailureReported = false;
+
 const char* LevelTag(const venture::LogLevel level)
 {
 	switch (level)
@@ -44,8 +49,20 @@ void WriteLineToFile(const char* const line)
 	if (g_file == INVALID_HANDLE_VALUE || !line)
 		return;
 
+	const DWORD length = static_cast<DWORD>(std::strlen(line));
 	DWORD written = 0;
-	WriteFile(g_file, line, static_cast<DWORD>(std::strlen(line)), &written, nullptr);
+	const BOOL ok = WriteFile(g_file, line, length, &written, nullptr);
+	if (ok && written == length)
+		return;
+
+	// The line is dropped; there is nothing useful to do with a failed append.
+	// Degrade to the gated debugger helper once so a persistent failure (e.g. a
+	// full disk) is visible to a developer without spamming a line per message.
+	if (!g_writeFailureReported)
+	{
+		g_writeFailureReported = true;
+		EmitDebugOutput("[VentureCore] cannot write the log file; the line is dropped\n");
+	}
 }
 
 // First line of every process: one stable separator the user can grep for.
@@ -78,6 +95,13 @@ void WriteSeparatorHeader()
 
 void WriteV(const venture::LogLevel level, const char* const format, va_list args)
 {
+	// A NULL format would reach _vsnprintf_s, whose invalid-parameter handler
+	// terminates the process by default; the public logging API promises the
+	// logger cannot crash the game, so drop the line instead.  (Callers must not
+	// pass NULL - see Log.h - but a defensive check keeps the promise true.)
+	if (!format)
+		return;
+
 	if (!venture::ShouldLog(g_minLevel, level))
 		return;
 
@@ -116,6 +140,21 @@ bool Log::Open()
 	if (!GetGameFilePath(VC_PLATFORM_LOG_NAME, path, static_cast<DWORD>(sizeof(path))))
 	{
 		EmitDebugOutput("[VentureCore] cannot resolve the game directory; file logging disabled\n");
+		return false;
+	}
+
+	return OpenAt(path);
+}
+
+bool Log::OpenAt(const char* const path)
+{
+	if (g_file != INVALID_HANDLE_VALUE)
+		return true;
+
+	if (!path || path[0] == '\0')
+	{
+		// CreateFileA(NULL, ...) is not diagnosed here; reject it explicitly.
+		EmitDebugOutput("[VentureCore] cannot open the log file (no path); file logging disabled\n");
 		return false;
 	}
 

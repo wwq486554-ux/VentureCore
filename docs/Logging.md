@@ -8,7 +8,9 @@ talking to a debugger.
 
 Source of truth: `src/Core/LogPolicy.h` (pure level/filter/sampling rules),
 `src/Core/Log.h` / `src/Core/Log.cpp` (the file logger), the configuration reads
-in `src/Core/Platform.cpp`, and `scripts/verify_build.py` check 7.
+in `src/Core/Platform.cpp`, and `scripts/verify_build.py` check 7.  The pure
+rules are tested by `tests/test_log_levels.cpp`; the file I/O described below is
+tested by `tests/test_logging.cpp`.  Neither test replaces an in-game run.
 
 ## Line format
 
@@ -23,7 +25,12 @@ the configured minimum.
 
 ## The per-process separator header
 
-Every `Log::Open()` writes one header line first, before any of the historic
+`Log::Open()` resolves `<game directory>\<Platform>.log` and calls
+`Log::OpenAt(path)`, which is public so a derived platform - or a test - can
+route the log explicitly.  Opening while the logger is already open is a no-op,
+so a repeated `Open`/`OpenAt` does not add a second separator.
+
+Every successful open writes one header line first, before any of the historic
 startup lines:
 
 ```text
@@ -99,10 +106,11 @@ DebugOutput=no
 * A **DEBUG build** always mirrors lines to the debugger; the switch is
   irrelevant there (the call is compiled in).
 
-The two "file logging disabled" fallback messages (the game directory cannot be
-resolved / the log file cannot be opened) go through the same one gated helper:
-if the log file cannot be opened in a RELEASE build, the platform stays quiet
-instead of writing to a debugger nobody asked for.
+The "file logging disabled" fallback messages (the game directory cannot be
+resolved / the log file cannot be opened) and the one-time "cannot write" report
+go through the same one gated helper: if the log file cannot be opened in a
+RELEASE build, the platform stays quiet instead of writing to a debugger nobody
+asked for.
 
 ### Why
 
@@ -192,23 +200,59 @@ conditional nesting, no C++ parsing.  Two consequences:
   for its `#else` branch, which is additionally gated on the run-time
   `DebugOutput` switch.  Do not add another debugger call outside that helper.
 
-## The logger cannot crash the game
+## Failure behaviour
 
-Every write is best-effort: a failed `WriteFile` returns a value that is ignored,
-file I/O failure never throws and never exits, and a missing/undetectable game
-directory only disables file logging (the gated debugger helper is the fallback).
-The DLL is compiled with `/EHsc-`, so there are no exceptions to escape from the
-logger in the first place.
+The logger is best-effort and must not take the game down with it:
+
+* **A failed write** drops the line.  `WriteFile`'s result is checked (a short
+  write counts as a failure); the first failure is reported once through the
+  gated debugger helper - not once per line, which a full disk would turn into a
+  flood - and logging continues.  A write failure cannot be repaired from here,
+  so the line is not retried.
+* **A failed open** (the game directory cannot be resolved, or the file cannot be
+  opened) disables file logging for the process; the same gated helper carries
+  the one-line explanation, and `Log::OpenAt(path)` reports it as `false`.
+* **A NULL format string** never reaches the C runtime: a line passed without a
+  format is dropped.  The variadic API documents `format` as required
+  (`src/Core/Log.h`), but the guard keeps the "cannot crash" promise even if a
+  feature passes NULL.
+* The DLL is compiled with `/EHsc-`, so there are no exceptions to escape from
+  the logger in the first place.
+
+The normal open/write path and the NULL-format guard are covered by
+`tests/test_logging.cpp`.  The write-failure/debugger-report branch cannot be
+provoked reliably in the automated checks (it needs a full disk) and is verified
+by inspection only.
+
+### Durability
+
+Each line is one synchronous `WriteFile` call: it reaches the OS file cache
+immediately (there is no user-mode stdio buffer to lose), and a normal process
+exit flushes the cache.  There is **no** `FlushFileBuffers` call, so a power loss
+or blue screen can still drop the last lines - deliberately, because flushing
+every line would cost a disk round trip in the game loop.
 
 ## Verifying a build
 
 ```bash
 scripts/linux/build_linux.sh Release --build-type RELEASE --clean   # 0 warnings
 python3 scripts/verify_build.py                                     # 7/7 checks
-scripts/linux/run_tests.sh log_levels                               # pure policy test
+scripts/linux/run_tests.sh                                          # every test
+scripts/linux/run_tests.sh test_logging                             # log file I/O
+scripts/linux/run_tests.sh log_levels                               # pure policy only
 ```
 
-In-game, check the first line of `<Platform>.log` for the separator header, the
+The automated coverage is split: `tests/test_log_levels.cpp` covers the pure
+policy in `src/Core/LogPolicy.h` (parsing, filtering, sampling) and links no
+logger source; `tests/test_logging.cpp` links `src/Core/Log.cpp` and drives the
+compiled logger - a real file under `%TEMP%`, the separator header, level
+filtering, the `[HH:MM:SS.mmm] [LEVEL] message` line format, a repeated `Open`,
+`Close` idempotence, a failed open and NULL/`%` format strings.  `verify_build.py`
+check 7 only asserts *where* the debugger API may be called.  The in-game
+integration (SyringeEx injection, the real game directory, a long session) stays
+a human check:
+
+Check the first line of `<Platform>.log` for the separator header, the
 `log     : level ...` line, and that a battle at the default `info` level keeps
 the `[Example] progress:` lines sparse.
 
