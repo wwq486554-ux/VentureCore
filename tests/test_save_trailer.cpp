@@ -4,8 +4,10 @@
 // provides a minimal stand-in for the owner classes and a fake swizzle manager
 // (the engine's pointer-remap pass) so a whole save -> new process -> load cycle
 // can be simulated in one process.  The platform writer/reader are also driven
-// through a minimal in-memory IStream implementation, so the end-of-stream seek,
-// the reported byte counts and the stream-position restore are covered.
+// through a minimal in-memory IStream implementation.  The engine's savegame
+// stream does not implement Seek, so the IStream cases include fully non-seekable
+// streams and require zero Seek dependency: the writer appends sequentially and
+// the reader reads the frame from the current position.
 //
 // The payload is format v2, so it starts with the platform's saveable store-set
 // signature; the defensive-parsing cases below cover that gate (unknown store,
@@ -90,19 +92,15 @@ void FakeProcess()
 	g_identities.clear();
 }
 
-LARGE_INTEGER MoveTo(const long long offset)
-{
-	LARGE_INTEGER move{};
-	move.QuadPart = offset;
-	return move;
-}
-
 // --- fake IStream ----------------------------------------------------------
 // Minimal in-memory COM stream.  The savegame writer/reader go through the real
-// IStream vtable, so the end-of-stream seek, the written/read byte counts and the
-// stream-position restore are exercised without the engine.  The failure switches
-// model a non-seekable stream, a failing / partial Write and a failing / short
-// Read (COM allows both, the reader has to cope).
+// IStream vtable.  The failure switches model the engine's streaming savegame
+// stream (Seek returns E_NOTIMPL), a failing / partial / no-progress Write and a
+// failing / short / no-progress Read (COM allows all of these, the code has to
+// cope).  `SkipTo` moves the internal position directly, without calling Seek: it
+// simulates the engine's other sequential readers/writers having advanced the
+// stream, so a test can set up a non-seekable stream exactly where the frame
+// starts.
 class FakeStream final : public IStream
 {
 public:
@@ -111,15 +109,19 @@ public:
 
 	void SetFailWrites(const bool fail) { m_failWrites = fail; }
 	void SetShortWrites(const bool shortWrites) { m_shortWrites = shortWrites; }
+	void SetZeroWrites(const bool zeroWrites) { m_zeroWrites = zeroWrites; }
 	void SetFailReads(const bool fail) { m_failReads = fail; }
 	void SetShortReads(const bool shortReads) { m_shortReads = shortReads; }
 	void SetZeroReads(const bool zeroReads) { m_zeroReads = zeroReads; }
 	void SetFailSeeks(const bool fail) { m_failSeeks = fail; }
+	void SkipTo(const std::uint64_t position) { m_position = position; }
+	void ResetCounters() { m_writeCalls = 0; m_readCalls = 0; m_seekCalls = 0; }
 
 	const std::vector<std::uint8_t>& Data() const { return m_data; }
 	std::uint64_t Position() const { return m_position; }
 	int WriteCalls() const { return m_writeCalls; }
 	int ReadCalls() const { return m_readCalls; }
+	int SeekCalls() const { return m_seekCalls; }
 
 	// --- IUnknown ---
 	HRESULT STDMETHODCALLTYPE QueryInterface(REFIID, void** const ppvObject) override
@@ -181,6 +183,15 @@ public:
 			return E_FAIL;
 		}
 
+		if (m_zeroWrites)
+		{
+			// A write that succeeds but makes no progress: a consumer that keeps
+			// looping would spin forever, so the writer has to abort.
+			if (pcbWritten)
+				*pcbWritten = 0;
+			return S_OK;
+		}
+
 		std::uint64_t count = static_cast<std::uint64_t>(cb);
 		if (m_shortWrites && count > 1)
 			count /= 2;
@@ -201,6 +212,8 @@ public:
 	HRESULT STDMETHODCALLTYPE Seek(const LARGE_INTEGER dlibMove, const DWORD dwOrigin,
 		ULARGE_INTEGER* const plibNewPosition) override
 	{
+		++m_seekCalls;
+
 		if (m_failSeeks)
 			return E_NOTIMPL;
 
@@ -240,12 +253,14 @@ private:
 	std::uint64_t m_position = 0;
 	bool m_failWrites = false;
 	bool m_shortWrites = false;
+	bool m_zeroWrites = false;
 	bool m_failReads = false;
 	bool m_shortReads = false;
 	bool m_zeroReads = false;
 	bool m_failSeeks = false;
 	int m_writeCalls = 0;
 	int m_readCalls = 0;
+	int m_seekCalls = 0;
 };
 
 // --- extension under test --------------------------------------------------
@@ -342,21 +357,24 @@ int __cdecl main()
 	Check(saved && !payload.empty() && blockCount == 1, "WritePayload produces one store block");
 
 	const std::vector<std::uint8_t> trailer = venture::SaveTrailer::WrapPayload(payload);
-	Check(trailer.size() == payload.size() + venture::SaveTrailer::SuffixSize,
-		"WrapPayload appends the fixed 20-byte suffix");
+	Check(trailer.size() == payload.size() + venture::SaveTrailer::HeaderSize,
+		"WrapPayload prepends the fixed 16-byte header");
 
 	// ---- 2. frame parsing --------------------------------------------------
+	// Header-first frame: 16-byte header [magic][formatVersion][payloadSize][crc32]
+	// followed by exactly payloadSize payload bytes.
 	{
 		std::size_t offset = 0;
 		std::size_t size = 0;
 		Check(venture::SaveTrailer::Parse(trailer.data(), trailer.size(), offset, size)
 				== venture::SaveTrailer::ParseResult::Ok,
-			"Parse accepts a well-formed trailer");
-		Check(offset == 0 && size == payload.size(), "Parse reports the payload range");
+			"Parse accepts a well-formed header-first trailer");
+		Check(offset == venture::SaveTrailer::HeaderSize && size == payload.size(),
+			"Parse reports the payload range after the 16-byte header");
 	}
 	{
 		std::vector<std::uint8_t> corrupt = trailer;
-		corrupt[1] ^= 0xFF;   // inside the payload: CRC must catch it
+		corrupt[venture::SaveTrailer::HeaderSize + 1] ^= 0xFF; // inside the payload: CRC must catch it
 		std::size_t offset = 0;
 		std::size_t size = 0;
 		Check(venture::SaveTrailer::Parse(corrupt.data(), corrupt.size(), offset, size)
@@ -366,18 +384,31 @@ int __cdecl main()
 	{
 		std::size_t offset = 0;
 		std::size_t size = 0;
-		Check(venture::SaveTrailer::Parse(trailer.data(), 8, offset, size)
+		Check(venture::SaveTrailer::Parse(trailer.data(), venture::SaveTrailer::HeaderSize - 1, offset, size)
 				== venture::SaveTrailer::ParseResult::NoTrailer,
-			"Parse reports NoTrailer for a stream shorter than the suffix");
+			"Parse reports NoTrailer for a buffer shorter than the header");
+		Check(venture::SaveTrailer::Parse(nullptr, 0, offset, size)
+				== venture::SaveTrailer::ParseResult::NoTrailer,
+			"Parse reports NoTrailer for a null/empty buffer");
+
 		std::vector<std::uint8_t> notOurs(64, 0x5A);
 		Check(venture::SaveTrailer::Parse(notOurs.data(), notOurs.size(), offset, size)
-				== venture::SaveTrailer::ParseResult::NoTrailer,
-			"Parse reports NoTrailer when our magic is absent");
+				== venture::SaveTrailer::ParseResult::Corrupt,
+			"Parse reports Corrupt (not NoTrailer) for a full foreign block");
+	}
+	{
+		std::vector<std::uint8_t> magicBumped = trailer;
+		magicBumped[0] ^= 0xFF;
+		std::size_t offset = 0;
+		std::size_t size = 0;
+		Check(venture::SaveTrailer::Parse(magicBumped.data(), magicBumped.size(), offset, size)
+				== venture::SaveTrailer::ParseResult::Corrupt,
+			"Parse rejects a damaged magic");
 	}
 	{
 		std::vector<std::uint8_t> versionBumped = trailer;
 		const std::uint32_t future = venture::SaveTrailer::FormatVersion + 1;
-		std::memcpy(versionBumped.data() + versionBumped.size() - 16, &future, sizeof(future));
+		std::memcpy(versionBumped.data() + 4, &future, sizeof(future));
 		std::size_t offset = 0;
 		std::size_t size = 0;
 		Check(venture::SaveTrailer::Parse(versionBumped.data(), versionBumped.size(), offset, size)
@@ -385,15 +416,41 @@ int __cdecl main()
 			"Parse rejects a future trailer format version");
 	}
 	{
-		// A-14: exactly one of the two magic values intact means our tail is
-		// damaged, not absent: report Corrupt (a warning) instead of NoTrailer.
-		std::vector<std::uint8_t> oneMagic = trailer;
-		oneMagic[oneMagic.size() - venture::SaveTrailer::SuffixSize] ^= 0xFF; // leading magic only
+		// The declared payload size must match the bytes that follow the header
+		// exactly: no trailing bytes, no truncation, no oversized claim.
 		std::size_t offset = 0;
 		std::size_t size = 0;
-		Check(venture::SaveTrailer::Parse(oneMagic.data(), oneMagic.size(), offset, size)
+
+		std::vector<std::uint8_t> trailing = trailer;
+		trailing.push_back(0x5A);
+		Check(venture::SaveTrailer::Parse(trailing.data(), trailing.size(), offset, size)
 				== venture::SaveTrailer::ParseResult::Corrupt,
-			"Parse reports Corrupt when only one of the two magic values matches");
+			"Parse rejects a frame with trailing bytes");
+
+		std::vector<std::uint8_t> truncated = trailer;
+		truncated.pop_back();
+		Check(venture::SaveTrailer::Parse(truncated.data(), truncated.size(), offset, size)
+				== venture::SaveTrailer::ParseResult::Corrupt,
+			"Parse rejects a frame whose payload is shorter than declared");
+
+		std::vector<std::uint8_t> oversized = trailer;
+		const std::uint32_t tooLarge = venture::SaveTrailer::MaxPayloadSize + 1;
+		std::memcpy(oversized.data() + 8, &tooLarge, sizeof(tooLarge));
+		Check(venture::SaveTrailer::Parse(oversized.data(), oversized.size(), offset, size)
+				== venture::SaveTrailer::ParseResult::Corrupt,
+			"Parse rejects a payloadSize above the 16 MiB cap");
+	}
+	{
+		// An empty payload is a valid frame: header only, zero payload bytes.
+		const std::vector<std::uint8_t> emptyTrailer = venture::SaveTrailer::WrapPayload({});
+		Check(emptyTrailer.size() == venture::SaveTrailer::HeaderSize,
+			"WrapPayload of an empty payload is exactly the header");
+		std::size_t offset = 0;
+		std::size_t size = 1;
+		Check(venture::SaveTrailer::Parse(emptyTrailer.data(), emptyTrailer.size(), offset, size)
+				== venture::SaveTrailer::ParseResult::Ok
+				&& offset == venture::SaveTrailer::HeaderSize && size == 0,
+			"Parse accepts an empty payload frame");
 	}
 
 	// ---- 3. second process: load into new objects -------------------------
@@ -548,11 +605,11 @@ int __cdecl main()
 		Check(wrote && !empty.empty(), "a registered saveable store writes an empty block");
 	}
 
-	// ---- 6. IStream writer/reader (0x67D1B4 write site, A-12) -------------
-	// The write site appends the trailer to the engine's save stream through the
-	// real IStream interface: these tests drive the writer and the reader with an
-	// in-memory stream and check the end-of-stream seek, the failure paths and the
-	// stream-position restore.
+	// ---- 6. IStream writer/reader (0x67D1B4 / 0x67F7C8, sequential only) ---
+	// The engine's savegame stream is a non-seekable streaming wrapper, so the writer
+	// appends at the current position and the reader consumes the frame sequentially:
+	// neither may depend on Seek.  These cases drive both through the real IStream
+	// vtable with a fully non-seekable fake stream.
 	{
 		venture::ExtensionIndex::Instance().ClearAll();
 		UnitClass writeUnit;
@@ -565,127 +622,186 @@ int __cdecl main()
 		const std::vector<std::uint8_t> savedTrailer = venture::SaveTrailer::WrapPayload(savedPayload);
 		Check(savedOk && !savedTrailer.empty(), "the stream test builds a non-empty trailer");
 
-		// The engine wrote its save data; another platform left the position at the
-		// stream start.  The writer must seek to EOF and append, not overwrite
-		// (A-12: a save-time stream position left anywhere else cannot corrupt it).
+		// The engine wrote its save data; the stream is a non-seekable wrapper and its
+		// position is at the end of that data when our save handler runs.
 		std::vector<std::uint8_t> engineBytes;
 		for (std::uint32_t i = 0; i < 24; ++i)
 			engineBytes.push_back(static_cast<std::uint8_t>(0x40 + i));
 
 		FakeStream written(engineBytes);
-		written.Seek(MoveTo(0), STREAM_SEEK_SET, nullptr);
+		written.SetFailSeeks(true);
+		written.SkipTo(engineBytes.size());
 		venture::SaveTrailer::Write(&written);
+		Check(written.SeekCalls() == 1,
+			"the writer only probes the stream position once (for the log)");
 		Check(written.Data().size() == engineBytes.size() + savedTrailer.size(),
-			"the writer appends exactly one trailer at the end of the stream");
+			"a non-seekable stream is appended to sequentially (no Seek dependency)");
 		Check(std::equal(engineBytes.begin(), engineBytes.end(), written.Data().begin()),
-			"the writer does not overwrite the engine's save data");
+			"the writer does not disturb the engine's save data");
 		Check(std::equal(savedTrailer.begin(), savedTrailer.end(),
 				written.Data().begin() + static_cast<std::ptrdiff_t>(engineBytes.size())),
-			"the appended bytes are the wrapped trailer");
+			"the appended bytes are the wrapped header-first trailer");
 		Check(written.Position() == static_cast<std::uint64_t>(written.Data().size()),
-			"the writer leaves the stream position at EOF");
+			"the writer leaves the stream position at the end of the appended frame");
 
-		// Round trip: a "new load" reads the written stream and restores the state;
-		// the position another platform left in the stream is restored afterwards.
+		// Round trip through the same non-seekable stream: a "new load" finds the
+		// stream exactly at the start of our frame (the other platforms' sequential
+		// readers already consumed their blocks), so the reader must not Seek either.
 		venture::ExtensionIndex::Instance().ClearAll();
-		const std::size_t enginePosition = 9;
-		written.Seek(MoveTo(static_cast<long long>(enginePosition)), STREAM_SEEK_SET, nullptr);
+		FakeStream loaded(written.Data());
+		loaded.SetFailSeeks(true);
+		loaded.SkipTo(engineBytes.size());
 		venture::ExtSave::EnterLoadWindow();
-		venture::SaveTrailer::Read(&written);
-		Check(written.Position() == enginePosition, "the reader restores the stream position");
+		venture::SaveTrailer::Read(&loaded);
+		Check(loaded.SeekCalls() == 0, "the reader does not call Seek at all");
+		Check(loaded.Position() == static_cast<std::uint64_t>(loaded.Data().size()),
+			"the reader consumes exactly the frame (the stream ends after it)");
 		Check(venture::ExtensionIndex::Instance().LoadedExtensions().size() == 1,
-			"the reader creates the stored extension instance");
+			"a non-seekable stream restores the stored extension instance");
 		const venture::ExtSave::LoadSummary adopted = venture::ExtSave::FinishLoad();
 		venture::ExtSave::ExitLoadWindow();
 		Check(adopted.adopted == 1 && adopted.failed == 0,
-			"the extension read through the IStream is adopted");
+			"the extension read from a non-seekable stream is adopted");
 		SavedUnitExt* const restored = store.Fetch(&writeUnit);
 		Check(restored != nullptr && restored->Serial == 4242,
-			"the extension state round-trips through the IStream");
-		venture::ExtensionIndex::Instance().ClearAll();
+			"the extension state round-trips without any Seek");
 
-		// A non-seekable stream is not written to (and the engine data stays intact).
-		{
-			const std::vector<std::uint8_t> base(16, 0x11);
-			FakeStream stream(base);
-			stream.SetFailSeeks(true);
-			venture::SaveTrailer::Write(&stream);
-			Check(stream.Data() == base && stream.WriteCalls() == 0,
-				"a non-seekable stream is left untouched by the writer");
-		}
-
-		// A failed write is detected; a short write is detected through the
-		// reported byte count instead of being treated as success.
+		// Short writes (legal for COM) are retried until the whole frame is out.
 		{
 			const std::vector<std::uint8_t> base(16, 0x22);
-
-			FakeStream failed(base);
-			failed.SetFailWrites(true);
-			venture::SaveTrailer::Write(&failed);
-			Check(failed.Data() == base, "a failed stream write leaves the engine data untouched");
-
 			FakeStream shortWrite(base);
+			shortWrite.SkipTo(base.size());
 			shortWrite.SetShortWrites(true);
 			venture::SaveTrailer::Write(&shortWrite);
-			Check(shortWrite.Data().size() > base.size()
-					&& shortWrite.Data().size() < base.size() + savedTrailer.size(),
-				"a short write is detected from the reported byte count");
+			std::size_t offset = 0;
+			std::size_t payloadSize = 0;
+			Check(shortWrite.WriteCalls() > 1
+					&& venture::SaveTrailer::Parse(shortWrite.Data().data() + base.size(),
+						shortWrite.Data().size() - base.size(), offset, payloadSize)
+						== venture::SaveTrailer::ParseResult::Ok,
+				"short writes are retried until the complete frame is out");
 		}
 
-		// A-13: COM allows a successful Read to return fewer bytes; the reader must
-		// retry until the trailer window is full.  A failed read or a stream that
-		// makes no progress at all is dropped with a warning and restores the
-		// position, leaving the extension state empty instead of aborting the load.
+		// A failed write or a write that reports no progress fails cleanly.
+		{
+			const std::vector<std::uint8_t> base(16, 0x22);
+			FakeStream failed(base);
+			failed.SkipTo(base.size());
+			failed.SetFailWrites(true);
+			venture::SaveTrailer::Write(&failed);
+			Check(failed.Data() == base, "a failed write leaves the stream unchanged");
+
+			FakeStream noProgress(base);
+			noProgress.SkipTo(base.size());
+			noProgress.SetZeroWrites(true);
+			venture::SaveTrailer::Write(&noProgress);
+			Check(noProgress.Data() == base && noProgress.WriteCalls() == 1,
+				"a write that makes no progress aborts instead of spinning");
+		}
+
+		// No frame at the read position: nothing is restored.  This is the normal
+		// case for a save written without this platform.
+		{
+			FakeStream noBlock(engineBytes);
+			noBlock.SkipTo(engineBytes.size());
+			venture::ExtensionIndex::Instance().EnterLoadWindow();
+			venture::SaveTrailer::Read(&noBlock);
+			venture::ExtensionIndex::Instance().ExitLoadWindow();
+			Check(venture::ExtensionIndex::Instance().LoadedExtensions().empty(),
+				"no bytes after the ecosystem blocks: no extension state restored");
+
+			FakeStream empty;
+			venture::ExtensionIndex::Instance().EnterLoadWindow();
+			venture::SaveTrailer::Read(&empty);
+			venture::ExtensionIndex::Instance().ExitLoadWindow();
+			Check(venture::ExtensionIndex::Instance().LoadedExtensions().empty(),
+				"an empty stream: no extension state restored");
+
+			FakeStream foreign(std::vector<std::uint8_t>(32, 0x5A));
+			venture::ExtensionIndex::Instance().EnterLoadWindow();
+			venture::SaveTrailer::Read(&foreign);
+			venture::ExtensionIndex::Instance().ExitLoadWindow();
+			Check(foreign.Position() == venture::SaveTrailer::HeaderSize,
+				"a foreign block is consumed up to its header, nothing more");
+			Check(venture::ExtensionIndex::Instance().LoadedExtensions().empty(),
+				"a foreign block (magic mismatch) restores no extension state");
+		}
+
+		// Corrupted frame fields: every case drops the extension state, never the
+		// game, and never reads beyond what the header claims.
 		{
 			std::vector<std::uint8_t> bytes(engineBytes);
 			bytes.insert(bytes.end(), savedTrailer.begin(), savedTrailer.end());
-			const std::size_t positionBefore = 5;
+			const std::size_t frameStart = engineBytes.size();
+
+			std::vector<std::uint8_t> badVersion = bytes;
+			const std::uint32_t future = venture::SaveTrailer::FormatVersion + 1;
+			std::memcpy(badVersion.data() + frameStart + 4, &future, sizeof(future));
+
+			std::vector<std::uint8_t> badSize = bytes;
+			const std::uint32_t tooLarge = venture::SaveTrailer::MaxPayloadSize + 1;
+			std::memcpy(badSize.data() + frameStart + 8, &tooLarge, sizeof(tooLarge));
+
+			std::vector<std::uint8_t> badCrc = bytes;
+			badCrc[frameStart + venture::SaveTrailer::HeaderSize + 1] ^= 0xFF;
+
+			std::vector<std::uint8_t> truncatedPayload = bytes;
+			truncatedPayload.pop_back();
+
+			std::vector<std::uint8_t> truncatedHeader = bytes;
+			truncatedHeader.resize(frameStart + 8);
+
+			const std::vector<std::uint8_t>* const damaged[] = {
+				&badVersion, &badSize, &badCrc, &truncatedPayload, &truncatedHeader,
+			};
+			for (const std::vector<std::uint8_t>* const frame : damaged)
+			{
+				FakeStream stream(*frame);
+				stream.SkipTo(frameStart);
+				venture::ExtensionIndex::Instance().EnterLoadWindow();
+				venture::SaveTrailer::Read(&stream);
+				venture::ExtensionIndex::Instance().ExitLoadWindow();
+				Check(venture::ExtensionIndex::Instance().LoadedExtensions().empty(),
+					"a damaged frame restores no extension state");
+			}
+		}
+
+		// Legal short reads (and no-progress / failed reads) in the sequential reader.
+		{
+			std::vector<std::uint8_t> bytes(engineBytes);
+			bytes.insert(bytes.end(), savedTrailer.begin(), savedTrailer.end());
+			const std::size_t frameStart = engineBytes.size();
 
 			FakeStream shortRead(bytes);
+			shortRead.SetFailSeeks(true);
 			shortRead.SetShortReads(true);
-			shortRead.Seek(MoveTo(static_cast<long long>(positionBefore)), STREAM_SEEK_SET, nullptr);
+			shortRead.SkipTo(frameStart);
 			venture::ExtensionIndex::Instance().EnterLoadWindow();
 			venture::SaveTrailer::Read(&shortRead);
-			Check(shortRead.Position() == positionBefore,
-				"a short read still restores the stream position");
-			Check(venture::ExtensionIndex::Instance().LoadedExtensions().size() == 1,
-				"a short read is retried until the trailer window is full (A-13)");
-			const venture::ExtSave::LoadSummary adoptedShort = venture::ExtSave::FinishLoad();
+			Check(shortRead.SeekCalls() == 0
+					&& venture::ExtensionIndex::Instance().LoadedExtensions().size() == 1,
+				"a short-reading non-seekable stream restores the extension state");
+			(void)venture::ExtSave::FinishLoad();
 			venture::ExtensionIndex::Instance().ExitLoadWindow();
-			Check(adoptedShort.adopted == 1,
-				"the extension read through short reads is adopted");
 			venture::ExtensionIndex::Instance().ClearAll();
 
 			FakeStream zeroRead(bytes);
+			zeroRead.SkipTo(frameStart);
 			zeroRead.SetZeroReads(true);
-			zeroRead.Seek(MoveTo(static_cast<long long>(positionBefore)), STREAM_SEEK_SET, nullptr);
 			venture::ExtensionIndex::Instance().EnterLoadWindow();
 			venture::SaveTrailer::Read(&zeroRead);
 			venture::ExtensionIndex::Instance().ExitLoadWindow();
-			Check(zeroRead.Position() == positionBefore,
-				"a no-progress read restores the stream position");
 			Check(venture::ExtensionIndex::Instance().LoadedExtensions().empty(),
-				"a no-progress read restores no extension state");
+				"a no-progress read drops the extension state instead of spinning");
 
 			FakeStream failedRead(bytes);
+			failedRead.SkipTo(frameStart);
 			failedRead.SetFailReads(true);
-			failedRead.Seek(MoveTo(static_cast<long long>(positionBefore)), STREAM_SEEK_SET, nullptr);
 			venture::ExtensionIndex::Instance().EnterLoadWindow();
 			venture::SaveTrailer::Read(&failedRead);
 			venture::ExtensionIndex::Instance().ExitLoadWindow();
-			Check(failedRead.Position() == positionBefore, "a read error restores the stream position");
 			Check(venture::ExtensionIndex::Instance().LoadedExtensions().empty(),
-				"a read error restores no extension state");
-
-			FakeStream noSeek(bytes);
-			noSeek.SetFailSeeks(true);
-			venture::ExtensionIndex::Instance().EnterLoadWindow();
-			venture::SaveTrailer::Read(&noSeek);
-			venture::ExtensionIndex::Instance().ExitLoadWindow();
-			Check(noSeek.Position() == 0 && noSeek.ReadCalls() == 0,
-				"the reader leaves a non-seekable stream alone");
-			Check(venture::ExtensionIndex::Instance().LoadedExtensions().empty(),
-				"a non-seekable stream restores no extension state");
+				"a failed read drops the extension state");
 		}
 
 		venture::ExtensionIndex::Instance().ClearAll();
@@ -699,7 +815,9 @@ int __cdecl main()
 	{
 		venture::ExtensionIndex::Instance().ClearAll();
 		FakeStream noTrailer(std::vector<std::uint8_t>(32, 0x5A)); // another platform's data only
-
+		// The other platforms' sequential readers consumed their blocks: our read
+		// position is the end of the stream, where no frame starts.
+		noTrailer.SkipTo(noTrailer.Data().size());
 		venture::ExtSave::EnterLoadWindow();
 		UnitClass deferredUnit;
 		Check(store.Allocate(&deferredUnit) == nullptr && store.Size() == 0,

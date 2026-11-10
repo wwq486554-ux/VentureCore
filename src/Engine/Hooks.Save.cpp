@@ -10,15 +10,17 @@
 #include "Ext/ExtSwizzle.h"
 
 // ---------------------------------------------------------------------------
-// Savegame hooks: the platform's extension state travels in an anchored tail
-// block (see src/Core/SaveTrailer.h and docs/SaveFormat.md).
+// Savegame hooks: the platform's extension state travels in a framed tail block
+// that is appended and read strictly sequentially (the engine's savegame IStream
+// is a streaming wrapper that does not implement Seek - see
+// src/Core/SaveTrailer.h and docs/SaveFormat.md).
 //
 // The save/load sites are the ecosystem's shared ones:
 //   * 0x67D1B4  - inside ScenarioClass::SaveGame, after the engine's object-state
 //                 writer (`call 0x67D300` at 0x67D1AF) has returned and before
 //                 the finalize/Commit step at 0x67D1CC: the data stream is still
 //                 writable there, and writing after the Commit is not guaranteed
-//                 to reach the file.  The ecosystem's anchored tail sites live
+//                 to reach the file.  The ecosystem's tail-block sites live
 //                 *inside* the routine we just called (Ares and Kratos hook
 //                 0x67E42E there); Ares's handler always returns a jump address,
 //                 so that address can never host our writer - in a process with
@@ -34,12 +36,16 @@
 //                 `xor al,al` and leaves the (negative) HRESULT in the upper 24
 //                 bits, while the success tail executes `setge al`; the engine
 //                 itself consumes only AL (`mov bl,al`).  AL == 0 = the save
-//                 failed, do not append.
+//                 failed, do not append.  The append is sequential: the engine's
+//                 savegame stream does not support Seek, and this handler runs
+//                 after every ecosystem writer, so the current position is the
+//                 end of the save data.
 //   * 0x67F7C8 - end of the engine's load-objects routine, after every platform's
-//                 sequential reader (Ares/Kratos also read here).  We seek to the
-//                 end of the stream, validate the trailer, read it and restore the
-//                 stream position, so we neither depend on nor disturb the other
-//                 platforms' block order.
+//                 sequential reader (Ares/Kratos also read here).  We read the
+//                 trailer sequentially from the current position - which is exactly
+//                 our block, because our handler runs after every other platform's
+//                 reader - validate it and hand the payload to the load layer.  No
+//                 Seek and no position restore (the stream cannot seek).
 //   * 0x67E44D/0x67E68A - the engine's load window open/close.  While it is open,
 //                 allocations driven by object constructors are deferred, because
 //                 the trailer may carry an extension for the same owner.

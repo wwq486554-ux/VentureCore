@@ -342,15 +342,16 @@ discarded: commands ship unbound and the player binds them.  Details:
 
 ## Savegame trailer binding
 
-Extension state is persisted through the platform's anchored tail block; the
-format and the load sequence are documented in `docs/SaveFormat.md`.  The binding
-side:
+Extension state is persisted through the platform's framed tail block, which is
+appended and read strictly sequentially (the engine's savegame stream is not
+seekable); the format and the load sequence are documented in
+`docs/SaveFormat.md`.  The binding side:
 
 | Engine site | Handler | Effect |
 | --- | --- | --- |
-| `0x67D1B4` (after the engine's object-state writer, before the finalize/Commit) | `Venture_SaveGame_Trailer` | builds the extension payload, seeks to the stream end and appends `[payload][suffix]` after every platform's block; skipped when the writer's BOOL result (`AL` of `EAX`) is 0 or when no store carries state |
+| `0x67D1B4` (after the engine's object-state writer, before the finalize/Commit) | `Venture_SaveGame_Trailer` | builds the extension payload and appends the header-first frame `[header][payload]` sequentially - no `Seek`: this site runs after every ecosystem writer, so the current position is the end of the save data; skipped when the writer's BOOL result (`AL` of `EAX`) is 0 or when no store carries state |
 | `0x67E44D` (load window open) | `Venture_LoadGame_Begin` | defers allocations driven by object constructors |
-| `0x67F7C8` (end of the load routine) | `Venture_LoadGame_Trailer` | backwards scan of the stream, trailer validation, payload read, stream position restored |
+| `0x67F7C8` (end of the load routine) | `Venture_LoadGame_Trailer` | sequential read of the frame from the current position (our handler runs after every ecosystem reader, so this is exactly our block; no `Seek`), header/CRC validation, payload read |
 | `0x67E685` (after the swizzle pass) | `Venture_LoadGame_PostSwizzle` | adopts the restored instances (owner pointers remapped), `PostLoad()`, deferred allocations |
 | `0x67E68A` (load window close) | `Venture_LoadGame_End` | resumes normal allocation |
 
@@ -359,13 +360,14 @@ which `src/Engine/Hooks.Save.cpp` installs on the first save/load hook - the
 extension layer itself stays engine-free (and unit-testable with a fake swizzle
 manager).
 
-Write order is the critical constraint: the trailer must be the last block in the
-stream.  The writer is installed at `0x67D1B4`, a site no known platform hooks
-that runs after the engine's object-state writer - the routine containing the
-tail site Ares owns (`0x67E42E`, whose handler always jumps away).  The block is
-therefore last regardless of handler order, and `SaveTrailer::Write` seeks to the
-stream end before appending.  `docs/SaveFormat.md` records the failure mode for a
-future platform that writes after this site.
+Order is the critical constraint on both sides, and the stream cannot seek, so
+both are sequential: the writer is installed at `0x67D1B4`, a site no known
+platform hooks that runs after the engine's object-state writer - the routine
+containing the tail site Ares owns (`0x67E42E`, whose handler always jumps away) -
+so the append puts our block last regardless of handler order.  The reader runs at
+`0x67F7C8` after every ecosystem sequential reader (our DLL name sorts after the
+known platforms), so it starts exactly at our frame.  `docs/SaveFormat.md` records
+the failure mode for a platform outside that order.
 
 ## Logging
 

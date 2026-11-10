@@ -12,51 +12,63 @@ namespace venture::SaveTrailer
 // Platform-owned savegame tail block.
 //
 // Every platform in the ecosystem appends its own opaque block to the engine's
-// savegame stream.  This platform appends one **anchored trailer** after all of
-// them; the reader finds it by scanning backwards from the end of the stream, so
-// the reading side does not depend on which other platforms wrote blocks before
-// us, and a save from a game without this platform simply has no trailer
-// (self-healing for old saves).
+// savegame stream.  This platform appends one **framed trailer** after all of
+// them.  The engine's savegame IStream is a streaming wrapper around the OLE
+// CONTENTS stream and **does not implement Seek**, so both sides of this layer are
+// strictly sequential:
+//   * the writer appends at the current stream position - which is the end of the
+//     save data when our save handler runs, because it runs after every ecosystem
+//     writer (they write inside the engine's object-state writer or at 0x67E42E
+//     inside it);
+//   * the reader reads the frame where the previous sequential readers left the
+//     stream - our load handler runs last in the ecosystem order, so that position
+//     is the start of our frame.
+// There is no backwards scan and no position restore.  The only Seek call in this
+// layer is an optional, failure-tolerant position probe used for one log line.
 //
-// On-stream layout:
+// On-stream layout (header first, 16-byte header):
 //
-//   [payload][magic "VNC1"][formatVersion][payloadSize][crc32][magic "VNC1"]
+//   [magic "VNC1"][formatVersion][payloadSize][crc32][payload]
 //
 // `payload` is the extension payload from Ext/ExtSave.h and `crc32` covers it
-// (standard IEEE 802.3 CRC-32).  The 20-byte suffix is fixed size, so the frame
-// can be validated with a single backwards read.
+// (standard IEEE 802.3 CRC-32).  The header is fixed size, so the reader validates
+// the frame before reading the payload.
 //
-// Write order: the writer runs at 0x67D1B4 - after the engine's object-state
-// writer has returned and before the engine finalizes/commits the storage - at a
-// site no known platform hooks, so our block lands after every platform's block
-// (including Ares's: its handler at 0x67E42E always jumps away and runs before
-// this site).  The writer seeks to the end of the stream before appending, so a
-// stream position left anywhere else by another writer cannot make it overwrite
-// data.  A future platform whose handler ran after this site would hide the
-// trailer; the reader then reports a corrupt trailer and keeps the game running.
+// Order contract: at save our handler at 0x67D1B4 runs after every ecosystem
+// writer, so a sequential append makes our block the last one.  At load our
+// handler at 0x67F7C8 must run after every ecosystem reader for the same reason;
+// that holds because `VentureCore.dll` sorts after the known platform DLLs
+// (Ares/Kratos/Kaleidoscope/Mix/Phobos).  A future platform whose DLL name sorts
+// after this one would gain a reader after ours and break the alignment - see
+// docs/SaveFormat.md.
 //
-// Host compatibility: block reading is order-independent (backwards scan +
-// position restore), but only the party that wrote the save can read a save that
-// contains our trailer.  Removing our DLL later still loads old saves normally
-// (no trailer found).
+// Host compatibility: a game running without this platform ignores the block
+// (nothing reads it; it stays unread at the end of the stream), and a save that
+// carries no frame simply has no extension data (old save, or a save made without
+// this platform).
 // ---------------------------------------------------------------------------
 constexpr std::uint32_t Magic = 0x31434E56u;  // bytes 'V' 'N' 'C' '1'
-constexpr std::uint32_t FormatVersion = 1;
-constexpr std::size_t SuffixSize = 20;        // 5 x u32
+constexpr std::uint32_t FormatVersion = 2;    // header-first sequential frame
+constexpr std::size_t HeaderSize = 16;        // 4 x u32
 constexpr std::uint32_t MaxPayloadSize = 16u * 1024u * 1024u;
 
 enum class ParseResult
 {
-	NoTrailer,  // no trailer (or somebody else's tail) - old save, nothing to do
-	Corrupt,    // our magic is there but the frame is unusable
+	NoTrailer,  // buffer too small to hold the fixed header (parser-only state)
+	Corrupt,    // a full frame is present but magic/version/size/CRC is wrong
 	Ok,
 };
 
 // Pure framing helpers (unit-tested without the engine).
 std::vector<std::uint8_t> WrapPayload(const std::vector<std::uint8_t>& payload);
+
+// Strict frame validation: magic, format version, payloadSize must equal
+// `size - HeaderSize` exactly, and the CRC must cover the payload.  Only a buffer
+// smaller than the header is reported as NoTrailer; everything else is Corrupt.
 ParseResult Parse(const std::uint8_t* data, std::size_t size, std::size_t& payloadOffset, std::size_t& payloadSize);
 
-// Engine driver, called from src/Engine/Hooks.Save.cpp.
+// Engine driver, called from src/Engine/Hooks.Save.cpp.  Fully sequential: the
+// savegame stream is not seekable and neither function depends on Seek.
 void Write(IStream* stream);
 void Read(IStream* stream);
 void FinishLoad();

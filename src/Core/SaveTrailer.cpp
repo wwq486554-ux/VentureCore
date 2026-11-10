@@ -12,30 +12,48 @@
 
 namespace
 {
-void RestorePosition(IStream* const stream, const ULARGE_INTEGER& position)
+std::uint32_t LoadU32(const std::uint8_t* const data)
 {
-	LARGE_INTEGER move{};
-	move.QuadPart = static_cast<LONGLONG>(position.QuadPart);
-
-	// A-14: the position restore is best effort for the savegame load; a stream
-	// that cannot seek back means the other platforms' sequential readers may
-	// misread the save, so report it instead of silently continuing.
-	if (FAILED(stream->Seek(move, STREAM_SEEK_SET, nullptr)))
-	{
-		venture::Log::Warn("savegame: could not restore the stream position - "
-			"other platforms may misread this save");
-	}
+	std::uint32_t value = 0;
+	std::memcpy(&value, data, sizeof(value));
+	return value;
 }
 
-const char* ParseResultName(const venture::SaveTrailer::ParseResult result)
+// Writes the whole buffer sequentially.  IStream::Write may legally accept fewer
+// bytes than requested, so loop until everything is out.  A failed write or a
+// write that reports no progress aborts (do not spin on a broken stream).
+bool WriteAll(IStream* const stream, const std::uint8_t* const data, const std::size_t size)
 {
-	switch (result)
+	std::size_t totalWritten = 0;
+	while (totalWritten < size)
 	{
-	case venture::SaveTrailer::ParseResult::NoTrailer: return "no trailer";
-	case venture::SaveTrailer::ParseResult::Corrupt:   return "corrupt trailer";
-	case venture::SaveTrailer::ParseResult::Ok:        return "ok";
-	default:                                           return "?";
+		ULONG written = 0;
+		const HRESULT result = stream->Write(data + totalWritten,
+			static_cast<ULONG>(size - totalWritten), &written);
+		if (FAILED(result) || written == 0)
+			return false;
+		totalWritten += written;
 	}
+	return true;
+}
+
+// Reads exactly `size` bytes sequentially, tolerating legal COM short reads.
+// `totalRead` reports the progress made; false means a failed read or EOF / no
+// progress (with totalRead == 0 that is "nothing at this position").
+bool ReadAll(IStream* const stream, std::uint8_t* const data, const std::size_t size,
+	std::size_t& totalRead)
+{
+	totalRead = 0;
+	while (totalRead < size)
+	{
+		ULONG chunk = 0;
+		const HRESULT result = stream->Read(data + totalRead,
+			static_cast<ULONG>(size - totalRead), &chunk);
+		if (FAILED(result) || chunk == 0)
+			return false;
+		totalRead += chunk;
+	}
+	return true;
 }
 }
 
@@ -49,18 +67,17 @@ static_assert(MaxPayloadSize == ExtSave::MaxPayloadSize,
 std::vector<std::uint8_t> WrapPayload(const std::vector<std::uint8_t>& payload)
 {
 	std::vector<std::uint8_t> out;
-	out.reserve(payload.size() + SuffixSize);
+	out.reserve(HeaderSize + payload.size());
+
+	ExtByteStreamWriter writerHeader;
+	writerHeader.WriteU32(Magic);
+	writerHeader.WriteU32(FormatVersion);
+	writerHeader.WriteU32(static_cast<std::uint32_t>(payload.size()));
+	writerHeader.WriteU32(ExtCrc32(payload.empty() ? nullptr : payload.data(), payload.size()));
+
+	const auto& header = writerHeader.Data();
+	out.insert(out.end(), header.begin(), header.end());
 	out.insert(out.end(), payload.begin(), payload.end());
-
-	ExtByteStreamWriter writerSuffix;
-	writerSuffix.WriteU32(Magic);
-	writerSuffix.WriteU32(FormatVersion);
-	writerSuffix.WriteU32(static_cast<std::uint32_t>(payload.size()));
-	writerSuffix.WriteU32(ExtCrc32(payload.empty() ? nullptr : payload.data(), payload.size()));
-	writerSuffix.WriteU32(Magic);
-
-	const auto& suffix = writerSuffix.Data();
-	out.insert(out.end(), suffix.begin(), suffix.end());
 	return out;
 }
 
@@ -70,49 +87,27 @@ ParseResult Parse(const std::uint8_t* const data, const std::size_t size,
 	payloadOffset = 0;
 	payloadSize = 0;
 
-	if (!data || size < SuffixSize)
+	if (!data || size < HeaderSize)
 		return ParseResult::NoTrailer;
 
-	const std::uint8_t* const suffix = data + size - SuffixSize;
+	const std::uint32_t magic = LoadU32(data);
+	const std::uint32_t formatVersion = LoadU32(data + 4);
+	const std::uint32_t storedPayloadSize = LoadU32(data + 8);
+	const std::uint32_t storedCrc = LoadU32(data + 12);
 
-	std::uint32_t magicBefore = 0;
-	std::uint32_t formatVersion = 0;
-	std::uint32_t storedPayloadSize = 0;
-	std::uint32_t storedCrc = 0;
-	std::uint32_t magicAfter = 0;
-
-	std::memcpy(&magicBefore, suffix, sizeof(magicBefore));
-	std::memcpy(&formatVersion, suffix + 4, sizeof(formatVersion));
-	std::memcpy(&storedPayloadSize, suffix + 8, sizeof(storedPayloadSize));
-	std::memcpy(&storedCrc, suffix + 12, sizeof(storedCrc));
-	std::memcpy(&magicAfter, suffix + 16, sizeof(magicAfter));
-
-	// A-14: our frame has two magic values; if exactly one matches, the tail is a
-	// damaged copy of our trailer rather than "no trailer" - report Corrupt (a
-	// warning) instead of silently treating the save as written without us.
-	const bool magicBeforeMatches = magicBefore == Magic;
-	const bool magicAfterMatches = magicAfter == Magic;
-
-	if (!magicBeforeMatches && !magicAfterMatches)
-		return ParseResult::NoTrailer;
-
-	if (!magicBeforeMatches || !magicAfterMatches)
+	if (magic != Magic || formatVersion != FormatVersion)
 		return ParseResult::Corrupt;
 
-	if (formatVersion != FormatVersion)
+	if (storedPayloadSize > MaxPayloadSize || storedPayloadSize != size - HeaderSize)
 		return ParseResult::Corrupt;
-
-	if (storedPayloadSize > MaxPayloadSize || storedPayloadSize > size - SuffixSize)
-		return ParseResult::Corrupt;
-
-	payloadOffset = size - SuffixSize - storedPayloadSize;
-	payloadSize = storedPayloadSize;
 
 	const std::uint32_t actualCrc = ExtCrc32(
-		payloadSize == 0 ? nullptr : data + payloadOffset, payloadSize);
+		storedPayloadSize == 0 ? nullptr : data + HeaderSize, storedPayloadSize);
 	if (actualCrc != storedCrc)
 		return ParseResult::Corrupt;
 
+	payloadOffset = HeaderSize;
+	payloadSize = storedPayloadSize;
 	return ParseResult::Ok;
 }
 
@@ -150,30 +145,36 @@ void Write(IStream* const stream)
 
 	const std::vector<std::uint8_t> bytes = WrapPayload(payload);
 
-	// Append at the end of the stream: the engine's save data ends where its
-	// object-state writer stopped, but another platform may have moved the stream
-	// position, and writing at the current position would overwrite its bytes.
+	// Sequential append: the engine's savegame stream does not support Seek, and
+	// this handler runs after every ecosystem writer, so the current position is the
+	// end of the save data.  No Seek is needed (or possible) to append.
+	if (!WriteAll(stream, bytes.data(), bytes.size()))
+	{
+		Log::Error("savegame trailer: could not write the %u byte trailer - save written without extension state",
+			static_cast<unsigned>(bytes.size()));
+		return;
+	}
+
+	// Optional position probe for the log only.  The engine's stream is a
+	// non-seekable streaming wrapper, so this call normally fails; the trailer has
+	// already been appended and that is not an error.
 	LARGE_INTEGER zero{};
 	zero.QuadPart = 0;
 	ULARGE_INTEGER position{};
-	if (FAILED(stream->Seek(zero, STREAM_SEEK_END, &position)))
+	if (SUCCEEDED(stream->Seek(zero, STREAM_SEEK_CUR, &position)))
 	{
-		Log::Warn("savegame trailer: the stream is not seekable - not appended");
-		return;
+		Log::Info("savegame trailer: offset=0x%08X%08X size=%u payload=%u store-block(s)=%u",
+			static_cast<unsigned>(position.QuadPart >> 32),
+			static_cast<unsigned>(position.QuadPart & 0xFFFFFFFFu),
+			static_cast<unsigned>(bytes.size()), static_cast<unsigned>(payload.size()),
+			static_cast<unsigned>(storeBlocks));
 	}
-
-	ULONG written = 0;
-	const HRESULT result = stream->Write(bytes.data(), static_cast<ULONG>(bytes.size()), &written);
-	if (FAILED(result) || written != bytes.size())
+	else
 	{
-		Log::Error("savegame trailer: could not write %u bytes (hr=0x%08X, written=%u)",
-			static_cast<unsigned>(bytes.size()), static_cast<unsigned>(result), static_cast<unsigned>(written));
-		return;
+		Log::Info("savegame trailer: offset=unknown size=%u payload=%u store-block(s)=%u",
+			static_cast<unsigned>(bytes.size()), static_cast<unsigned>(payload.size()),
+			static_cast<unsigned>(storeBlocks));
 	}
-
-	Log::Info("savegame trailer: offset=0x%08X%08X size=%u payload=%u store-block(s)=%u",
-		static_cast<unsigned>(position.QuadPart >> 32), static_cast<unsigned>(position.QuadPart & 0xFFFFFFFFu),
-		static_cast<unsigned>(bytes.size()), static_cast<unsigned>(payload.size()), static_cast<unsigned>(storeBlocks));
 }
 
 void Read(IStream* const stream)
@@ -181,96 +182,75 @@ void Read(IStream* const stream)
 	if (!stream)
 		return;
 
-	LARGE_INTEGER zero{};
-	zero.QuadPart = 0;
-	ULARGE_INTEGER current{};
-	if (FAILED(stream->Seek(zero, STREAM_SEEK_CUR, &current)))
+	// The frame is read from the current position - our load handler runs after
+	// every ecosystem reader, so this is exactly where their sequential reads left
+	// the stream, i.e. the start of our block (if the save carries one).
+	std::uint8_t header[HeaderSize] = {};
+	std::size_t headerRead = 0;
+	if (!ReadAll(stream, header, sizeof(header), headerRead))
 	{
-		Log::Warn("savegame: the stream is not seekable - extension state not restored");
+		if (headerRead == 0)
+			Log::Info("savegame: no extension trailer (save written without this platform)");
+		else
+			Log::Warn("savegame: truncated extension trailer header (%u of %u bytes) - extension state starts empty",
+				static_cast<unsigned>(headerRead), static_cast<unsigned>(sizeof(header)));
 		return;
 	}
 
-	ULARGE_INTEGER end{};
-	if (FAILED(stream->Seek(zero, STREAM_SEEK_END, &end)))
+	const std::uint32_t magic = LoadU32(header);
+	if (magic != Magic)
 	{
-		RestorePosition(stream, current);
+		// The next block belongs to another platform (or there is no block).  This
+		// is not an error: a save written without this platform has no frame here.
+		Log::Info("savegame: no extension trailer (the stream continues with 0x%08X, not our block)",
+			static_cast<unsigned>(magic));
 		return;
 	}
 
-	if (end.QuadPart < SuffixSize)
+	const std::uint32_t formatVersion = LoadU32(header + 4);
+	if (formatVersion != FormatVersion)
 	{
-		RestorePosition(stream, current);
-		Log::Info("savegame: no extension trailer (save written without this platform)");
+		Log::Warn("savegame: extension trailer format version %u is not supported (expected %u) - "
+			"extension state dropped",
+			static_cast<unsigned>(formatVersion), static_cast<unsigned>(FormatVersion));
 		return;
 	}
 
-	// Read the largest possible trailer region (payload limit + suffix) from the
-	// end of the stream and parse it in memory; the stream position is restored
-	// afterwards so the other platforms' sequential readers are not disturbed.
-	const std::size_t available =
-		end.QuadPart > static_cast<unsigned long long>(MaxPayloadSize) + SuffixSize
-			? static_cast<std::size_t>(MaxPayloadSize) + SuffixSize
-			: static_cast<std::size_t>(end.QuadPart);
-
-	LARGE_INTEGER back{};
-	back.QuadPart = -static_cast<LONGLONG>(available);
-	if (FAILED(stream->Seek(back, STREAM_SEEK_END, nullptr)))
+	const std::uint32_t storedPayloadSize = LoadU32(header + 8);
+	if (storedPayloadSize > MaxPayloadSize)
 	{
-		RestorePosition(stream, current);
+		Log::Warn("savegame: extension trailer payload size %u exceeds the %u byte limit - "
+			"extension state dropped",
+			static_cast<unsigned>(storedPayloadSize), static_cast<unsigned>(MaxPayloadSize));
 		return;
 	}
 
-	std::vector<std::uint8_t> buffer(available);
-
-	// A-13: COM allows a successful Read to return fewer bytes than requested (a
-	// legitimate short read).  Loop until the whole window is in memory; only a
-	// failed read or a read that makes no progress at all aborts the trailer read.
-	std::size_t totalRead = 0;
-	HRESULT readResult = S_OK;
-	while (totalRead < available)
+	std::vector<std::uint8_t> payload(storedPayloadSize);
+	if (storedPayloadSize != 0)
 	{
-		ULONG chunk = 0;
-		readResult = stream->Read(buffer.data() + totalRead,
-			static_cast<ULONG>(available - totalRead), &chunk);
-
-		if (FAILED(readResult))
-			break;
-
-		if (chunk == 0)
-			break; // no progress: do not spin on a broken stream
-
-		totalRead += chunk;
+		std::size_t payloadRead = 0;
+		if (!ReadAll(stream, payload.data(), storedPayloadSize, payloadRead))
+		{
+			Log::Warn("savegame: truncated extension trailer payload (%u of %u bytes) - "
+				"extension state starts empty",
+				static_cast<unsigned>(payloadRead), static_cast<unsigned>(storedPayloadSize));
+			return;
+		}
 	}
 
-	RestorePosition(stream, current);
-
-	if (FAILED(readResult) || totalRead != available)
+	const std::uint32_t storedCrc = LoadU32(header + 12);
+	const std::uint32_t actualCrc = ExtCrc32(
+		storedPayloadSize == 0 ? nullptr : payload.data(), storedPayloadSize);
+	if (actualCrc != storedCrc)
 	{
-		Log::Warn("savegame: could not read the trailer region (hr=0x%08X, read=%u of %u)",
-			static_cast<unsigned>(readResult), static_cast<unsigned>(totalRead),
-			static_cast<unsigned>(available));
-		return;
-	}
-
-	std::size_t payloadOffset = 0;
-	std::size_t payloadSize = 0;
-	const ParseResult parsed = Parse(buffer.data(), buffer.size(), payloadOffset, payloadSize);
-
-	if (parsed == ParseResult::NoTrailer)
-	{
-		Log::Info("savegame: no extension trailer (save written without this platform)");
-		return;
-	}
-
-	if (parsed == ParseResult::Corrupt)
-	{
-		Log::Warn("savegame: extension trailer rejected (%s) - extension state starts empty",
-			ParseResultName(parsed));
+		Log::Warn("savegame: extension trailer CRC mismatch (stored 0x%08X, computed 0x%08X) - "
+			"extension state starts empty",
+			static_cast<unsigned>(storedCrc), static_cast<unsigned>(actualCrc));
 		return;
 	}
 
 	const ExtSave::LoadSummary summary =
-		ExtSave::ReadPayload(VC_SAVEGAME_ID, buffer.data() + payloadOffset, payloadSize);
+		ExtSave::ReadPayload(VC_SAVEGAME_ID, payload.data(), payload.size());
 
 	switch (summary.result)
 	{
