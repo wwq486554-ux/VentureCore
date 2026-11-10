@@ -1,5 +1,6 @@
 #include "Ext/ExtensionIndex.h"
 
+#include "Core/Log.h"
 #include "Ext/AbstractExt.h"
 
 #include <algorithm>
@@ -51,13 +52,37 @@ AbstractExt* ExtensionIndex::Fetch(const AbstractClass* const owner) const
 
 void ExtensionIndex::RegisterStore(const ExtStoreDesc* const desc)
 {
-	if (!desc || desc->typeId == 0 || !desc->clear)
+	if (!desc)
+	{
+		Log::Error("extension store registration rejected: null descriptor");
 		return;
+	}
+
+	if (desc->typeId == 0 || !desc->clear)
+	{
+		Log::Error("extension store registration rejected: store \"%s\" has typeId=0 or no clear callback",
+			desc->name ? desc->name : "?");
+		return;
+	}
 
 	for (const ExtStoreDesc* const existing : m_stores)
 	{
 		if (existing == desc)
+			return; // idempotent re-registration of the same store
+
+		if (existing->typeId == desc->typeId)
+		{
+			// A-10: the type id keys the store in the payload and in FindStore; two
+			// stores with the same id would silently split ownership of a block
+			// between them (the first registered store wins every lookup).  Keep the
+			// original store and refuse the duplicate - this is a feature
+			// composition error, not a recoverable condition.
+			Log::Error("extension store registration rejected: type id %u is already registered by \"%s\" (duplicate store \"%s\")",
+				static_cast<unsigned>(desc->typeId),
+				existing->name ? existing->name : "?",
+				desc->name ? desc->name : "?");
 			return;
+		}
 	}
 
 	m_stores.push_back(desc);

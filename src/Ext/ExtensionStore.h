@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cassert>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
@@ -48,6 +49,8 @@ class ExtensionStore
 	static_assert(std::is_base_of_v<AbstractClass, TOwner>, "TOwner must derive from AbstractClass");
 	static_assert(TExt::TypeId >= AbstractExt::FirstUserTypeId,
 		"a platform extension class must use TypeId >= AbstractExt::FirstUserTypeId (0x0100)");
+	static_assert(TExt::TypeId <= 0xFFFFu,
+		"the savegame row canary keeps the low 16 bits of TypeId - keep extension type ids <= 0xFFFF");
 	static_assert(std::is_constructible_v<TExt, AbstractClass*>,
 		"an extension class constructor must accept AbstractClass* (the store also constructs it while loading a savegame)");
 
@@ -68,9 +71,12 @@ public:
 	// Marks the store as participating in the savegame trailer.  `dataVersion`
 	// identifies the byte layout of the store's rows; bump it when a field is
 	// added/removed so old saves are rejected for this store instead of being
-	// misread.
+	// misread.  The version is part of the row canary, which keeps its low 16
+	// bits (see RowCanary()).
 	void SetSaveable(const bool saveable, const std::uint32_t dataVersion = 1)
 	{
+		assert(dataVersion <= 0xFFFFu
+			&& "the savegame row canary keeps the low 16 bits of dataVersion - keep it small");
 		m_desc.saveable = saveable;
 		m_desc.dataVersion = dataVersion;
 	}
@@ -165,9 +171,21 @@ public:
 	}
 
 private:
-	// Canary written into every saved row: rejects a trailer whose store rows
-	// come from a different extension class layout.
-	static constexpr std::uint32_t kCanary = 0x56430000u | (TExt::TypeId & 0xFFFFu);
+	// Canary written into every saved row.  It identifies the extension class AND
+	// the store's row layout version, so a Save()/Load() drift (fields added or
+	// removed without bumping dataVersion) is rejected instead of misread:
+	//
+	//   RowCanary(version) = 0x56430000 ^ (TypeId & 0xFFFF) ^ ((version & 0xFFFF) << 16)
+	//
+	// Low 16 bits are the TypeId, high 16 bits the row version with the "VC" magic
+	// folded into the high half.  The mapping is injective for TypeId and
+	// dataVersion that fit 16 bits (enforced by the static_assert/assert above);
+	// docs/SaveFormat.md documents the formula.
+	static constexpr std::uint32_t RowCanary(const std::uint32_t dataVersion)
+	{
+		return 0x56430000u ^ (static_cast<std::uint32_t>(TExt::TypeId) & 0xFFFFu)
+			^ ((dataVersion & 0xFFFFu) << 16);
+	}
 
 	ExtensionStore()
 	{
@@ -270,7 +288,7 @@ private:
 			// The owner's save-time address: the loader registers the owner slot
 			// for the engine's swizzle pass.
 			stream.WritePointer(ext->Owner());
-			stream.WriteU32(kCanary);
+			stream.WriteU32(RowCanary(store.m_desc.dataVersion));
 
 			ExtByteStreamWriter data;
 			ext->Save(data);
@@ -297,9 +315,9 @@ private:
 				|| !stream.ReadU32(canary) || !stream.ReadU32(dataSize))
 				return;
 
-			if (canary != kCanary)
+			if (canary != RowCanary(Instance().m_desc.dataVersion))
 			{
-				// Wrong extension class / format: reject the whole block.
+				// Wrong extension class / row layout version: reject the whole block.
 				stream.Fail();
 				return;
 			}
@@ -333,7 +351,11 @@ private:
 
 			ExtByteStreamReader rowReader(data.data(), data.size());
 			ext->Load(rowReader);
-			if (!rowReader.Ok())
+			// A-09: the row must be consumed exactly.  A Load() that reads fewer
+			// bytes than Save() wrote is a layout drift; trailing bytes in the row
+			// (or a short read) mean the row cannot be interpreted safely, so the
+			// whole payload is rejected instead of silently restored in part.
+			if (!rowReader.Ok() || rowReader.Remaining() != 0)
 			{
 				delete ext;
 				stream.Fail();

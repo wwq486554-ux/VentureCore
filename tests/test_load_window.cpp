@@ -6,7 +6,7 @@
 // exits, reset it on scenario clear, and drop a deferred entry when the engine
 // invalidates the owner pointer.
 //
-// TEST_DEPS: src/Ext/AbstractExt.cpp src/Ext/ExtensionIndex.cpp
+// TEST_DEPS: src/Ext/AbstractExt.cpp src/Ext/ExtensionIndex.cpp src/Core/Log.cpp src/Core/PlatformPaths.cpp
 
 #include <cstdint>
 #include <cstdio>

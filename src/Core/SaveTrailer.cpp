@@ -16,7 +16,15 @@ void RestorePosition(IStream* const stream, const ULARGE_INTEGER& position)
 {
 	LARGE_INTEGER move{};
 	move.QuadPart = static_cast<LONGLONG>(position.QuadPart);
-	stream->Seek(move, STREAM_SEEK_SET, nullptr);
+
+	// A-14: the position restore is best effort for the savegame load; a stream
+	// that cannot seek back means the other platforms' sequential readers may
+	// misread the save, so report it instead of silently continuing.
+	if (FAILED(stream->Seek(move, STREAM_SEEK_SET, nullptr)))
+	{
+		venture::Log::Warn("savegame: could not restore the stream position - "
+			"other platforms may misread this save");
+	}
 }
 
 const char* ParseResultName(const venture::SaveTrailer::ParseResult result)
@@ -79,8 +87,17 @@ ParseResult Parse(const std::uint8_t* const data, const std::size_t size,
 	std::memcpy(&storedCrc, suffix + 12, sizeof(storedCrc));
 	std::memcpy(&magicAfter, suffix + 16, sizeof(magicAfter));
 
-	if (magicBefore != Magic || magicAfter != Magic)
+	// A-14: our frame has two magic values; if exactly one matches, the tail is a
+	// damaged copy of our trailer rather than "no trailer" - report Corrupt (a
+	// warning) instead of silently treating the save as written without us.
+	const bool magicBeforeMatches = magicBefore == Magic;
+	const bool magicAfterMatches = magicAfter == Magic;
+
+	if (!magicBeforeMatches && !magicAfterMatches)
 		return ParseResult::NoTrailer;
+
+	if (!magicBeforeMatches || !magicAfterMatches)
+		return ParseResult::Corrupt;
 
 	if (formatVersion != FormatVersion)
 		return ParseResult::Corrupt;
@@ -204,15 +221,34 @@ void Read(IStream* const stream)
 	}
 
 	std::vector<std::uint8_t> buffer(available);
-	ULONG read = 0;
-	const HRESULT readResult = stream->Read(buffer.data(), static_cast<ULONG>(available), &read);
+
+	// A-13: COM allows a successful Read to return fewer bytes than requested (a
+	// legitimate short read).  Loop until the whole window is in memory; only a
+	// failed read or a read that makes no progress at all aborts the trailer read.
+	std::size_t totalRead = 0;
+	HRESULT readResult = S_OK;
+	while (totalRead < available)
+	{
+		ULONG chunk = 0;
+		readResult = stream->Read(buffer.data() + totalRead,
+			static_cast<ULONG>(available - totalRead), &chunk);
+
+		if (FAILED(readResult))
+			break;
+
+		if (chunk == 0)
+			break; // no progress: do not spin on a broken stream
+
+		totalRead += chunk;
+	}
 
 	RestorePosition(stream, current);
 
-	if (FAILED(readResult) || read != available)
+	if (FAILED(readResult) || totalRead != available)
 	{
-		Log::Warn("savegame: could not read the trailer region (hr=0x%08X, read=%u)",
-			static_cast<unsigned>(readResult), static_cast<unsigned>(read));
+		Log::Warn("savegame: could not read the trailer region (hr=0x%08X, read=%u of %u)",
+			static_cast<unsigned>(readResult), static_cast<unsigned>(totalRead),
+			static_cast<unsigned>(available));
 		return;
 	}
 

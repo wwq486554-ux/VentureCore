@@ -13,7 +13,7 @@
 // The numbers are the "before/after" evidence for the store container design;
 // the measured container is documented in docs/EngineBindings.md.
 //
-// TEST_DEPS: src/Ext/AbstractExt.cpp src/Ext/ExtensionIndex.cpp
+// TEST_DEPS: src/Ext/AbstractExt.cpp src/Ext/ExtensionIndex.cpp src/Core/Log.cpp src/Core/PlatformPaths.cpp
 
 #include <cstdint>
 #include <cstdio>

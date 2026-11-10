@@ -113,6 +113,7 @@ public:
 	void SetShortWrites(const bool shortWrites) { m_shortWrites = shortWrites; }
 	void SetFailReads(const bool fail) { m_failReads = fail; }
 	void SetShortReads(const bool shortReads) { m_shortReads = shortReads; }
+	void SetZeroReads(const bool zeroReads) { m_zeroReads = zeroReads; }
 	void SetFailSeeks(const bool fail) { m_failSeeks = fail; }
 
 	const std::vector<std::uint8_t>& Data() const { return m_data; }
@@ -141,6 +142,15 @@ public:
 			if (pcbRead)
 				*pcbRead = 0;
 			return E_FAIL;
+		}
+
+		if (m_zeroReads)
+		{
+			// A read that succeeds but makes no progress: legal for COM, but a
+			// consumer that keeps looping would spin forever.
+			if (pcbRead)
+				*pcbRead = 0;
+			return S_OK;
 		}
 
 		const std::uint64_t size = static_cast<std::uint64_t>(m_data.size());
@@ -232,6 +242,7 @@ private:
 	bool m_shortWrites = false;
 	bool m_failReads = false;
 	bool m_shortReads = false;
+	bool m_zeroReads = false;
 	bool m_failSeeks = false;
 	int m_writeCalls = 0;
 	int m_readCalls = 0;
@@ -372,6 +383,17 @@ int __cdecl main()
 		Check(venture::SaveTrailer::Parse(versionBumped.data(), versionBumped.size(), offset, size)
 				== venture::SaveTrailer::ParseResult::Corrupt,
 			"Parse rejects a future trailer format version");
+	}
+	{
+		// A-14: exactly one of the two magic values intact means our tail is
+		// damaged, not absent: report Corrupt (a warning) instead of NoTrailer.
+		std::vector<std::uint8_t> oneMagic = trailer;
+		oneMagic[oneMagic.size() - venture::SaveTrailer::SuffixSize] ^= 0xFF; // leading magic only
+		std::size_t offset = 0;
+		std::size_t size = 0;
+		Check(venture::SaveTrailer::Parse(oneMagic.data(), oneMagic.size(), offset, size)
+				== venture::SaveTrailer::ParseResult::Corrupt,
+			"Parse reports Corrupt when only one of the two magic values matches");
 	}
 
 	// ---- 3. second process: load into new objects -------------------------
@@ -544,7 +566,8 @@ int __cdecl main()
 		Check(savedOk && !savedTrailer.empty(), "the stream test builds a non-empty trailer");
 
 		// The engine wrote its save data; another platform left the position at the
-		// stream start.  The writer must seek to EOF and append, not overwrite.
+		// stream start.  The writer must seek to EOF and append, not overwrite
+		// (A-12: a save-time stream position left anywhere else cannot corrupt it).
 		std::vector<std::uint8_t> engineBytes;
 		for (std::uint32_t i = 0; i < 24; ++i)
 			engineBytes.push_back(static_cast<std::uint8_t>(0x40 + i));
@@ -609,8 +632,10 @@ int __cdecl main()
 				"a short write is detected from the reported byte count");
 		}
 
-		// Read failures (short read / error / non-seekable) restore the position and
-		// leave the extension state empty instead of aborting the game's load.
+		// A-13: COM allows a successful Read to return fewer bytes; the reader must
+		// retry until the trailer window is full.  A failed read or a stream that
+		// makes no progress at all is dropped with a warning and restores the
+		// position, leaving the extension state empty instead of aborting the load.
 		{
 			std::vector<std::uint8_t> bytes(engineBytes);
 			bytes.insert(bytes.end(), savedTrailer.begin(), savedTrailer.end());
@@ -621,10 +646,26 @@ int __cdecl main()
 			shortRead.Seek(MoveTo(static_cast<long long>(positionBefore)), STREAM_SEEK_SET, nullptr);
 			venture::ExtensionIndex::Instance().EnterLoadWindow();
 			venture::SaveTrailer::Read(&shortRead);
+			Check(shortRead.Position() == positionBefore,
+				"a short read still restores the stream position");
+			Check(venture::ExtensionIndex::Instance().LoadedExtensions().size() == 1,
+				"a short read is retried until the trailer window is full (A-13)");
+			const venture::ExtSave::LoadSummary adoptedShort = venture::ExtSave::FinishLoad();
 			venture::ExtensionIndex::Instance().ExitLoadWindow();
-			Check(shortRead.Position() == positionBefore, "a short read restores the stream position");
+			Check(adoptedShort.adopted == 1,
+				"the extension read through short reads is adopted");
+			venture::ExtensionIndex::Instance().ClearAll();
+
+			FakeStream zeroRead(bytes);
+			zeroRead.SetZeroReads(true);
+			zeroRead.Seek(MoveTo(static_cast<long long>(positionBefore)), STREAM_SEEK_SET, nullptr);
+			venture::ExtensionIndex::Instance().EnterLoadWindow();
+			venture::SaveTrailer::Read(&zeroRead);
+			venture::ExtensionIndex::Instance().ExitLoadWindow();
+			Check(zeroRead.Position() == positionBefore,
+				"a no-progress read restores the stream position");
 			Check(venture::ExtensionIndex::Instance().LoadedExtensions().empty(),
-				"a short read restores no extension state");
+				"a no-progress read restores no extension state");
 
 			FakeStream failedRead(bytes);
 			failedRead.SetFailReads(true);
@@ -647,6 +688,32 @@ int __cdecl main()
 				"a non-seekable stream restores no extension state");
 		}
 
+		venture::ExtensionIndex::Instance().ClearAll();
+	}
+
+	// ---- 7. an old save without a trailer (A-16) --------------------------
+	// The engine loads its objects and their constructors allocate extensions while
+	// the load window is open.  A save written without this platform has no
+	// trailer, so nothing is restored - but the deferred allocations must still get
+	// fresh extensions in FinishLoad.
+	{
+		venture::ExtensionIndex::Instance().ClearAll();
+		FakeStream noTrailer(std::vector<std::uint8_t>(32, 0x5A)); // another platform's data only
+
+		venture::ExtSave::EnterLoadWindow();
+		UnitClass deferredUnit;
+		Check(store.Allocate(&deferredUnit) == nullptr && store.Size() == 0,
+			"no trailer: allocations during the load window are deferred");
+		venture::SaveTrailer::Read(&noTrailer);
+		Check(venture::ExtensionIndex::Instance().LoadedExtensions().empty(),
+			"no trailer: no extension state is restored");
+		const venture::ExtSave::LoadSummary finished = venture::ExtSave::FinishLoad();
+		venture::ExtSave::ExitLoadWindow();
+		Check(finished.adopted == 0 && finished.deferred == 1,
+			"no trailer: the deferred owner gets a fresh extension");
+		SavedUnitExt* const fresh = store.Fetch(&deferredUnit);
+		Check(fresh != nullptr && fresh->Serial == 0 && fresh->DeferredCalls == 1,
+			"no trailer: the deferred extension is fresh and initialised exactly once");
 		venture::ExtensionIndex::Instance().ClearAll();
 	}
 

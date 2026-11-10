@@ -52,8 +52,9 @@ savegame format break.
 | `payloadSize` | 4 | payload length in bytes; capped at 16 MiB |
 | `crc32` | 4 | standard IEEE 802.3 CRC-32 over the payload |
 
-The suffix is 20 bytes, so the reader needs a single backwards read of at most
-`payloadSize + 20` bytes.
+The suffix is 20 bytes, so the reader reads a single backwards window of at most
+`payloadSize + 20` bytes (legal COM short reads are retried until the window is
+full).
 
 ## Payload layout
 
@@ -94,8 +95,17 @@ storeBlock*:                                      (storeBlockCount entries)
   save-time addresses. They are not dereferenced on load: the loader registers the
   owner slot with the engine's swizzle manager, and the engine rewrites it to the
   address of the loaded object before `PostLoad()` runs.
-* `canary` is derived from the extension class type id and rejects a block whose
-  rows belong to a different extension class layout.
+* `canary` identifies the extension class **and** the store's row layout version:
+  `canary = 0x56430000 ^ (storeTypeId & 0xFFFF) ^ ((storeDataVersion & 0xFFFF) << 16)`
+  (low 16 bits = type id, high 16 bits = row version with the `VC` magic folded
+  in; injective for ids/versions that fit 16 bits, which the platform enforces
+  when the store is declared). A row written for a different class or a drifted
+  `Save()`/`Load()` pair is rejected instead of misread.
+* rows, blocks and the payload are **consumed exactly**: the extension's `Load()`
+  must read its row data to the last byte, a block must contain nothing after its
+  last row, and the payload must contain nothing after the last block.  Trailing
+  bytes (or a short read in a row) mean a drifted layout or a modified save and
+  reject the whole payload as malformed (`Invalid`).
 * `data` is the bytes written by the extension's `Save(ExtStreamWriter&)`. Pointers
   inside it are written with `WritePointer` and read with
   `ReadPointerForChange`, which registers the field for the swizzle pass.
@@ -128,15 +138,28 @@ deterministic order.
 
 ## Failure handling
 
-The parser validates the **whole payload before it touches the engine's swizzle
-manager**.  The registrations collected while reading store rows are staged in
-the platform (`ExtSwizzle::BeginStaging`) and handed to the engine only after
-every block validated (`CommitStaged`); on a malformed header, a truncated
-row/block, a short read or a bad canary the staged registrations are discarded
-(`DiscardStaged`) *before* the instances created from the partial payload are
-deleted.  The engine's remap pass therefore never sees - let alone writes
-through - a pointer into a deleted extension: a rejected payload leaves extension
-state empty (`Log::Warn`) instead of corrupting the engine's pointer tables.
+The parser is strict by design: a payload is either applied in full or rejected
+as a whole - it never restores "what it could read".
+
+* The whole payload is validated **before the engine's swizzle manager is
+  touched**.  Row registrations are staged in the platform
+  (`ExtSwizzle::BeginStaging`) and handed to the engine only after every block
+  validated (`CommitStaged`); on any error the staged registrations are discarded
+  (`DiscardStaged`) *before* the instances created from the partial payload are
+  deleted, so the engine's remap pass never sees a pointer into a deleted
+  extension (A-01).
+* Malformed input is a hard `Invalid`, never a best-effort skip: a truncated
+  header/signature/block/row, an unreadable or oversized size field, a bad canary,
+  a wrong payload version or a changed store set (see *Compatibility notes*), and
+  trailing bytes in a row/block/payload all leave extension state empty with a
+  `Log::Warn`.  The engine's own objects still load.
+* Size fields are validated against the bytes that are actually present and the
+  16 MiB cap **before** anything is allocated from them (A-02); the writer
+  enforces the same cap while it assembles the payload (A-11).
+* The frame reader tolerates legal COM short reads by retrying until the window is
+  full (A-13), restores the stream position afterwards and warns when the stream
+  cannot be restored (A-14).  A tail with exactly one of our two magic values is
+  reported as a corrupt trailer, not as "no trailer" (A-14).
 
 ## Feature author rules
 
@@ -153,6 +176,9 @@ state empty (`Log::Warn`) instead of corrupting the engine's pointer tables.
    that point).
 4. Only explicitly saveable stores are serialized. A store for an owner class the
    engine does **not** save (engine-internal objects) must stay non-saveable.
+   Every store must use a **unique extension type id**: a store registered with
+   an id that is already taken is refused with `Log::Error` (the first store keeps
+   the id), because the type id keys the payload signature and every lookup.
 5. A load never runs the INI pass again. If a feature derives state from type INI
    data and caches it, recompute after load (`PostLoad` / `Load`) instead of
    relying on the constructor default.

@@ -4,7 +4,7 @@
 // "the owner is an AbstractClass", so the test provides a minimal stand-in for
 // the engine class hierarchy instead of including YRpp / gamemd.exe.
 //
-// TEST_DEPS: src/Ext/AbstractExt.cpp src/Ext/ExtensionIndex.cpp
+// TEST_DEPS: src/Ext/AbstractExt.cpp src/Ext/ExtensionIndex.cpp src/Core/Log.cpp src/Core/PlatformPaths.cpp
 
 #include <cstdint>
 #include <cstdio>

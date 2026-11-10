@@ -19,6 +19,12 @@ namespace venture::ExtSave
 //     payload[blockSize]:
 //       [rowCount]
 //       row*: [extSaveAddress][ownerSaveAddress][canary][dataSize][data...]
+//         canary = 0x56430000 ^ (storeTypeId & 0xFFFF) ^ ((storeDataVersion & 0xFFFF) << 16)
+//         (extension class + row layout version, see ExtensionStore.h)
+//
+// The payload is consumed exactly: every row must be read to its last byte by the
+// extension's Load(), every block and the payload itself must have no trailing
+// bytes, otherwise the payload is rejected as malformed.
 //
 // `savegameId` is VC_SAVEGAME_ID from PlatformConfig.h (passed in by the caller
 // so this layer stays independent of the platform identity), `storeTypeId` is the

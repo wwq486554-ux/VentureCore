@@ -314,7 +314,10 @@ LoadSummary ReadPayload(const std::uint32_t savegameId, const std::uint8_t* cons
 
 		ExtByteStreamReader blockReader(block.data(), block.size());
 		desc->load(blockReader);
-		if (!blockReader.Ok())
+		// A-09: a block must be consumed exactly.  Trailing bytes after the last
+		// row mean the payload is malformed or was written by a drifted store
+		// layout - reject it instead of restoring part of it.
+		if (!blockReader.Ok() || blockReader.Remaining() != 0)
 		{
 			summary.result = LoadSummary::Result::Invalid;
 			ExtSwizzle::DiscardStaged();
@@ -323,7 +326,9 @@ LoadSummary ReadPayload(const std::uint32_t savegameId, const std::uint8_t* cons
 		}
 	}
 
-	if (!reader.Ok())
+	// A-09: the payload must be consumed exactly too (no trailing bytes after the
+	// last block).
+	if (!reader.Ok() || reader.Remaining() != 0)
 	{
 		summary.result = LoadSummary::Result::Invalid;
 		ExtSwizzle::DiscardStaged();

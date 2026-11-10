@@ -19,13 +19,17 @@
 //     registered saveable store set - and every v1 payload - is refused as a
 //     whole (`Incompatible`, extension state dropped, nothing registered): a
 //     partially restored set used to leave cross-extension pointers unmatched in
-//     the engine's swizzle pass, which traps the game.
+//     the engine's swizzle pass, which traps the game;
+//   * payloads are consumed exactly (rows, blocks and the payload itself must not
+//     leave trailing bytes), the row canary also encodes the store's row layout
+//     version, duplicate rows cannot corrupt the store, and a duplicate store
+//     type id is refused by ExtensionIndex.
 //
 // The fake swizzle manager below is strict on purpose: like the engine it fails
 // the remap pass when a registered slot has no matching identity, and it records
 // every registration so the rejection tests can assert "nothing reached it".
 //
-// TEST_DEPS: src/Ext/AbstractExt.cpp src/Ext/ExtensionIndex.cpp src/Ext/ExtSave.cpp
+// TEST_DEPS: src/Ext/AbstractExt.cpp src/Ext/ExtensionIndex.cpp src/Ext/ExtSave.cpp src/Core/Log.cpp src/Core/PlatformPaths.cpp
 
 #include <cstddef>
 #include <cstdint>
@@ -187,8 +191,17 @@ public:
 
 using BulkUnitStore = venture::ExtensionStore<UnitClass, BulkUnitExt>;
 
-constexpr std::uint32_t kCanary = 0x56430000u | (PayloadUnitExt::TypeId & 0xFFFFu);
 constexpr std::uint32_t kDataVersion = 1;
+
+// Mirrors ExtensionStore's row canary: extension class type id in the low 16 bits,
+// row layout version in the high 16 bits, with the "VC" magic folded in.
+constexpr std::uint32_t RowCanary(const std::uint32_t dataVersion)
+{
+	return 0x56430000u ^ (PayloadUnitExt::TypeId & 0xFFFFu)
+		^ ((dataVersion & 0xFFFFu) << 16);
+}
+
+constexpr std::uint32_t kCanary = RowCanary(kDataVersion);
 
 using Bytes = std::vector<std::uint8_t>;
 
@@ -606,6 +619,48 @@ void TestRejectedPayloads()
 		const Bytes payload = BuildPayload({ BuildBlock(1, rows) });
 		ExpectRejected(payload, "a row dataSize larger than the remaining block is rejected");
 	}
+
+	// 12. A-09: a block with trailing bytes after its rows is rejected (a block
+	//     must be consumed exactly by the store's Load).
+	{
+		Bytes rows;
+		AppendRow(rows, 0x1000, 0x2000, kCanary, BuildRowData(7, 0x3000));
+		Bytes block = BuildBlock(1, rows);
+		AppendU32(block, 0xDEADBEEFu); // trailing garbage inside the block
+		const Bytes payload = BuildPayload({ block });
+		Check(ExpectRejected(payload, "a block with trailing bytes is rejected") == 1,
+			"the trailing-block-bytes case created (then deleted) the row's instance");
+	}
+
+	// 13. A-09: a row whose Load() leaves bytes unread is a layout drift - reject.
+	{
+		Bytes rowData = BuildRowData(7, 0x3000);
+		AppendU32(rowData, 0xBEEFu); // 4 bytes the extension's Load never reads
+		Bytes rows;
+		AppendRow(rows, 0x1000, 0x2000, kCanary, rowData);
+		const Bytes payload = BuildPayload({ BuildBlock(1, rows) });
+		Check(ExpectRejected(payload, "a row with trailing bytes is rejected") == 1,
+			"the trailing-row-bytes case deleted the partially loaded instance");
+	}
+
+	// 14. A-09: trailing bytes after the last block are rejected too.
+	{
+		Bytes rows;
+		AppendRow(rows, 0x1000, 0x2000, kCanary, BuildRowData(7, 0x3000));
+		Bytes payload = BuildPayload({ BuildBlock(1, rows) });
+		payload.push_back(0u); // one stray byte after the last block
+		Check(ExpectRejected(payload, "trailing bytes after the last block are rejected") == 1,
+			"the trailing-payload-bytes case deleted the loaded instance");
+	}
+
+	// 15. A-09: the row canary encodes the store's row layout version too; a row
+	//     written for another dataVersion is rejected even if the class id matches.
+	{
+		Bytes rows;
+		AppendRow(rows, 0x1000, 0x2000, RowCanary(kDataVersion + 1), BuildRowData(7, 0x3000));
+		const Bytes payload = BuildPayload({ BuildBlock(1, rows) });
+		ExpectRejected(payload, "a row canary with a different dataVersion is rejected");
+	}
 }
 
 // --- A-05: payload v2 store-set signature ---------------------------------
@@ -671,6 +726,83 @@ void TestStoreSetSignature()
 		bulkStore.SetSaveable(false, 1);
 		venture::ExtensionIndex::Instance().ClearAll();
 	}
+}
+
+// --- A-15/A-16: duplicate rows --------------------------------------------
+void TestDuplicateRows()
+{
+	venture::ExtensionIndex::Instance().ClearAll();
+	FakeReset();
+
+	PayloadUnitStore& store = PayloadUnitStore::Instance();
+
+	// Two rows that resolve to the same owner but different save-time extension
+	// addresses: structurally valid, but only one extension may be attached to an
+	// owner.  The loader must not crash and must keep one, drop the other.
+	Bytes rows;
+	const Bytes rowData = BuildRowData(7, 0x3000);
+	AppendRow(rows, 0x1000, 0x2000, kCanary, rowData);
+	AppendRow(rows, 0x1008, 0x2000, kCanary, rowData);
+
+	const Bytes payload = BuildPayload({ BuildBlock(2, rows) });
+
+	UnitClass loadedOwner;
+	UnitClass loadedTarget;
+
+	venture::ExtSave::EnterLoadWindow();
+	const venture::ExtSave::LoadSummary summary = venture::ExtSave::ReadPayload(
+		kSavegameId, payload.data(), payload.size());
+	Check(summary.result == venture::ExtSave::LoadSummary::Result::Loaded && summary.created == 2,
+		"duplicate rows: both rows are read as separate extension instances");
+
+	// The engine loaded the owner and the saved target object at new addresses.
+	FakeRegisterIdentity(reinterpret_cast<void*>(static_cast<std::uintptr_t>(0x2000)), &loadedOwner);
+	FakeRegisterIdentity(reinterpret_cast<void*>(static_cast<std::uintptr_t>(0x3000)), &loadedTarget);
+	Check(FakeProcess(), "duplicate rows: the strict swizzle resolves both owner slots");
+
+	const venture::ExtSave::LoadSummary finished = venture::ExtSave::FinishLoad();
+	venture::ExtSave::ExitLoadWindow();
+	Check(finished.adopted == 1 && finished.failed == 1,
+		"duplicate rows: only one extension is adopted for the shared owner");
+	Check(store.Fetch(&loadedOwner) != nullptr,
+		"duplicate rows: the adopted instance belongs to the owner");
+
+	venture::ExtensionIndex::Instance().ClearAll();
+}
+
+// --- A-10: duplicate / invalid store registration -------------------------
+void DuplicateStoreClear() {}
+
+void TestStoreRegistration()
+{
+	venture::ExtensionIndex& index = venture::ExtensionIndex::Instance();
+	const std::size_t before = index.StoreCount();
+	const venture::ExtStoreDesc* const original = index.FindStore(PayloadUnitExt::TypeId);
+	Check(original != nullptr, "store registration: the test store is registered");
+
+	// A hand-made descriptor with a colliding type id: the index must keep the
+	// original store and refuse the duplicate (A-10).
+	static venture::ExtStoreDesc duplicate{};
+	duplicate.typeId = PayloadUnitExt::TypeId;
+	duplicate.dataVersion = 1;
+	duplicate.name = "UnitClass/DuplicateUnitExt";
+	duplicate.clear = &DuplicateStoreClear;
+	index.RegisterStore(&duplicate);
+	Check(index.StoreCount() == before,
+		"store registration: a duplicate type id is rejected");
+	Check(index.FindStore(PayloadUnitExt::TypeId) == original,
+		"store registration: the original store still answers FindStore");
+
+	// A descriptor without a clear callback cannot be torn down on scenario end;
+	// it must be refused as well.
+	static venture::ExtStoreDesc incomplete{};
+	incomplete.typeId = 0x0777u;
+	incomplete.name = "UnitClass/IncompleteStore";
+	index.RegisterStore(&incomplete);
+	Check(index.StoreCount() == before,
+		"store registration: a descriptor without a clear callback is rejected");
+	Check(index.FindStore(0x0777u) == nullptr,
+		"store registration: the rejected store is not visible to FindStore");
 }
 
 // --- happy path: the staged registrations are committed and used ----------
@@ -799,6 +931,8 @@ int __cdecl main()
 	TestStagingApi();
 	TestRejectedPayloads();
 	TestStoreSetSignature();
+	TestDuplicateRows();
+	TestStoreRegistration();
 	TestSuccessPath();
 	TestWriteSizeCap();
 
