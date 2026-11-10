@@ -47,11 +47,15 @@ What is checked
        names is enough (it also accepts a C++-decorated spelling).
 
 5. Version resource strings
-       The platform name, the version string and the pinned YRpp commit are
-       expected in the image, either as UTF-16LE (VS_VERSIONINFO strings) or as
-       ASCII (plain string literals).  The version may also be proven by a
-       numeric ``VS_FIXEDFILEINFO`` block when no literal version string is
-       present.
+       The platform name, the version and the pinned YRpp commit are expected in
+       the image.  The version must be present **twice**: as UTF-16LE (the
+       VS_VERSIONINFO resource strings written by ``src/version.rc``) and as
+       ASCII (the compiled-in ``VC_VERSION_DISPLAY`` literal used by the startup
+       log and the lineage marker).  Requiring both means a build with the
+       version resource stripped, or one that only embeds the version in a C++
+       literal, fails this check.  A numeric ``VS_FIXEDFILEINFO`` block with the
+       expected ``dwFileVersionMS/LS`` is accepted as a fallback when no literal
+       version string is present at all.
 
 6. Feature registration
        The ``example_unit_counter`` feature id is expected as an ASCII string
@@ -95,11 +99,13 @@ DEFAULT_CATALOGUE = os.path.join(REPO_ROOT, "docs", "HookCatalogue.md")
 # Platform identity (src/Core/PlatformConfig.h, src/version.rc).
 PLATFORM_NAME = "VentureCore"
 
-# Any of these strings proves the version resource carries the version.  The
-# version resource writes VC_VERSION_DISPLAY ("v0.2.0.0-experimental"), which
-# contains the long version "0.2.0.0" as a substring, so the first entry alone
-# normally matches.
-VERSION_STRINGS: Tuple[str, ...] = ("0.2.0.0", "0.2.0-experimental")
+# The version strings expected in the image (src/Core/PlatformVersion.h).  The
+# version resource writes VC_VERSION_DISPLAY ("v0.3.0.0-experimental"), which
+# contains the long version "0.3.0.0" as a substring, so the first entry also
+# covers the resource text.  The second entry is kept for a configurable
+# prerelease spelling; see check_version_strings() for why both encodings of
+# the version are required.
+VERSION_STRINGS: Tuple[str, ...] = ("0.3.0.0", "0.3.0-experimental")
 
 # The three-gate YRpp pin (src/Core/EnginePin.h).
 YRPP_PIN = "c6c522f77b58508588d9a8652c53356e4aef7a96"
@@ -547,6 +553,16 @@ def find_string_encodings(data: bytes, text: str) -> List[str]:
     return encodings
 
 
+def expected_fixed_file_version() -> Tuple[int, int]:
+    """The VS_FIXEDFILEINFO (dwFileVersionMS, dwFileVersionLS) of VERSION_STRINGS[0]."""
+    parts = [int(part) for part in VERSION_STRINGS[0].split(".")]
+    if len(parts) != 4 or any(part < 0 or part > 0xFFFF for part in parts):
+        raise ValueError(
+            "VERSION_STRINGS[0] must be four 16-bit numbers, got %r"
+            % VERSION_STRINGS[0])
+    return ((parts[0] << 16) | parts[1], (parts[2] << 16) | parts[3])
+
+
 def find_fixed_file_version(data: bytes) -> Optional[Tuple[int, int]]:
     """Return the first plausible VS_FIXEDFILEINFO file version, or None."""
     search_from = 0
@@ -573,24 +589,51 @@ def check_version_strings(data: bytes) -> Check:
         problems.append("platform name %r not found (ASCII or UTF-16LE)"
                         % PLATFORM_NAME)
 
+    # D-15: the version has two independent sources and both must be present.
+    # The UTF-16LE copy proves the VS_VERSIONINFO resource exists (deleting the
+    # .rsrc used to leave the ASCII check green); the ASCII copy proves the
+    # compiled-in VC_VERSION_DISPLAY literal exists.  Accepting either one was
+    # the weakness this check closes.
     version_encodings: List[str] = []
+    matched_version = None
     for version in VERSION_STRINGS:
-        for encoding in find_string_encodings(data, version):
+        found = find_string_encodings(data, version)
+        for encoding in found:
             if encoding not in version_encodings:
                 version_encodings.append(encoding)
-    if version_encodings:
-        details.append("version %r: %s"
-                       % ("/".join(VERSION_STRINGS),
-                          "+".join(version_encodings)))
+        if found and matched_version is None:
+            matched_version = version
+
+    missing_encodings = [
+        encoding for encoding in ("ASCII", "UTF-16LE")
+        if encoding not in version_encodings]
+    if not missing_encodings:
+        details.append("version %r: ASCII+UTF-16LE (literal + version resource)"
+                       % matched_version)
+    elif version_encodings:
+        problems.append(
+            "version %r is present as %s only; it must appear both in the "
+            "UTF-16LE version resource and as an ASCII (VC_VERSION_DISPLAY) "
+            "string - the version resource and the compiled-in literal must "
+            "agree" % (matched_version, "+".join(version_encodings)))
     else:
+        expected_ms, expected_ls = expected_fixed_file_version()
         fixed = find_fixed_file_version(data)
-        if fixed is not None and fixed[0] == 0x00020000 and fixed[1] == 0:
-            details.append("version 0.2.0.0: numeric VS_FIXEDFILEINFO")
+        if fixed == (expected_ms, expected_ls):
+            details.append(
+                "version %s: numeric VS_FIXEDFILEINFO (MS=0x%08X, LS=0x%08X)"
+                % (VERSION_STRINGS[0], expected_ms, expected_ls))
+        elif fixed is not None:
+            problems.append(
+                "version string %r not found (ASCII or UTF-16LE) and the "
+                "numeric VS_FIXEDFILEINFO version is MS=0x%08X LS=0x%08X, "
+                "expected MS=0x%08X LS=0x%08X"
+                % (VERSION_STRINGS[0], fixed[0], fixed[1],
+                   expected_ms, expected_ls))
         else:
             problems.append(
                 "version string %r not found (ASCII or UTF-16LE) and no "
-                "0.2.0.0 VS_FIXEDFILEINFO block"
-                % VERSION_STRINGS[0])
+                "VS_FIXEDFILEINFO block" % VERSION_STRINGS[0])
 
     pin_encodings = find_string_encodings(data, YRPP_PIN)
     if pin_encodings:

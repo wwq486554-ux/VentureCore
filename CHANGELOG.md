@@ -5,14 +5,180 @@ All notable changes to VentureCore are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 The project uses a pre-1.0 version scheme: `0.<MINOR>.<PATCH>-<suffix>`, where the
 suffix (`experimental`, `alpha`, ...) marks a non-stable sample and is carried in
-the DLL version resource (`v0.2.0.0-experimental`).
+the DLL version resource (`v0.3.0.0-experimental`).
+
+## [0.3.0-experimental] - unreleased
+
+Hardening release over 0.2.0: every Batch-A finding of the independent blind
+review that blocked a public release is fixed (one BLOCKER, eight MAJOR, the
+related MINORs), the savegame trailer is now a header-first strictly sequential
+frame with a **v2** payload, and the README/docs claims that did not match the
+code were corrected.  Still **no gameplay features**: installing the DLL does not
+change the game.
+
+**Breaking format change for extension state**: the trailer is
+`[16-byte header][payload]` and the payload carries a signature of the platform's
+saveable store set.  Saves written by `v0.2.0-experimental` load the game
+normally, but their extension state is dropped once - the version-1 payload is
+rejected with a log warning, there is no migration (decision D19).
+
+### Added
+
+- Savegame load-risk coverage: three hooks on the engine's abort exits
+  (`0x67E4B1` / `0x67E53A` / `0x67E595`) close the extension load window (W3,
+  A-04); a scenario-clear fallback resets the window and the deferred records
+  when no load is in progress (W3/W4c).
+- Extension-layer load lifecycle: `ExtensionIndex` load window, deferred
+  allocations for object constructors, staged swizzle registration that the
+  engine only sees after the whole payload validated
+  (`ExtSwizzle::BeginStaging/CommitStaged/DiscardStaged`, A-01), and a
+  load-window-is-open guard in the scenario-clear path (W4c, found by the real
+  game G1 test).
+- Savegame payload v2: store-set signature (`typeId`, `dataVersion`, order) that
+  must match the platform's registered saveable stores exactly; a mismatch
+  rejects the whole payload instead of skipping a block (A-05).
+- Payload robustness: size fields are validated against the remaining bytes and
+  the 16 MiB cap **before** allocation (A-02/A-11); rows, blocks and the payload
+  must be consumed exactly (A-09); duplicate store type ids are refused (A-10);
+  the row canary includes the store `dataVersion`; read loops tolerate legal COM
+  short reads and report no-progress/failure instead of spinning (A-13/A-14).
+- Event-channel fail-closed size policy
+  (`EventChannel::GetWireSize`: registered size | vanilla `0x00-0x2E` |
+  one byte for everything unregistered above `0x2E`) and a real
+  `Dispatch(type, data, availableSize)` buffer-length check (C-01/C-02).
+- Test/tooling: `tests/test_load_window.cpp`, `tests/test_payload_safety.cpp`,
+  `tests/test_logging.cpp` (real log file I/O), `scripts/linux/test_fetch_yrpp.sh`
+  (self-copy guard / atomic install / pin gate) and
+  `scripts/linux/verify_incremental.sh` (real toolchain incremental-build
+  matrix); `run_tests.sh` now summarises compiler warnings of the test builds.
+- `Log::OpenAt(path)` (public file-I/O entry point used by the new test and by
+  derived platforms).
+
+### Changed
+
+- **Savegame trailer rewritten** (`src/Core/SaveTrailer.{h,cpp}`,
+  `src/Engine/Hooks.Save.cpp`): the writer moved from the shared ecosystem tail
+  site `0x67E42E` (owned by Ares, whose handler always jumps away - the block was
+  never written with Ares installed) to `0x67D1B4`, after the engine's
+  object-state writer returned and before the finalize/Commit.  The frame is
+  header-first (`[magic "VNC1"][formatVersion=2][payloadSize][crc32][payload]`)
+  and both sides are strictly sequential: the engine's savegame `IStream` is a
+  streaming wrapper that does **not** implement `Seek` (proven by the real-game
+  G1 test), so the 0.2.0 "tail-anchored, seek-to-end" design could never work in
+  the game.  Writes retry short writes; the read position is the end of the
+  platform-ordered blocks because our handler runs after every known ecosystem
+  reader.
+- Version bump to `0.3.0-experimental` (`src/Core/PlatformVersion.h`,
+  `scripts/verify_build.py`); minor bump because the savegame payload and the
+  save/load behaviour changed incompatibly.
+- Build tooling: `fetch_yrpp.sh` installs through a staging directory, refuses to
+  copy the installed tree onto itself and no longer lets `--commit` override a
+  detected git `HEAD` (D-09, S-01); the incremental-build inputs now include
+  `include/`, the project/props files and the link arguments (D-10/D-11).
+- `scripts/verify_build.py` version check hardened: the version must appear both
+  as UTF-16LE (version resource) and as ASCII (compiled-in `VC_VERSION_DISPLAY`
+  literal), and the numeric `VS_FIXEDFILEINFO` fallback derives the expected
+  `dwFileVersionMS/LS` from `VERSION_STRINGS` (D-15).
+- Event channel: the three `GetEventSize` hooks answer one byte fail-closed for
+  every unregistered number above `0x2E`; only the vanilla range falls through to
+  the engine table.  Startup log lists the registered types and the mixed-client
+  warning says "consumed as one byte fail-closed, may desync but cannot
+  overrun" (C-01).
+- Logging: `WriteFile` failures are detected and reported once (the line is
+  dropped), a NULL format string is rejected before the CRT, and the
+  docs/README claims about flush/durability and "crash-proof" were replaced by
+  the actual guarantees (D-01/D-03/D-04, L-04).
+- Hook catalogue: 17 -> **20 hook records, 19 distinct handler names**; all
+  documents now describe the `0x67D1B4` write site and the three failure-exit
+  hooks.
+- Documentation truth pass: claims that the recheck proved false or stale were
+  corrected in `README.md`, `CHANGELOG.md` and `docs/` - `IniTakeover` API name,
+  ABI-probe coverage wording, benchmark flags, pointer-invalidation capability,
+  savegame layout (intrusive list, no backwards read), `VC_SAVEGAME_ID` usage,
+  load-probe export count, `[Platform]` key list, event range (`0x00-0x2E`),
+  lineage-refuse wording, command string lifetime, host/tier wording, log flush
+  wording and the save-load step labels.
+
+### Fixed
+
+- B-03: the savegame trailer never reached the file with Ares installed (the
+  released 0.2.0 "core persistence" was silently dead on the main supported
+  host); fixed by the new write site plus sequential I/O (also A-12).
+- A-04: a failed/cancelled savegame load left the load window open for the rest
+  of the session, silently disabling every later extension allocation.
+- A-06/A-07: invalidated owners are removed from the deferred list; the window
+  closes before the post-swizzle engine call so allocations cannot be deferred
+  after the drain.
+- Real-game G1 findings: the load's own scenario reset must not close the load
+  window (`0x67E739` inside `LoadGame` - the trailer rows could not be adopted,
+  `0 adopted / 44 failed`), and the save stream cannot `Seek` (the trailer was
+  not appended at all).  Both fixed and re-verified in the game.
+- C-01: unregistered event numbers above the vanilla table range could make the
+  multiplayer decoder copy up to 232 bytes into a 104-byte stack buffer
+  (return-address overwrite with a hostile/mismatched peer).
+- D-01: the logger's file I/O had no automated test while the docs claimed it
+  was verified; `tests/test_logging.cpp` now drives `Log::OpenAt`, the separator
+  header, filtering, line format, repeated open/close, failed open and
+  NULL/`%` format strings.
+- D-09: re-running `fetch_yrpp.sh` could delete the installed `external/YRpp`
+  and then fail (data loss); the script now refuses self-copies and installs
+  atomically.
+- D-10/D-11: an incremental build could silently keep a stale DLL after editing
+  `include/`, project files or link arguments when the work tree was dirty.
+- D-15: `verify_build.py` accepted a build with the version resource removed
+  (the C++ ASCII literal satisfied the old "either encoding" check) and its
+  numeric fallback compared against a wrong constant; both fixed.
+- Documentation/comments: stale `VC_SAVEGAME_ID` "unused" note, "Phobos hook
+  name" clarification at `0x668BF0`, dead store-descriptor `count` field comment,
+  `0x2F`/`0x00-0x2F` event-range wording that should be `0x00-0x2E`.
+
+### Security
+
+- **A-01**: a corrupt/drifted payload could delete extensions whose swizzle slots
+  were already registered, letting the engine write through freed memory.  The
+  whole payload is now validated before the engine's swizzle manager is touched;
+  on failure staged registrations are discarded before the partial instances are
+  deleted.
+- **A-02**: savegame-controlled size fields allocated unbounded memory (a crafted
+  save could terminate the 32-bit process); every size is now range-checked
+  before allocation and capped at 16 MiB.
+- **A-05**: skipping an unknown store block could leave saved cross-store
+  pointers unmapped and trap the engine (division-by-zero); the v2 store-set
+  signature rejects the whole payload instead.
+- **C-01**: a hostile/mismatched multiplayer peer could control the event
+  decoder's copy length above the vanilla table range and overwrite the return
+  address; the size hooks are now fail-closed above `0x2E`.
+- **D-09**: the YRpp fetch helper could destroy a required build input.
+- **S-01**: `--commit` could override a detected git `HEAD`, letting a wrong tree
+  pass the pin gate as long as its commit string matched; only `.git`-less source
+  trees are accepted through `--commit`, with a warning.
+
+### Known limitations
+
+- The savegame order contract is unchanged in nature: the reader assumes every
+  known platform's sequential reader runs before ours (all known modules,
+  including the Mix fork's `Phobos.dll`, sort before `VentureCore.dll`), and no
+  platform appends after `0x67D1B4`.  A platform outside that order degrades
+  gracefully (extension state empty) but is not supported.
+- `v0.2.0-experimental` saves keep working for the game itself; their extension
+  state is dropped once (payload v1 rejected, no migration).
+- The real-game E1 (Ares present) and E6 (failed load -> new scenario) checks
+  passed on 2026-11-10; E2 (T0, no Ares) could not be executed on this machine
+  because SyringeEx does not load the plugin without Ares there.
+- Host-specific (T1-T3) features, Phobos interop and AE are still not
+  implemented.
+- The remaining advisory (non-blocking) Batch-B hardening items - command
+  namespace checks, INI takeover deny-list, ABI-probe locking/coverage,
+  benchmark optimisation flags, empty-`tests/` guard - are not part of this
+  release.
 
 ## [0.2.0-experimental] - 2026-11-10
 
 Base-completion release.  The empty skeleton from 0.1.0 gained the platform
-layers a feature pack actually needs, and every layer has automated verification
-on this machine.  Still **no gameplay features**: installing the DLL does not
-change the game.
+layers a feature pack actually needs.  The layers are covered by automated checks
+on this machine (listed per layer in `README.md` / `docs/`); those checks do not
+replace an in-game run.  Still **no gameplay features**: installing the DLL does
+not change the game.
 
 ### Added
 
@@ -24,10 +190,12 @@ change the game.
 - **Savegame tail block** (`src/Core/SaveTrailer.{h,cpp}`,
   `src/Ext/ExtSave.{h,cpp}`, `src/Ext/ExtStream.h`, `src/Ext/ExtSwizzle.h`,
   `src/Engine/Hooks.Save.cpp`): extension state is appended after every other
-  platform's block (`[payload][magic VNC1][formatVersion][payloadSize][crc][magic]`),
-  read by scanning backwards from the end of the stream (old saves without a
-  trailer self-heal), owner pointers relinked through the engine's swizzle pass,
-  per-store data versions and unknown-store skipping; `docs/SaveFormat.md`.
+  platform's block, owner pointers relinked through the engine's swizzle pass,
+  per-store data versions; `docs/SaveFormat.md`.
+  *Correction (0.3.0): the 0.2.0 trailer was anchored at the end of the stream
+  and read back by seeking; the engine's savegame stream does not implement
+  `Seek`, so in a real game the block was never written or read.  0.3.0 replaces
+  it with a header-first strictly sequential frame at a non-Ares write site.*
 - **Rules/art INI layer** (`src/Core/EngineIni.{h,cpp}`,
   `src/Core/IniTakeover.{h,cpp}`, `src/Engine/Hooks.Ini.cpp`): typed reads over the
   engine-parsed INI files, rules-INI observers, and the rules-INI takeover that
@@ -35,7 +203,8 @@ change the game.
   read them (`[Platform] IniTakeover`, default on); `docs/Ini.md`.
 - **Event channel** (`src/Event/EventChannel.{h,cpp}`,
   `src/Engine/Hooks.Events.cpp`): platform event types `0x70-0x7F` with fixed
-  payloads, a responder registry, the engine's `EventClass` record as wire format,
+  payloads, a responder registry, the engine's 111-byte `EventClass` record as
+  the in-process event record (the network encoder sends type + payload only),
   dispatch + three `GetEventSize` hooks, startup occupancy log and mixed-client
   warning; `docs/EventChannel.md`.
 - **Command registration** (`src/Command/Commands.{h,cpp}`,
@@ -62,8 +231,9 @@ change the game.
   `docs/EngineBindings.md`).
 - **Test and tooling** : `tests/` with seven engine-free test programs,
   `scripts/linux/run_tests.sh` (MSVC under Wine), the extension-store benchmark
-  script, a Wine-toolchain flock shared by build/tests/probes, and a generated
-  git-stamp header helper so tests compile the platform sources directly.
+  script, a Wine-toolchain flock shared by the build, the tests, the benchmark and
+  the load probe, and a generated git-stamp header helper so tests compile the
+  platform sources directly.  (The ABI probe does not take that lock.)
 
 ### Changed
 
@@ -92,9 +262,10 @@ change the game.
 - The event channel and the command names are a same-build contract in
   multiplayer: every peer must run a build registering the same event types,
   payload sizes and commands (no automatic peer detection).
-- Savegame persistence applies to stores that opt in (`SetSaveable`); the trailer
-  is the last block in the savegame stream, which assumes no platform DLL whose
-  name sorts after this one starts appending blocks.
+- Savegame persistence applies to stores that opt in (`SetSaveable`); the
+  trailer order contract assumes no platform DLL reads the stream after this one
+  (its name sorts after `VentureCore.dll`) and no writer appends after the
+  engine's object-state writer.
 - The lineage marker detects this platform's own lineage only, and modules loaded
   after startup are not detected.
 - The base does not implement a clean unload path; the game process terminates
