@@ -1,9 +1,17 @@
-// Unit test: platform event channel (registry, routing, frame codec, Send).
+// Unit test: platform event channel (registry, routing, frame codec, Send,
+// engine size policy).
 //
 // The channel unit is engine-free by design (src/Event/EventChannel.h), so the
 // test links EventChannel.cpp alone and replaces the engine sender with a
 // capture function: everything a machine does with the 0x70-0x7F event numbers
 // except the engine call itself is exercised here.
+//
+// The wire-size matrix is the unit-testable half of C-01: the three engine
+// GetEventSize hooks answer the registered payload size for the channel types,
+// let the engine's own 0x00-0x2E types fall through to the vanilla size table,
+// and answer every unregistered number above 0x2E with one byte (fail-closed)
+// instead of an out-of-bounds table read.  The dispatch tests cover C-02: the
+// responder size is checked against the real available length.
 //
 // TEST_DEPS: src/Event/EventChannel.cpp
 
@@ -17,6 +25,7 @@ namespace
 {
 using Channel = venture::EventChannel;
 using RegisterResult = Channel::RegisterResult;
+using WireSizePolicy = Channel::WireSizePolicy;
 
 int g_failures = 0;
 
@@ -46,11 +55,12 @@ void ResponderA(const std::uint8_t* const data, const std::uint32_t size)
 }
 
 int g_responderBCalls = 0;
+std::uint32_t g_responderBLastSize = 0;
 
 void ResponderB(const std::uint8_t* const data, const std::uint32_t size)
 {
 	(void)data;
-	(void)size;
+	g_responderBLastSize = size;
 	++g_responderBCalls;
 }
 
@@ -101,11 +111,13 @@ int __cdecl main(void)
 	std::uint8_t payload104[venture::EventChannelMaxPayload] = {};
 	for (std::uint32_t i = 0; i < venture::EventChannelMaxPayload; ++i)
 		payload104[i] = static_cast<std::uint8_t>(i);
+	(void)payload1;
 
-	// --- channel range ------------------------------------------------------
+	// --- range --------------------------------------------------------------
 	std::printf("-- range --\n");
 	Check(!Channel::IsValidEventType(0x00), "0x00 is not a channel type");
-	Check(!Channel::IsValidEventType(0x2F), "0x2F (last vanilla type) is not a channel type");
+	Check(!Channel::IsValidEventType(0x2E), "0x2E (last vanilla type) is not a channel type");
+	Check(!Channel::IsValidEventType(0x2F), "0x2F (first free number) is not a channel type");
 	Check(!Channel::IsValidEventType(0x40), "0x40 (Phobos range) is not a channel type");
 	Check(!Channel::IsValidEventType(0x6F), "0x6F is not a channel type");
 	Check(Channel::IsValidEventType(0x70), "0x70 is the first channel type");
@@ -118,6 +130,56 @@ int __cdecl main(void)
 	Check(!Channel::IsOwnEventType(0x70), "unregistered channel type is not ours");
 	Check(Channel::Name(0x70) == nullptr, "unregistered channel type has no name");
 	Check(Channel::EntryAt(0) == nullptr, "no entry at index 0 of the empty registry");
+
+	// --- wire size policy (fail-closed) -------------------------------------
+	// The engine's payload-size table has 47 entries (0x00-0x2E); 0x2F is the
+	// first free number.  Only the engine types may fall through to that table -
+	// every other number has to be answered here, otherwise the engine reads
+	// past the table and the multiplayer decoder copies a garbage size into its
+	// 104-byte event buffer (C-01).
+	std::printf("-- wire size policy --\n");
+	{
+		const Channel::WireSize wire00 = Channel::GetWireSize(0x00);
+		Check(wire00.policy == WireSizePolicy::Vanilla && wire00.size == 0,
+			"0x00: vanilla policy, engine answers");
+
+		const Channel::WireSize wire2E = Channel::GetWireSize(0x2E);
+		Check(wire2E.policy == WireSizePolicy::Vanilla && wire2E.size == 0,
+			"0x2E (last engine type): vanilla policy, engine answers");
+
+		const Channel::WireSize wire2F = Channel::GetWireSize(0x2F);
+		Check(wire2F.policy == WireSizePolicy::FailClosed
+				&& wire2F.size == venture::EventChannelFailClosedSize,
+			"0x2F (first free number): one-byte fail-closed");
+
+		const Channel::WireSize wire30 = Channel::GetWireSize(0x30);
+		Check(wire30.policy == WireSizePolicy::FailClosed && wire30.size == 1,
+			"0x30 (unregistered foreign range): one-byte fail-closed");
+
+		const Channel::WireSize wire40 = Channel::GetWireSize(0x40);
+		Check(wire40.policy == WireSizePolicy::FailClosed && wire40.size == 1,
+			"0x40 (unregistered Phobos range): one-byte fail-closed");
+
+		const Channel::WireSize wire6F = Channel::GetWireSize(0x6F);
+		Check(wire6F.policy == WireSizePolicy::FailClosed && wire6F.size == 1,
+			"0x6F (unregistered): one-byte fail-closed");
+
+		const Channel::WireSize wire70 = Channel::GetWireSize(0x70);
+		Check(wire70.policy == WireSizePolicy::FailClosed && wire70.size == 1,
+			"0x70 while unregistered: one-byte fail-closed");
+
+		const Channel::WireSize wire72 = Channel::GetWireSize(0x72);
+		Check(wire72.policy == WireSizePolicy::FailClosed && wire72.size == 1,
+			"0x72 while unregistered: one-byte fail-closed");
+
+		const Channel::WireSize wire7F = Channel::GetWireSize(0x7F);
+		Check(wire7F.policy == WireSizePolicy::FailClosed && wire7F.size == 1,
+			"0x7F while unregistered: one-byte fail-closed");
+
+		const Channel::WireSize wireFF = Channel::GetWireSize(0xFF);
+		Check(wireFF.policy == WireSizePolicy::FailClosed && wireFF.size == 1,
+			"0xFF (unregistered): one-byte fail-closed");
+	}
 
 	// --- registration validation -------------------------------------------
 	std::printf("-- registration validation --\n");
@@ -157,11 +219,29 @@ int __cdecl main(void)
 		"entry 0 carries the payload size");
 	Check(Channel::EntryAt(1) == nullptr, "no second entry yet");
 
+	{
+		const Channel::WireSize wire70 = Channel::GetWireSize(0x70);
+		Check(wire70.policy == WireSizePolicy::Registered && wire70.size == 4,
+			"registered 0x70: registered policy with its payload size");
+		const Channel::WireSize wire71 = Channel::GetWireSize(0x71);
+		Check(wire71.policy == WireSizePolicy::FailClosed && wire71.size == 1,
+			"unregistered 0x71 stays fail-closed next to a registered type");
+	}
+
 	Check(Channel::Register(0x71, "Venture_Test_Secondary", 2, &ResponderB) == RegisterResult::Ok,
 		"0x71 registers");
 	Check(Channel::Register(0x7F, "Venture_Test_Last", 8, &ResponderC) == RegisterResult::Ok,
 		"0x7F registers");
 	Check(Channel::Count() == 3, "three handlers registered");
+
+	{
+		const Channel::WireSize wire71 = Channel::GetWireSize(0x71);
+		Check(wire71.policy == WireSizePolicy::Registered && wire71.size == 2,
+			"registered 0x71: registered policy with its payload size");
+		const Channel::WireSize wire7F = Channel::GetWireSize(0x7F);
+		Check(wire7F.policy == WireSizePolicy::Registered && wire7F.size == 8,
+			"registered 0x7F: registered policy with its payload size");
+	}
 
 	// --- iteration ----------------------------------------------------------
 	std::printf("-- iteration --\n");
@@ -182,17 +262,29 @@ int __cdecl main(void)
 		"0x70 responder received the payload");
 	Check(g_responderBCalls == 0, "other responders not called");
 
-	Check(!Channel::Dispatch(0x70, payload4, 3), "size mismatch rejected");
-	Check(g_responderACalls == 1, "size mismatch did not call the responder");
+	// C-02: `availableSize` is the real length the caller can vouch for.  More
+	// available bytes than the registered size is fine - the responder is still
+	// told the registered size; fewer is rejected before the responder runs.
+	Check(Channel::Dispatch(0x70, payload4, 104), "dispatch accepts a larger available length");
+	Check(g_responderACalls == 2, "responder called for the larger available length");
+	Check(g_responderALastSize == 4, "responder receives the registered size, not the available length");
+
+	Check(!Channel::Dispatch(0x70, payload4, 3), "available length below the registered size rejected");
+	Check(!Channel::Dispatch(0x70, payload4, 0), "zero available length rejected");
+	Check(g_responderACalls == 2, "rejected available lengths did not call the responder");
 	Check(!Channel::Dispatch(0x70, nullptr, 4), "null payload rejected");
-	Check(!Channel::Dispatch(0x71, payload4, 4), "0x71 rejects a 4-byte payload");
+	Check(!Channel::Dispatch(0x71, payload4, 1), "0x71 (registered size 2) rejects a 1-byte available length");
+	Check(g_responderBCalls == 0, "short available length did not call the 0x71 responder");
 	Check(!Channel::Dispatch(0x72, payload4, 4), "unregistered type in range not dispatched");
 	Check(!Channel::Dispatch(0x40, payload4, 4), "foreign type not dispatched");
-	Check(g_responderACalls == 1 && g_responderBCalls == 0 && g_responderCCalls == 0,
+	Check(g_responderACalls == 2 && g_responderBCalls == 0 && g_responderCCalls == 0,
 		"no responder called by the rejected dispatches");
 
-	Check(Channel::Dispatch(0x71, payload2, 2), "dispatch routes 0x71");
+	Check(Channel::Dispatch(0x71, payload4, 4), "dispatch routes 0x71 with a larger available length");
 	Check(g_responderBCalls == 1, "0x71 responder called");
+	Check(g_responderBLastSize == 2, "0x71 responder receives its registered 2-byte size");
+	Check(Channel::Dispatch(0x71, payload2, 2), "dispatch routes 0x71 with exactly its size");
+	Check(g_responderBCalls == 2, "0x71 responder called for the exact size");
 	Check(Channel::Dispatch(0x7F, payload8, 8), "dispatch routes 0x7F");
 	Check(g_responderCCalls == 1, "0x7F responder called");
 
@@ -298,6 +390,57 @@ int __cdecl main(void)
 		"dispatch of the maximum 104-byte payload");
 	Check(g_responderACalls == 1 && g_responderALastSize == venture::EventChannelMaxPayload,
 		"maximum payload reaches the responder unmodified");
+
+	// --- whole byte range ---------------------------------------------------
+	// Exhaustive C-01 policy check: all 256 values must land in exactly one of
+	// the three cases - a registered type answers its payload size, the engine's
+	// own 47 types (0x00-0x2E) fall through to the vanilla table, and every other
+	// value is fail-closed.  No value may reach the engine's out-of-bounds read.
+	std::printf("-- whole byte range --\n");
+	{
+		int policyErrors = 0;
+		int registeredSeen = 0;
+		int vanillaSeen = 0;
+		int failClosedSeen = 0;
+
+		for (unsigned value = 0; value <= 0xFF; ++value)
+		{
+			const std::uint8_t type = static_cast<std::uint8_t>(value);
+			const Channel::WireSize wire = Channel::GetWireSize(type);
+
+			if (Channel::IsOwnEventType(type))
+			{
+				++registeredSeen;
+				if (wire.policy != WireSizePolicy::Registered
+					|| wire.size != Channel::GetDataSize(type))
+				{
+					++policyErrors;
+				}
+			}
+			else if (value <= 0x2E)
+			{
+				++vanillaSeen;
+				if (wire.policy != WireSizePolicy::Vanilla || wire.size != 0)
+					++policyErrors;
+			}
+			else
+			{
+				++failClosedSeen;
+				if (wire.policy != WireSizePolicy::FailClosed
+					|| wire.size != venture::EventChannelFailClosedSize)
+				{
+					++policyErrors;
+				}
+			}
+		}
+
+		Check(policyErrors == 0, "every byte value maps to the expected wire-size policy");
+		Check(registeredSeen == static_cast<int>(venture::EventChannelSlotCount),
+			"exhaustive check saw all 16 registered channel types");
+		Check(vanillaSeen == 0x2F, "exhaustive check saw exactly 47 vanilla types (0x00-0x2E)");
+		Check(failClosedSeen == 256 - 0x2F - static_cast<int>(venture::EventChannelSlotCount),
+			"exhaustive check saw fail-closed for every other byte value");
+	}
 
 	std::printf("\n");
 	if (g_failures == 0)

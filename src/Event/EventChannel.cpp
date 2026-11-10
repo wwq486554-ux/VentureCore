@@ -88,6 +88,22 @@ std::uint32_t EventChannel::GetDataSize(const Type type)
 	return entry ? entry->payloadSize : 0u;
 }
 
+EventChannel::WireSize EventChannel::GetWireSize(const Type type)
+{
+	const Entry* const entry = FindEntry(type);
+	if (entry)
+		return WireSize{WireSizePolicy::Registered, entry->payloadSize};
+
+	// Only the engine's own numbers may fall through to the engine's table; its
+	// table has no entry above 0x2E, so any other number would be an
+	// out-of-bounds read that feeds the decoder a garbage size.  Answer it with
+	// the fixed one-byte size instead (memory-safe, may desynchronise).
+	if (type <= EventChannelLastVanillaType)
+		return WireSize{WireSizePolicy::Vanilla, 0u};
+
+	return WireSize{WireSizePolicy::FailClosed, EventChannelFailClosedSize};
+}
+
 const char* EventChannel::Name(const Type type)
 {
 	const Entry* const entry = FindEntry(type);
@@ -114,15 +130,23 @@ const EventChannel::Entry* EventChannel::EntryAt(const std::size_t index)
 	return nullptr;
 }
 
-bool EventChannel::Dispatch(const Type type, const std::uint8_t* const data, const std::uint32_t size)
+bool EventChannel::Dispatch(
+	const Type type,
+	const std::uint8_t* const data,
+	const std::uint32_t availableSize)
 {
 	const Entry* const entry = FindEntry(type);
 	if (!entry || !entry->responder)
 		return false;
-	if (!data || size != entry->payloadSize)
+
+	// `availableSize` is the number of payload bytes the caller can vouch for,
+	// not the length the registry expects: reject instead of letting the
+	// responder read past the caller's buffer.  This is what makes the check
+	// real - the old signature compared the registered size with itself.
+	if (!data || entry->payloadSize > availableSize)
 		return false;
 
-	entry->responder(data, size);
+	entry->responder(data, entry->payloadSize);
 	return true;
 }
 

@@ -20,11 +20,19 @@
 // semantics are copied from that reference behaviour, not from its code:
 //   * 0x4C6CC8 size 5  - event dispatch: route our types, then let the engine
 //                        continue its own switch (always return 0);
-//   * 0x64B6FE size 6  - GetEventSize site 1: skip the vanilla size-table read
-//                        for our types and resume with the size in EDX/EBP;
+//   * 0x64B6FE size 6  - GetEventSize site 1: answer the size in EDX/EBP;
 //   * 0x64BE7D size 6  - GetEventSize site 2: same, plus the size copy on the
 //                        stack slot at [esp+0x20] (STACK_OFFSET(0xAC, -0x8C));
 //   * 0x64C30E size 6  - GetEventSize site 3: same as site 1, ESI-based type.
+//
+// The three size hooks are fail-closed (C-01).  EventChannel::GetWireSize()
+// maps every byte value to one of three cases: a registered type answers its
+// payload size, the engine's own 0x00-0x2E answer 0 so the vanilla table path
+// runs, and every unregistered number above 0x2E is answered with one byte -
+// never with the engine's out-of-bounds table read (0x8208EC + type), whose
+// garbage value the multiplayer decoder would copy into its 104-byte event
+// buffer.  Consuming one byte keeps that copy memory-safe; it cannot keep a
+// foreign stream aligned (see docs/EventChannel.md).
 // ---------------------------------------------------------------------------
 
 namespace
@@ -98,10 +106,19 @@ void EventChannel::LogStartup()
 			static_cast<unsigned>(entry->type), entry->name, entry->payloadSize);
 	}
 
+	Log::Info("event channel: unregistered types 0x%02X-0xFF are answered with %u byte(s) "
+		"fail-closed (engine types 0x00-0x%02X fall through to the vanilla table)",
+		static_cast<unsigned>(EventChannelLastVanillaType) + 1u,
+		static_cast<unsigned>(EventChannelFailClosedSize),
+		static_cast<unsigned>(EventChannelLastVanillaType));
+
 	Log::Warn("event channel: mixed-client risk - a multiplayer peer that does not run this "
-		"platform does not know event types 0x70-0x7F; its event-size hooks return the vanilla "
-		"sizes and our events are misparsed, which desynchronises the game. There is no automatic "
-		"peer detection: every peer must run a platform build that registers the same event types.");
+		"platform does not know event types 0x70-0x7F. In this build an unregistered type above "
+		"0x2E is consumed as 1 byte fail-closed: that cannot overrun the engine event buffer, but "
+		"the event stream is misparsed, which desynchronises the game. A peer build without this "
+		"policy falls back to the engine's out-of-bounds size-table read instead. There is no "
+		"automatic peer detection: every peer must run a platform build that registers the same "
+		"event types and payload sizes.");
 }
 }
 
@@ -125,35 +142,51 @@ DEFINE_HOOK(0x4C6CC8, Venture_Event_Dispatch, 0x5)
 	if (pEvent)
 	{
 		const std::uint8_t type = static_cast<std::uint8_t>(pEvent->Type);
-		const std::uint32_t size = venture::EventChannel::GetDataSize(type);
-		if (size != 0)
-		{
-			venture::EventChannel::Dispatch(
+		constexpr std::uint32_t availableSize =
+			sizeof(EventClass) - offsetof(EventClass, DataBuffer);
+
+		// The registry answers how many bytes the responder expects; Dispatch
+		// checks that against the capacity of the engine event record - the real
+		// buffer length, not a copy of the value being validated (C-02).  A
+		// registered size that does not fit can only come from a broken
+		// registry/ABI combination: drop the event loudly instead of letting the
+		// responder read past the record.
+		if (!venture::EventChannel::Dispatch(
 				type,
 				reinterpret_cast<const std::uint8_t*>(pEvent->DataBuffer),
-				size);
+				availableSize))
+		{
+			const std::uint32_t payloadSize = venture::EventChannel::GetDataSize(type);
+			if (payloadSize != 0)
+			{
+				venture::Log::Warn(
+					"event channel: event 0x%02X needs %u payload byte(s) but the engine event "
+					"record only provides %u - event dropped",
+					static_cast<unsigned>(type),
+					payloadSize,
+					static_cast<unsigned>(availableSize));
+			}
 		}
 	}
 
 	return 0;
 }
 
-// GetEventSize site 1 (EDI = event type): replace the vanilla size-table read
-// (the table only holds the engine's own types) and resume at the instruction
-// that consumes the size.
+// GetEventSize site 1 (EDI = event type): answer the size in EDX/EBP and resume
+// at the instruction that consumes it.  Engine types (0x00-0x2E) return 0 and
+// keep the vanilla table path; every other number is answered here, so the
+// engine's out-of-bounds table read can never run for an unregistered type.
 DEFINE_HOOK(0x64B6FE, Venture_Event_GetSize1, 0x6)
 {
 	const std::uint8_t type = static_cast<std::uint8_t>(R->EDI() & 0xFFu);
-	const std::uint32_t size = venture::EventChannel::GetDataSize(type);
+	const venture::EventChannel::WireSize wire = venture::EventChannel::GetWireSize(type);
 
-	if (size != 0)
-	{
-		R->EDX(size);
-		R->EBP(size);
-		return kReturnGetSize1;
-	}
+	if (wire.policy == venture::EventChannel::WireSizePolicy::Vanilla)
+		return 0;
 
-	return 0;
+	R->EDX(wire.size);
+	R->EBP(wire.size);
+	return kReturnGetSize1;
 }
 
 // GetEventSize site 2 (EDI = event type): the original block also stores the
@@ -162,32 +195,28 @@ DEFINE_HOOK(0x64B6FE, Venture_Event_GetSize1, 0x6)
 DEFINE_HOOK(0x64BE7D, Venture_Event_GetSize2, 0x6)
 {
 	const std::uint8_t type = static_cast<std::uint8_t>(R->EDI() & 0xFFu);
-	const std::uint32_t size = venture::EventChannel::GetDataSize(type);
+	const venture::EventChannel::WireSize wire = venture::EventChannel::GetWireSize(type);
 
-	if (size != 0)
-	{
-		REF_STACK(size_t, sizeInStack, STACK_OFFSET(0xAC, -0x8C));
-		sizeInStack = size;
-		R->ECX(size);
-		R->EBP(size);
-		return kReturnGetSize2;
-	}
+	if (wire.policy == venture::EventChannel::WireSizePolicy::Vanilla)
+		return 0;
 
-	return 0;
+	REF_STACK(size_t, sizeInStack, STACK_OFFSET(0xAC, -0x8C));
+	sizeInStack = wire.size;
+	R->ECX(wire.size);
+	R->EBP(wire.size);
+	return kReturnGetSize2;
 }
 
 // GetEventSize site 3 (ESI = event type).
 DEFINE_HOOK(0x64C30E, Venture_Event_GetSize3, 0x6)
 {
 	const std::uint8_t type = static_cast<std::uint8_t>(R->ESI() & 0xFFu);
-	const std::uint32_t size = venture::EventChannel::GetDataSize(type);
+	const venture::EventChannel::WireSize wire = venture::EventChannel::GetWireSize(type);
 
-	if (size != 0)
-	{
-		R->ECX(size);
-		R->EBP(size);
-		return kReturnGetSize3;
-	}
+	if (wire.policy == venture::EventChannel::WireSizePolicy::Vanilla)
+		return 0;
 
-	return 0;
+	R->ECX(wire.size);
+	R->EBP(wire.size);
+	return kReturnGetSize3;
 }

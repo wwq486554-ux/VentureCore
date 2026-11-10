@@ -6,11 +6,19 @@
 // ---------------------------------------------------------------------------
 // Platform event channel: the 16 fixed-size engine event types 0x70-0x7F.
 //
-// The engine's own event types end at 0x2F; the rest of the byte range is
-// carved up between the DLLs that inject into the game (CnCNet 0x30-0x3F,
-// Phobos 0x40-0x45, Kratos 0x50-0x51, Ares 0x60-0x61).  This platform owns
-// 0x70-0x7F: 16 event types with a fixed payload size each, registered at
-// load time together with the responder that handles them on every machine.
+// The engine's own event types are 0x00-0x2E: 47 numbers, each indexing one
+// byte of the engine's payload-size table.  0x2F is the first free number; the
+// rest of the byte range is carved up between the DLLs that inject into the
+// game (CnCNet 0x30-0x3F, Phobos 0x40-0x45, Kratos 0x50-0x51, Ares
+// 0x60-0x61).  This platform owns 0x70-0x7F: 16 event types with a fixed
+// payload size each, registered at load time together with the responder that
+// handles them on every machine.
+//
+// The size hooks are fail-closed above the vanilla range: a number greater
+// than 0x2E that no registered platform claimed is consumed as one byte
+// instead of falling through to the engine's 47-entry table (an out-of-bounds
+// read there feeds the multiplayer decoder a garbage size).  See GetWireSize()
+// and the order contract documented in docs/EventChannel.md.
 //
 // This unit is pure (no engine headers, no platform logger) so the registry,
 // routing and the frame codec are unit-testable.  The engine side lives in
@@ -18,10 +26,10 @@
 //   * it installs the engine sender with SetSender() at load time;
 //   * it defines LogStartup();
 //   * the four engine hooks (dispatch + three GetEventSize sites) feed
-//     GetDataSize()/Dispatch() and take their sizes from the registry.
+//     GetWireSize()/Dispatch() and take their sizes from the registry.
 //
-// See docs/EventChannel.md for the wire format, the number-range argument and
-// the mixed-client warning.
+// See docs/EventChannel.md for the wire format, the number-range argument,
+// the fail-closed policy and the mixed-client warning.
 // ---------------------------------------------------------------------------
 
 namespace venture
@@ -32,6 +40,16 @@ inline constexpr std::uint32_t EventChannelSlotCount = 16;
 
 // The engine's EventClass union is 104 bytes; a payload can never be larger.
 inline constexpr std::uint32_t EventChannelMaxPayload = 104;
+
+// The engine numbers its own event types 0x00-0x2E: 47 numbers, each indexing
+// one byte of the engine's payload-size table.  0x2F is the first free number;
+// the engine table read must never see a number above EventChannelLastVanillaType.
+inline constexpr std::uint8_t EventChannelLastVanillaType = 0x2E;
+
+// Payload size the GetEventSize hooks answer for an unregistered number above
+// the vanilla range: consume exactly one byte.  Memory-safe, not stream-aligned
+// (a peer that sent a longer payload desynchronises, but cannot overrun).
+inline constexpr std::uint32_t EventChannelFailClosedSize = 1;
 
 class EventChannel
 {
@@ -106,6 +124,37 @@ public:
 	// Payload size of a registered type; 0 means "not ours".
 	static std::uint32_t GetDataSize(Type type);
 
+	// --- engine size policy ------------------------------------------------
+	// The three engine GetEventSize hooks size an event before the engine reads
+	// it.  The engine's own payload-size table only covers 0x00-0x2E, so the
+	// hooks have to answer for every other number themselves: a number above
+	// the vanilla range that our registry does not own is consumed as one fixed
+	// byte (fail-closed) instead of falling through to the engine's
+	// out-of-bounds table read.  Only the engine's own types fall through.
+	//
+	// Order contract: engine hooks run in DLL load order, and this platform
+	// loads after the other known platforms (Ares/Kratos/Phobos/Mix; see
+	// docs/EventChannel.md).  A foreign number therefore only reaches our hooks
+	// when no earlier platform claimed it - and then answering it ourselves is
+	// the safe behaviour.  Any platform that loads *after* this one has to
+	// answer unclaimed numbers itself: it cannot rely on the engine's table.
+	enum class WireSizePolicy : std::uint8_t
+	{
+		Vanilla = 0,    // 0x00-0x2E: return 0 so the engine answers
+		Registered = 1, // a registered channel type: answer its payload size
+		FailClosed = 2, // unregistered number above 0x2E: answer one byte
+	};
+
+	struct WireSize
+	{
+		WireSizePolicy policy = WireSizePolicy::FailClosed;
+		std::uint32_t size = EventChannelFailClosedSize;
+	};
+
+	// Engine-free size policy used by the three GetEventSize hooks (and by the
+	// unit test).  Total: every byte value maps to exactly one of the cases.
+	static WireSize GetWireSize(Type type);
+
 	// Registered name, or nullptr when the type is not ours.
 	static const char* Name(Type type);
 
@@ -116,10 +165,18 @@ public:
 	static const Entry* EntryAt(std::size_t index);
 
 	// --- dispatch ----------------------------------------------------------
-	// Routes one received event to its responder.  Returns false (and calls
-	// nothing) for a type that is not ours or for a payload size that does not
-	// match the registered size.
-	static bool Dispatch(Type type, const std::uint8_t* data, std::uint32_t size);
+	// Routes one received event to its responder.  `availableSize` is how many
+	// payload bytes the caller can actually vouch for (the engine dispatch hook
+	// passes the payload capacity of its fixed event record); the responder is
+	// always called with the *registered* payload size.  Returns false (and
+	// calls nothing) when the type is not ours, `data` is null, or the
+	// registered size is larger than `availableSize`; the engine adapter logs
+	// that last case as a warning.
+	//
+	// Dispatch cannot validate the contents of a payload: the wire format is
+	// not self-describing, so every responder has to check its own
+	// magic/version/length contract (see docs/EventChannel.md).
+	static bool Dispatch(Type type, const std::uint8_t* data, std::uint32_t availableSize);
 
 	// --- frame codec -------------------------------------------------------
 	// Serializes one event into `buffer`; returns the number of bytes written
