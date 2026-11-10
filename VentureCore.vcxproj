@@ -1,0 +1,81 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project DefaultTargets="Build" ToolsVersion="15.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <PropertyGroup Label="Globals">
+    <ProjectName>VentureCore</ProjectName>
+    <RootNamespace>VentureCore</RootNamespace>
+    <ProjectGuid>{6F4C1E2A-9B3D-4A7E-8C51-2D6E9F0A1B3C}</ProjectGuid>
+    <VCProjectVersion>15.0</VCProjectVersion>
+    <WindowsTargetPlatformVersion>10.0</WindowsTargetPlatformVersion>
+    <ShowAllFiles>true</ShowAllFiles>
+    <ThisDir>$(MSBuildThisFileDirectory)</ThisDir>
+    <YRppDir>$(ThisDir)external\YRpp</YRppDir>
+  </PropertyGroup>
+  <!-- Import build settings and the pinned engine bindings. -->
+  <Import Project="$(ThisDir)VentureCore.props" />
+  <Import Project="$(YRppDir)\YRpp.props" />
+  <!-- Resource files -->
+  <ItemGroup>
+    <ResourceCompile Include="src\version.rc" />
+  </ItemGroup>
+  <!-- Compiled files -->
+  <ItemGroup>
+    <!-- src/Core -->
+    <ClCompile Include="src\Core\Platform.cpp" />
+    <ClCompile Include="src\Core\PlatformPaths.cpp" />
+    <ClCompile Include="src\Core\Log.cpp" />
+    <ClCompile Include="src\Core\Ini.cpp" />
+    <ClCompile Include="src\Core\HostDetect.cpp" />
+    <ClCompile Include="src\Core\FeatureRegistry.cpp" />
+    <ClCompile Include="src\Core\EngineIni.cpp" />
+    <ClCompile Include="src\Core\IniTakeover.cpp" />
+    <ClCompile Include="src\Core\Lineage.cpp" />
+    <ClCompile Include="src\Core\SaveTrailer.cpp" />
+    <!-- src/Engine -->
+    <ClCompile Include="src\Engine\Hooks.Lifecycle.cpp" />
+    <ClCompile Include="src\Engine\Hooks.Save.cpp" />
+    <ClCompile Include="src\Engine\Hooks.Ini.cpp" />
+    <ClCompile Include="src\Engine\Hooks.Events.cpp" />
+    <ClCompile Include="src\Engine\Hooks.Commands.cpp" />
+    <!-- src/Event -->
+    <ClCompile Include="src\Event\EventChannel.cpp" />
+    <!-- src/Command -->
+    <ClCompile Include="src\Command\Commands.cpp" />
+    <!-- src/Ext -->
+    <ClCompile Include="src\Ext\ExtensionIndex.cpp" />
+    <ClCompile Include="src\Ext\AbstractExt.cpp" />
+    <ClCompile Include="src\Ext\ExtSave.cpp" />
+    <!-- src/Features -->
+    <ClCompile Include="src\Features\Example\ExampleFeature.cpp" />
+    <ClCompile Include="src\Features\Example\ExampleIniDemo.cpp" />
+    <!-- external/YRpp/StaticInits.cpp is compiled via external\YRpp\YRpp.props -->
+  </ItemGroup>
+  <!-- Headers (for IDE navigation only; the build finds them via include paths). -->
+  <ItemGroup>
+    <ClInclude Include="include\platform\Feature.h" />
+    <ClInclude Include="include\platform\Lineage.h" />
+    <ClInclude Include="src\Core\EnginePin.h" />
+    <ClInclude Include="src\Core\PlatformConfig.h" />
+    <ClInclude Include="src\Core\PlatformVersion.h" />
+    <ClInclude Include="src\Core\PlatformPaths.h" />
+    <ClInclude Include="src\Core\Platform.h" />
+    <ClInclude Include="src\Core\Log.h" />
+    <ClInclude Include="src\Core\LogPolicy.h" />
+    <ClInclude Include="src\Core\Ini.h" />
+    <ClInclude Include="src\Core\HostDetect.h" />
+    <ClInclude Include="src\Core\FeatureRegistry.h" />
+    <ClInclude Include="src\Core\SaveTrailer.h" />
+    <ClInclude Include="src\Engine\EngineCompat.h" />
+    <ClInclude Include="src\Ext\AbstractExt.h" />
+    <ClInclude Include="src\Ext\ExtHierarchy.h" />
+    <ClInclude Include="src\Ext\ExtSave.h" />
+    <ClInclude Include="src\Ext\ExtStream.h" />
+    <ClInclude Include="src\Ext\ExtSwizzle.h" />
+    <ClInclude Include="src\Ext\ExtensionIndex.h" />
+    <ClInclude Include="src\Ext\ExtensionStore.h" />
+    <ClInclude Include="src\Core\EngineIni.h" />
+    <ClInclude Include="src\Core\IniTakeover.h" />
+    <ClInclude Include="src\Event\EventChannel.h" />
+    <ClInclude Include="src\Command\Commands.h" />
+  </ItemGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
+</Project>

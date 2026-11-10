@@ -1,0 +1,311 @@
+// Unit test: platform event channel (registry, routing, frame codec, Send).
+//
+// The channel unit is engine-free by design (src/Event/EventChannel.h), so the
+// test links EventChannel.cpp alone and replaces the engine sender with a
+// capture function: everything a machine does with the 0x70-0x7F event numbers
+// except the engine call itself is exercised here.
+//
+// TEST_DEPS: src/Event/EventChannel.cpp
+
+#include <cstdint>
+#include <cstdio>
+#include <cstring>
+
+#include "Event/EventChannel.h"
+
+namespace
+{
+using Channel = venture::EventChannel;
+using RegisterResult = Channel::RegisterResult;
+
+int g_failures = 0;
+
+void Check(const bool ok, const char* const what)
+{
+	if (ok)
+	{
+		std::printf("ok    %s\n", what);
+	}
+	else
+	{
+		++g_failures;
+		std::printf("FAIL  %s\n", what);
+	}
+}
+
+// --- responders ------------------------------------------------------------
+int g_responderACalls = 0;
+std::uint8_t g_responderALast[venture::EventChannelMaxPayload] = {};
+std::uint32_t g_responderALastSize = 0;
+
+void ResponderA(const std::uint8_t* const data, const std::uint32_t size)
+{
+	++g_responderACalls;
+	g_responderALastSize = size;
+	std::memcpy(g_responderALast, data, size);
+}
+
+int g_responderBCalls = 0;
+
+void ResponderB(const std::uint8_t* const data, const std::uint32_t size)
+{
+	(void)data;
+	(void)size;
+	++g_responderBCalls;
+}
+
+int g_responderCCalls = 0;
+
+void ResponderC(const std::uint8_t* const data, const std::uint32_t size)
+{
+	(void)data;
+	(void)size;
+	++g_responderCCalls;
+}
+
+// --- fake engine sender ----------------------------------------------------
+int g_sendCalls = 0;
+std::uint8_t g_sentFrame[Channel::FrameSize] = {};
+std::uint32_t g_sentFrameSize = 0;
+
+bool CaptureSender(const std::uint8_t* const frame, const std::uint32_t frameSize)
+{
+	++g_sendCalls;
+	g_sentFrameSize = frameSize;
+	std::memcpy(g_sentFrame, frame, frameSize);
+	return true;
+}
+
+bool RefusingSender(const std::uint8_t* const frame, const std::uint32_t frameSize)
+{
+	(void)frame;
+	(void)frameSize;
+	return false;
+}
+
+std::uint32_t ReadU32At(const std::uint8_t* const data)
+{
+	return static_cast<std::uint32_t>(data[0])
+		| (static_cast<std::uint32_t>(data[1]) << 8)
+		| (static_cast<std::uint32_t>(data[2]) << 16)
+		| (static_cast<std::uint32_t>(data[3]) << 24);
+}
+}
+
+int __cdecl main(void)
+{
+	std::uint8_t payload4[4] = {0xDE, 0xAD, 0xBE, 0xEF};
+	std::uint8_t payload2[2] = {0x11, 0x22};
+	std::uint8_t payload1[1] = {0x5A};
+	std::uint8_t payload8[8] = {1, 2, 3, 4, 5, 6, 7, 8};
+	std::uint8_t payload104[venture::EventChannelMaxPayload] = {};
+	for (std::uint32_t i = 0; i < venture::EventChannelMaxPayload; ++i)
+		payload104[i] = static_cast<std::uint8_t>(i);
+
+	// --- channel range ------------------------------------------------------
+	std::printf("-- range --\n");
+	Check(!Channel::IsValidEventType(0x00), "0x00 is not a channel type");
+	Check(!Channel::IsValidEventType(0x2F), "0x2F (last vanilla type) is not a channel type");
+	Check(!Channel::IsValidEventType(0x40), "0x40 (Phobos range) is not a channel type");
+	Check(!Channel::IsValidEventType(0x6F), "0x6F is not a channel type");
+	Check(Channel::IsValidEventType(0x70), "0x70 is the first channel type");
+	Check(Channel::IsValidEventType(0x7F), "0x7F is the last channel type");
+	Check(!Channel::IsValidEventType(0x80), "0x80 is not a channel type");
+
+	Check(Channel::Count() == 0, "registry starts empty");
+	Check(Channel::GetDataSize(0x70) == 0, "unregistered channel type reports no data size");
+	Check(Channel::GetDataSize(0x40) == 0, "foreign type reports no data size");
+	Check(!Channel::IsOwnEventType(0x70), "unregistered channel type is not ours");
+	Check(Channel::Name(0x70) == nullptr, "unregistered channel type has no name");
+	Check(Channel::EntryAt(0) == nullptr, "no entry at index 0 of the empty registry");
+
+	// --- registration validation -------------------------------------------
+	std::printf("-- registration validation --\n");
+	Check(Channel::Register(0x40, "bad_low", 4, &ResponderA) == RegisterResult::InvalidType,
+		"0x40 rejected as outside the channel range");
+	Check(Channel::Register(0x80, "bad_high", 4, &ResponderA) == RegisterResult::InvalidType,
+		"0x80 rejected as outside the channel range");
+	Check(Channel::Register(0x70, nullptr, 4, &ResponderA) == RegisterResult::InvalidName,
+		"null name rejected");
+	Check(Channel::Register(0x70, "", 4, &ResponderA) == RegisterResult::InvalidName,
+		"empty name rejected");
+	Check(Channel::Register(0x70, "test", 0, &ResponderA) == RegisterResult::InvalidPayloadSize,
+		"payload size 0 rejected");
+	Check(Channel::Register(0x70, "test", venture::EventChannelMaxPayload + 1, &ResponderA)
+			== RegisterResult::InvalidPayloadSize,
+		"payload larger than 104 bytes rejected");
+	Check(Channel::Register(0x70, "test", 4, nullptr) == RegisterResult::InvalidResponder,
+		"null responder rejected");
+
+	Check(Channel::Register(0x70, "Venture_Test_Primary", 4, &ResponderA) == RegisterResult::Ok,
+		"0x70 registers");
+	Check(Channel::Count() == 1, "one handler registered");
+	Check(Channel::Register(0x70, "Venture_Test_Primary", 4, &ResponderA)
+			== RegisterResult::AlreadyRegistered,
+		"re-registering the same type rejected");
+	Check(Channel::Count() == 1, "duplicate does not change the count");
+
+	Check(Channel::IsOwnEventType(0x70), "0x70 is ours after registration");
+	Check(!Channel::IsOwnEventType(0x71), "0x71 is not ours yet");
+	Check(Channel::GetDataSize(0x70) == 4, "0x70 payload size is 4");
+	Check(Channel::GetDataSize(0x71) == 0, "0x71 has no payload size");
+	Check(Channel::Name(0x70) != nullptr && std::strcmp(Channel::Name(0x70), "Venture_Test_Primary") == 0,
+		"registered name is readable");
+	Check(Channel::EntryAt(0) != nullptr && Channel::EntryAt(0)->type == 0x70,
+		"entry 0 is 0x70");
+	Check(Channel::EntryAt(0) != nullptr && Channel::EntryAt(0)->payloadSize == 4,
+		"entry 0 carries the payload size");
+	Check(Channel::EntryAt(1) == nullptr, "no second entry yet");
+
+	Check(Channel::Register(0x71, "Venture_Test_Secondary", 2, &ResponderB) == RegisterResult::Ok,
+		"0x71 registers");
+	Check(Channel::Register(0x7F, "Venture_Test_Last", 8, &ResponderC) == RegisterResult::Ok,
+		"0x7F registers");
+	Check(Channel::Count() == 3, "three handlers registered");
+
+	// --- iteration ----------------------------------------------------------
+	std::printf("-- iteration --\n");
+	Check(Channel::EntryAt(0) != nullptr && Channel::EntryAt(0)->type == 0x70, "iteration: 0x70 first");
+	Check(Channel::EntryAt(1) != nullptr && Channel::EntryAt(1)->type == 0x71, "iteration: 0x71 second");
+	Check(Channel::EntryAt(2) != nullptr && Channel::EntryAt(2)->type == 0x7F, "iteration: 0x7F third");
+	Check(Channel::EntryAt(3) == nullptr, "iteration ends after the last entry");
+
+	// --- dispatch -----------------------------------------------------------
+	std::printf("-- dispatch --\n");
+	g_responderACalls = 0;
+	g_responderBCalls = 0;
+	g_responderCCalls = 0;
+
+	Check(Channel::Dispatch(0x70, payload4, 4), "dispatch routes 0x70");
+	Check(g_responderACalls == 1, "0x70 responder called once");
+	Check(g_responderALastSize == 4 && std::memcmp(g_responderALast, payload4, 4) == 0,
+		"0x70 responder received the payload");
+	Check(g_responderBCalls == 0, "other responders not called");
+
+	Check(!Channel::Dispatch(0x70, payload4, 3), "size mismatch rejected");
+	Check(g_responderACalls == 1, "size mismatch did not call the responder");
+	Check(!Channel::Dispatch(0x70, nullptr, 4), "null payload rejected");
+	Check(!Channel::Dispatch(0x71, payload4, 4), "0x71 rejects a 4-byte payload");
+	Check(!Channel::Dispatch(0x72, payload4, 4), "unregistered type in range not dispatched");
+	Check(!Channel::Dispatch(0x40, payload4, 4), "foreign type not dispatched");
+	Check(g_responderACalls == 1 && g_responderBCalls == 0 && g_responderCCalls == 0,
+		"no responder called by the rejected dispatches");
+
+	Check(Channel::Dispatch(0x71, payload2, 2), "dispatch routes 0x71");
+	Check(g_responderBCalls == 1, "0x71 responder called");
+	Check(Channel::Dispatch(0x7F, payload8, 8), "dispatch routes 0x7F");
+	Check(g_responderCCalls == 1, "0x7F responder called");
+
+	// --- frame codec --------------------------------------------------------
+	std::printf("-- frame codec --\n");
+	std::uint8_t frame[Channel::FrameSize] = {};
+	Check(Channel::WriteFrame(frame, Channel::FrameSize, 0x70, 3, 0x11223344u, payload4, 4)
+			== Channel::FrameSize,
+		"WriteFrame writes one full frame");
+	Check(Channel::FrameSize == 111, "frame size is 111 bytes");
+	Check(frame[0] == 0x70, "frame byte 0 is the event type");
+	Check(frame[1] == 0, "wire frames are not marked executed");
+	Check(frame[2] == 3, "frame byte 2 is the house index");
+	Check(ReadU32At(&frame[3]) == 0x11223344u, "frame bytes 3-6 are the frame number (LE)");
+	Check(std::memcmp(&frame[7], payload4, 4) == 0, "frame bytes 7.. are the payload");
+	Check(frame[11] == 0, "payload area is zero-padded");
+
+	Channel::FrameView view{};
+	Check(Channel::ReadFrame(frame, Channel::FrameSize, view), "ReadFrame decodes the frame");
+	Check(view.type == 0x70, "decoded type");
+	Check(view.houseIndex == 3, "decoded house index");
+	Check(view.frameNumber == 0x11223344u, "decoded frame number");
+	Check(view.payloadSize == 4, "decoded payload size comes from the registry");
+	Check(view.payload != nullptr && std::memcmp(view.payload, payload4, 4) == 0,
+		"decoded payload points into the buffer");
+
+	Check(!Channel::ReadFrame(frame, Channel::FrameSize - 1, view), "truncated frame rejected");
+	Check(!Channel::ReadFrame(frame, Channel::FrameSize + 1, view), "oversized frame rejected");
+	Check(!Channel::ReadFrame(nullptr, Channel::FrameSize, view), "null frame rejected");
+
+	std::uint8_t foreignFrame[Channel::FrameSize] = {};
+	Check(Channel::WriteFrame(foreignFrame, Channel::FrameSize, 0x70, 0, 0, payload4, 4)
+			== Channel::FrameSize,
+		"helper frame for the foreign-type test");
+	foreignFrame[0] = 0x72;
+	Check(!Channel::ReadFrame(foreignFrame, Channel::FrameSize, view),
+		"frame of an unregistered type rejected");
+
+	Check(Channel::WriteFrame(frame, Channel::FrameSize - 1, 0x70, 0, 0, payload4, 4) == 0,
+		"too-small buffer rejected");
+	Check(Channel::WriteFrame(frame, Channel::FrameSize, 0x70, 0, 0, payload4, 3) == 0,
+		"payload size mismatch rejected");
+	Check(Channel::WriteFrame(frame, Channel::FrameSize, 0x70, 0, 0, nullptr, 4) == 0,
+		"null payload rejected");
+	Check(Channel::WriteFrame(frame, Channel::FrameSize, 0x72, 0, 0, payload4, 4) == 0,
+		"unregistered type rejected");
+
+	Check(Channel::WriteFrame(frame, Channel::FrameSize, 0x71, -1, 0, payload2, 2)
+			== Channel::FrameSize,
+		"negative house index encodes");
+	Check(Channel::ReadFrame(frame, Channel::FrameSize, view), "frame with house -1 decodes");
+	Check(view.type == 0x71 && view.houseIndex == -1 && view.frameNumber == 0,
+		"house -1 round-trips");
+
+	// --- sending ------------------------------------------------------------
+	std::printf("-- send --\n");
+	Check(Channel::Sender() == nullptr, "no engine sender installed initially");
+	Check(!Channel::Send(0x70, 0, 10, payload4, 4), "Send without a sender fails");
+
+	Channel::SetSender(&CaptureSender);
+	Check(Channel::Sender() == &CaptureSender, "sender is installed");
+	g_sendCalls = 0;
+	Check(Channel::Send(0x70, 2, 77, payload4, 4), "Send accepts a registered event");
+	Check(g_sendCalls == 1, "sender called once");
+	Check(g_sentFrameSize == Channel::FrameSize, "sender receives one full frame");
+	Check(g_sentFrame[0] == 0x70 && g_sentFrame[1] == 0 && g_sentFrame[2] == 2,
+		"sent frame carries type and house index");
+	Check(ReadU32At(&g_sentFrame[3]) == 77u, "sent frame carries the frame number");
+	Check(std::memcmp(&g_sentFrame[7], payload4, 4) == 0, "sent frame carries the payload");
+
+	Check(!Channel::Send(0x70, 2, 77, payload4, 3), "Send rejects a wrong payload size");
+	Check(!Channel::Send(0x72, 2, 77, payload4, 4), "Send rejects an unregistered type");
+	Check(!Channel::Send(0x70, 2, 77, nullptr, 4), "Send rejects a null payload");
+	Check(g_sendCalls == 1, "rejected sends do not reach the sender");
+
+	Channel::SetSender(&RefusingSender);
+	Check(!Channel::Send(0x70, 2, 77, payload4, 4), "a refusing sender fails the Send");
+	Channel::SetSender(nullptr);
+	Check(Channel::Sender() == nullptr, "sender can be removed");
+
+	// --- every slot ---------------------------------------------------------
+	std::printf("-- all 16 slots --\n");
+	for (std::uint8_t type = 0x72; type < 0x7F; ++type)
+	{
+		const std::uint32_t size = (type == 0x7E) ? venture::EventChannelMaxPayload : 1u;
+		Check(Channel::Register(type, "Venture_Test_Slot", size, &ResponderA) == RegisterResult::Ok,
+			"remaining slot registers");
+	}
+
+	Check(Channel::Count() == venture::EventChannelSlotCount, "all 16 channel slots are registered");
+	Check(Channel::GetDataSize(0x7E) == venture::EventChannelMaxPayload,
+		"maximum 104-byte payload accepted");
+	Check(Channel::GetDataSize(0x72) == 1, "minimum 1-byte payload accepted");
+	Check(Channel::EntryAt(0) != nullptr && Channel::EntryAt(0)->type == 0x70, "full iteration: first slot");
+	Check(Channel::EntryAt(15) != nullptr && Channel::EntryAt(15)->type == 0x7F, "full iteration: last slot");
+	Check(Channel::EntryAt(16) == nullptr, "full iteration: end");
+	Check(Channel::Register(0x7D, "Venture_Overflow", 1, &ResponderA)
+			== RegisterResult::AlreadyRegistered,
+		"no 17th handler can be registered");
+
+	g_responderACalls = 0;
+	Check(Channel::Dispatch(0x7E, payload104, venture::EventChannelMaxPayload),
+		"dispatch of the maximum 104-byte payload");
+	Check(g_responderACalls == 1 && g_responderALastSize == venture::EventChannelMaxPayload,
+		"maximum payload reaches the responder unmodified");
+
+	std::printf("\n");
+	if (g_failures == 0)
+	{
+		std::printf("test_event_channel: all checks passed\n");
+		return 0;
+	}
+
+	std::printf("test_event_channel: %d check(s) FAILED\n", g_failures);
+	return 1;
+}

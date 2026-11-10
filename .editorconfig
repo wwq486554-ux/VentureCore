@@ -1,0 +1,44 @@
+# EditorConfig for the VentureCore repository. Visual Studio and most other
+# editors honour this. Line endings follow .gitattributes: CRLF for sources and
+# docs, LF for scripts.
+root = true
+
+[*]
+charset = utf-8
+end_of_line = crlf
+insert_final_newline = true
+trim_trailing_whitespace = true
+indent_style = tab
+indent_size = 4
+
+[*.md]
+indent_style = space
+indent_size = 2
+trim_trailing_whitespace = false
+
+[*.ini]
+indent_style = space
+indent_size = 2
+
+[*.{xml,vcxproj,props,sln}]
+indent_style = space
+indent_size = 2
+
+[*.sh]
+end_of_line = lf
+indent_style = space
+indent_size = 2
+
+[*.py]
+end_of_line = lf
+indent_style = space
+indent_size = 4
+
+[*.rc]
+# rc.exe assumes the system ANSI codepage without a BOM; this file stays pure
+# ASCII so no BOM is needed.
+charset = utf-8
+
+[.gitattributes]
+end_of_line = unset
+insert_final_newline = unset

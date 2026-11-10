@@ -1,0 +1,27 @@
+# Build output
+Release/
+Debug/
+*.pdb
+*.ilk
+*.exp
+*.lib
+*.obj
+
+# Visual Studio user state
+.vs/
+*.vcxproj.user
+*.vcxproj.filters
+*.aps
+*.sdf
+*.suo
+
+# Logs and local runtime state
+*.log
+
+# External build dependencies (not vendored; see external/README.md)
+external/YRpp/
+external/YRpp.commit
+
+# Python caches used by the helper scripts
+__pycache__/
+*.py[cod]

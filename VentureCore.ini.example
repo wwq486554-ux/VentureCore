@@ -1,0 +1,76 @@
+; ---------------------------------------------------------------------------
+; VentureCore.ini - sample configuration for the VentureCore platform DLL
+; ---------------------------------------------------------------------------
+;
+; This file is optional.  Copy it next to gamemd.exe (the same directory as
+; rules.ini) and rename it to VentureCore.ini.  If the file is missing, every
+; setting falls back to its default and the platform still starts.
+;
+; Format: standard Windows INI (the game's GetPrivateProfileString semantics).
+; Section and key names are case-insensitive.  Booleans accept
+; yes/no, true/false, on/off and 1/0.  An unreadable value falls back to the
+; default.
+;
+; The platform is a starter base: this sample contains no gameplay features, so
+; turning switches on or off does not change the game yet.  The [Features]
+; section exists so derived platforms have a stable place to add their switches.
+;
+; ---------------------------------------------------------------------------
+
+[Platform]
+; LogLevel: minimum level written to VentureCore.log.
+;   error | warn | info (default) | debug      (numeric 0-3 also accepted:
+;                                               0=debug, 1=info, 2=warn, 3=error)
+; Suppressed lines cost only a level comparison; debug is the full per-object
+; diagnostic trail.  See docs/Logging.md.
+LogLevel=info
+
+; VerboseLogging: legacy alias for LogLevel=debug.  yes enables DEBUG lines
+; exactly like LogLevel=debug and wins when both are configured.  Kept for
+; compatibility; new configurations should use LogLevel.
+VerboseLogging=no
+
+; DebugOutput: no (default) keeps debugger output silent in a RELEASE build;
+; yes mirrors every logged line to an attached debugger.  Leave no for release;
+; set yes only while debugging with a debugger attached.  A DEBUG build always
+; writes to the debugger.
+DebugOutput=no
+
+; LineagePolicy: what to do when another DLL of the VentureCore lineage is
+; already loaded in the same process (two would each build their own extension
+; table and savegame trailer).
+;   refuse (default) - log the conflict and leave the platform disabled; the
+;                      game keeps running without the platform's features
+;   warn             - log the conflict and continue (diagnostics only; the two
+;                      lineage DLLs would fight over the shared state)
+; See docs/Lineage.md.
+LineagePolicy=refuse
+
+; IniTakeover: hide the keys this platform owns in rules(md).ini from other
+; platform DLLs loaded next to VentureCore (the official Phobos would otherwise
+; read the same keys and double-count the feature).  yes (default) removes the
+; owned keys from the parsed rules INI after this platform read them; no leaves
+; them visible for the other platforms.  Only registered (section,key) pairs are
+; affected.  See docs/Ini.md.
+IniTakeover=yes
+
+[Features]
+; One switch per feature system: key = FeatureDescriptor.iniKey, value = yes/no.
+; Features default to on when a key is missing or invalid.  (The internal
+; FeatureDescriptor.id is not the switch key; it is used for logs and lookup.)
+; A feature that requires an optional host platform is additionally gated by the
+; resolved support tier (see docs/HostMatrix.md).
+
+; Example module (id: example_unit_counter): counts UnitClass create/destroy
+; transitions, logs one INFO progress line every 100 units (per-unit transitions
+; are DEBUG-only, so the default level stays quiet in a big battle) and one INFO
+; summary when the last tracked unit is gone.  It has no gameplay effect; it
+; exists to demonstrate the extension store, the lifecycle hooks, the logging
+; policy and the feature switch.  See docs/MakeYourOwnPlatform.md and
+; docs/Logging.md.
+Example=yes
+
+; Example INI module (id: example_ini_key): reads [Examples] UnitCounterLog from
+; rules(md).ini and registers the pair as owned, to demonstrate the rules/art INI
+; read API and the takeover.  It has no gameplay effect.  See docs/Ini.md.
+ExampleIniKey=yes

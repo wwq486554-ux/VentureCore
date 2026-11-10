@@ -1,0 +1,289 @@
+# VentureCore
+
+VentureCore is an MIT-licensed **starter base** for building your own platform DLL
+for *Command & Conquer: Yuri's Revenge* on top of **SyringeEx**.  You copy the
+repository, change the platform identity, add feature modules under
+`src/Features/`, and compile a single platform DLL of your own - without
+modifying Ares, Phobos or Kratos, and without re-implementing the plumbing every
+platform needs (startup, logging, INI, host detection, feature switches,
+extension storage and persistence, events, commands, the YRpp binding gate, build
+scripts).
+
+It is a template, not a mod: it deliberately contains **no gameplay features**.
+
+> **Status: v0.2.0-experimental** - an empty base plus two Example modules.  The
+> base machinery (startup, logging, config, extension storage with savegame
+> persistence, event channel, command registration, lineage detection, host
+> detection) is complete and verified; host-specific (T1-T3) features, Phobos
+> interop and AE are roadmap items, listed below.
+
+## What this sample provides
+
+Everything below is implemented and exercised by the sample build:
+
+* **Platform identity and versioning** - `src/Core/PlatformConfig.h` is the single
+  header that renames the platform; the DLL, INI, log, savegame id and version
+  resource follow it.  `src/version.rc` carries name, version, build type and the
+  YRpp pin, and the build stamps in the git commit/ref.
+* **Startup pipeline** - the `Venture_ExeRun` hook verifies SyringeEx, opens the
+  log, loads `<Platform>.ini`, detects optional hosts, resolves the support tier,
+  applies the lineage check and initializes every registered feature.
+* **File logging** - `<Platform>.log` next to `rules.ini`, level-filtered
+  (`[Platform] LogLevel=error|warn|info|debug`), one per-process separator header,
+  no unconditional `OutputDebugString` in release builds and a crash-proof
+  fallback; the source-hygiene check in `scripts/verify_build.py` keeps it that
+  way (see `docs/Logging.md`).
+* **INI layer** - typed getters over `<Platform>.ini`, typed reads over the
+  engine-parsed `rules(md).ini` / `art(md).ini`, and a **rules-INI takeover**: when
+  a feature switch is on, the platform-owned keys are removed from the parsed
+  rules INI so a host platform loaded next to us (Phobos) cannot read them too
+  (see `docs/Ini.md`).
+* **Host detection matrix** - optional hosts (Ares, Phobos, Kratos,
+  Kaleidoscope) are detected by loaded module, logged, and mapped to support
+  tiers T0-T3.  No functional dependency on any of them in this sample.
+* **Lineage mutual exclusion** - the DLL exports a lineage marker; a second DLL of
+  the same lineage is detected at startup, named in the log and (by default)
+  refused so the process never gets two extension tables / savegame trailers
+  (see `docs/Lineage.md`).
+* **Compile-time feature registry** - `FeatureDescriptor`, `FeatureContext`,
+  `FeatureRegistrar`, `VENTURE_REGISTER_FEATURE` (`include/platform/Feature.h`);
+  one `[Features]` switch per feature (`iniKey`, default on) plus `minTier`
+  gating.
+* **Extension storage** - an extension hierarchy (`AbstractExt ->
+  TechnoExt -> FootExt -> UnitExt`, mirroring the Phobos call shape), one
+  most-derived instance per owner object, a typed
+  `ExtensionStore<TOwner, TExt>` (O(1) owner map + intrusive allocation-order
+  list + last-owner fetch cache) and a type-erased global `ExtensionIndex`;
+  scenario-clear, pointer-invalidation and savegame plumbing included.
+* **Savegame tail block** - extension state is written after every other
+  platform's block and read by scanning backwards from the end of the stream, so
+  old saves and host combinations keep loading; format in `docs/SaveFormat.md`.
+* **Event channel** - platform-private network event types `0x70-0x7F` with fixed
+  payloads, a responder registry and the engine's own event record as wire
+  format (see `docs/EventChannel.md`).
+* **Command registration** - new player commands with UI name/category/description
+  that the player binds in the game's keyboard dialog (see `docs/Commands.md`).
+* **Lifecycle hooks** - `UnitClass` construction, both `UnitClass` destruction
+  sites, scenario clear and the engine's pointer-invalidation announcement.
+* **Example modules** - `example_unit_counter` allocates/removes a `UnitClass`
+  extension (an `ExampleUnitExt` derived from `UnitExt`), counts
+  created/destroyed/live units, verifies the base-class views, persists a per-unit
+  serial through the savegame trailer and logs sparsely; `example_ini_key` reads
+  and takes over one `rules(md).ini` key.  Neither has a gameplay effect; they
+  demonstrate the whole feature contract and are meant to be copied.
+* **Engine binding gate** - YRpp pinned by commit; enforced at build time
+  (`scripts/linux/check_yrpp.py`), compile time (`static_assert`s in
+  `src/Engine/EngineCompat.h`) and run time (log + version resource).
+* **Hook catalogue + static verification** - `docs/HookCatalogue.md` lists every
+  hook (17 records, 16 distinct handlers); `scripts/verify_build.py` parses that
+  table and verifies a built DLL against it without hard-coding a second copy.
+* **Unit tests and a benchmark** - `tests/` with engine-free test programs (run
+  with `scripts/linux/run_tests.sh`) and the extension-store microbenchmark
+  (`scripts/linux/bench_store.sh`).
+* **Build system** - Windows `VentureCore.sln` (VS2022, v143) and Linux scripts
+  that drive the real MSVC toolchain under Wine.
+
+## Not in this sample (roadmap)
+
+These are **planned, not implemented**; do not expect them from a v0.2.0 DLL:
+
+1. **T1-T3 host-specific features** - behaviour that only runs when Ares /
+   Phobos / Kratos / Kaleidoscope are present.
+2. **Phobos interop** - deliberately calling into Phobos extensions.
+3. **AE** (Ares extensions) - not handled.
+
+## Requirements
+
+| Requirement | Why |
+| --- | --- |
+| *Yuri's Revenge* 1.001 with `gamemd.exe` | the host executable the hooks are addressed for; not distributed |
+| SyringeEx (`Syringe.exe` in the game directory) | injects the DLL; VentureCore **refuses to run under an older Syringe** (a message box explains this and the game is terminated) |
+| YRpp checkout at the pinned commit | build dependency, not vendored; fetched into `external/YRpp/` (see below) |
+| Visual Studio 2022 (v143) / MSVC 14.44 toolset | build toolchain (on Linux, run under Wine) |
+| Ares / Phobos / Kratos / Kaleidoscope | **optional**; detected and logged only |
+
+The DLL is discovered through its `.syhks00` section: SyringeEx scans the game
+directory for DLLs that carry that section and loads them.  No registry edits or
+launcher changes are needed.
+
+## Building
+
+### YRpp first (both platforms)
+
+YRpp is not distributed with this repository.  Fetch it into `external/YRpp/`
+once per checkout:
+
+```bash
+# Linux: copy a local YRpp checkout (the helper also writes external/YRpp.commit)
+scripts/linux/fetch_yrpp.sh --from /path/to/YRpp
+```
+
+On Windows, clone the YRpp repository and check out the commit named by
+`VC_YRPP_PIN` in `src/Core/EnginePin.h` into `external/YRpp` (or run the same
+helper from Git Bash).  The build fails if the revision does not match the pin.
+
+### Linux (MSVC under Wine)
+
+```bash
+cd VentureCore
+scripts/linux/build_linux.sh Release --build-type RELEASE
+```
+
+This drives the real MSVC 14.44 toolchain and Windows SDK under Wine (the same
+toolset as the Windows build).  A successful build:
+
+* exits with code 0 and prints a line containing `[linux-build] output:`,
+* produces `Release/VentureCore.dll` and `Release/VentureCore.pdb`,
+* `file Release/VentureCore.dll` reports `PE32 ... Intel i386`.
+
+Useful options: `--clean`, `-v`, `--jobs N`, `--deploy DIR` (copy into a game
+directory), `--fix-eol` (normalise line endings first).  `--build-type` selects
+the `RELEASE` / `NIGHTLY` preprocessor define; a build without it is a local
+build and is labelled `LOCAL` in the log and version resource.
+
+Builds, tests, the benchmark and the probes share one Wine toolchain, so they take
+an flock in the prefix and serialise against each other (including across git
+worktrees that share the prefix).
+
+### Windows
+
+Open `VentureCore.sln` in Visual Studio 2022 and build `Release | Win32`.  The
+project uses toolset v143 and expects `external/YRpp/` to be populated as
+described above.
+
+## Verifying a build
+
+Three checks work on this machine; the in-game check is a human step:
+
+```bash
+# static: parses docs/HookCatalogue.md and verifies the built PE image (7 checks)
+python3 scripts/verify_build.py                 # defaults to Release/VentureCore.dll
+
+# dynamic: loads the DLL into a tiny Win32 host under Wine, resolves the exports,
+# checks the lineage marker and proves the two-copy lineage conflict
+scripts/linux/load_probe.sh
+
+# unit tests: engine-free test programs, compiled with the same toolchain
+scripts/linux/run_tests.sh
+```
+
+`verify_build.py` checks the PE format (PE32/i386), the `.syhks00` hook records
+against the catalogue, the distinct hook handler exports, the version resource
+strings (platform name, version, YRpp pin), the registered Example feature id and
+the log-policy source hygiene.  It exits 0 only when every check passes.
+
+`load_probe.sh` performs `LoadLibrary` -> `GetProcAddress` for the base hook
+handlers and the lineage markers, validates the marker payload and prints
+`resolved exports: 7/7`, then loads a second copy of the DLL under another file
+name and expects the conflict counter to go from 0 to 1.  That is the strongest
+check possible without starting the game.
+
+The real test - launching the game with SyringeEx and the DLL in a writable game
+directory, then entering and leaving a skirmish (plus one save/load round trip) -
+must be done by a human.  See `docs/HookCatalogue.md` for what each hook does and
+`docs/HostMatrix.md` for the host combinations.
+
+## Installing
+
+1. Install SyringeEx in the game directory (replacing the old `Syringe.exe`).
+2. Copy `Release/VentureCore.dll` next to `gamemd.exe`.
+3. Optionally copy `VentureCore.ini.example` to `VentureCore.ini` and edit it.
+4. Start the game.  `<Platform>.log` appears next to `rules.ini` and records the
+   startup sequence: process header, platform/version, git revision, YRpp pin, INI
+   status, log level, hosts and tier, lineage, feature switches, registered
+   commands and event types, then `startup complete`.
+
+The base has no unload hook; the log is flushed as lines are written and the
+process ends normally.
+
+## Configuration
+
+`VentureCore.ini` (next to `rules.ini`) has two sections:
+
+* `[Platform]` - platform-wide options:
+  * `LogLevel=error|warn|info|debug` (default `info`); the legacy
+    `VerboseLogging=yes` is an alias for `debug`;
+  * `DebugOutput=no|yes` (default `no`; a release build writes to the debugger
+    only when enabled);
+  * `LineagePolicy=refuse|warn` (default `refuse`: a second DLL of the same
+    lineage is detected and the later one stays disabled; `warn` only logs);
+  * `IniTakeover=yes|no` (default `yes`: hide platform-owned `rules(md).ini` keys
+    from other platforms loaded next to us).
+* `[Features]` - one switch per feature, keyed by the feature's
+  `FeatureDescriptor.iniKey`, value `yes`/`no`; features default to on.  The
+  internal feature id is not the switch key.  A feature with a higher `minTier`
+  is disabled when the detected host set does not reach that tier.
+
+Booleans accept `yes/no`, `true/false`, `on/off` and `1/0`.  See
+`VentureCore.ini.example`.
+
+## Repository layout
+
+| Path | Contents |
+| --- | --- |
+| `include/platform/` | public source-level API: `Feature.h`, `Lineage.h` |
+| `src/Core/` | identity/version, log, INI, rules-INI takeover, host detection, lineage scan, feature registry, save trailer, startup |
+| `src/Engine/` | engine ABI assertions and the base hooks (lifecycle, INI, savegame) |
+| `src/Ext/` | extension storage (`AbstractExt`, `ExtHierarchy`, `ExtensionStore`, `ExtensionIndex`, savegame streams) |
+| `src/Event/` | the platform event channel |
+| `src/Command/` | player-command registry |
+| `src/Features/Example/` | the two sample feature modules |
+| `src/version.rc` | VERSIONINFO resource |
+| `tests/` | engine-free unit tests and the store microbenchmark |
+| `docs/` | the documentation set (see below) |
+| `scripts/verify_build.py` | static verification of a built DLL |
+| `scripts/linux/` | MSVC-under-Wine build, tests, benchmark, YRpp check/fetch, probes |
+| `external/` | external dependencies; `YRpp/` is fetched locally and not committed |
+| `VentureCore.sln`, `VentureCore.vcxproj`, `VentureCore.props` | Windows build |
+
+## Documentation
+
+| Document | What it covers |
+| --- | --- |
+| `docs/MakeYourOwnPlatform.md` | step-by-step: turn this base into your own platform |
+| `docs/Renaming.md` | rename the platform (DLL/INI/log/version/savegame id) safely |
+| `docs/EngineBindings.md` | how the base binds to gamemd / SyringeEx / YRpp; storage, INI, savegame, event, command, lineage and logging layers |
+| `docs/HookCatalogue.md` | every installed hook: address, window size, purpose |
+| `docs/HostMatrix.md` | required vs optional hosts, detection, support tiers, mixed-client constraints |
+| `docs/SaveFormat.md` | the savegame tail block: stream layout, payload, load sequence |
+| `docs/Ini.md` | rules/art INI reads and the rules-INI takeover |
+| `docs/EventChannel.md` | event type range, payload format, responders, mixed-client risk |
+| `docs/Commands.md` | registering player commands and binding hotkeys |
+| `docs/Lineage.md` | the lineage marker and the mutual-exclusion check |
+| `docs/Logging.md` | log levels, debugger output gating, sampling, measured cost |
+| `docs/Licensing.md` | MIT base, GPL-3.0 feature packs, derived-platform rules |
+| `docs/Updating.md` | updating the YRpp pin, the platform and the version |
+| `CHANGELOG.md` | release history |
+| `NOTICE.md` | third-party components and their terms |
+
+## Licensing
+
+The base is **MIT** (`LICENSE.md`, `NOTICE.md`).  YRpp is not distributed and has
+no license declaration; SyringeEx and the optional host platforms are not
+distributed either.  Feature packs published later under the Venture umbrella are
+planned to be **GPL-3.0**; a derived platform may pick its own license, but
+copying GPL-3.0 modules into it makes the combined work GPL-3.0.  Details:
+`docs/Licensing.md`.
+
+## 中文简介
+
+VentureCore 是一个 MIT 授权的“起始基座/模板”：复制仓库 → 改
+`src/Core/PlatformConfig.h` 的平台名 → 在 `src/Features/` 下加自己的功能模块 →
+编译成你自己的单一平台 DLL，不需要改 Ares / Phobos / Kratos，也不用重复造
+启动、日志、INI、宿主检测、功能开关、扩展存储、存档、事件、命令这些基础设施。
+
+当前版本 `v0.2.0-experimental` 是**空基座 + 两个示例模块**：示例只统计 UnitClass
+的创建/销毁、读取一个 rules 键，没有任何玩法功能。基座机械已经齐备并全部自检通过：
+日志分级、`<Platform>.ini`、rules/art INI 读取与同名键接管、宿主矩阵、血统互斥、
+扩展存储（继承链 + 存档尾块持久化）、事件通道 `0x70–0x7F`、玩家命令注册。
+T1–T3 宿主专属功能、Phobos Interop、AE 仍是 roadmap（见上方 "Not in this sample"）。
+硬依赖只有 `gamemd.exe` + SyringeEx；Ares / Phobos / Kratos / Kaleidoscope 只做检测和日志。
+构建与自检：
+
+```bash
+scripts/linux/build_linux.sh Release --build-type RELEASE   # Wine 里的真 MSVC
+python3 scripts/verify_build.py                            # 静态自检，7 项全 PASS
+scripts/linux/load_probe.sh                                # Wine 下 LoadLibrary 探针
+scripts/linux/run_tests.sh                                 # 单元测试（引擎无关）
+scripts/linux/bench_store.sh                               # 扩展存储微基准
+```

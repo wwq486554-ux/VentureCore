@@ -1,0 +1,245 @@
+# INI Layer: Typed Reads and Takeover
+
+This document describes the platform's INI-facing layer:
+
+* `src/Core/EngineIni.h` - typed reads over the engine's parsed `rules(md).ini` /
+  `art(md).ini`;
+* `src/Core/IniTakeover.h` - the owned-key registry and the takeover purge that
+  hides the platform's own keys from host platforms loaded next to it;
+* `src/Engine/Hooks.Ini.cpp` - the engine adapter and the takeover hook;
+* `src/Features/Example/ExampleIniDemo.cpp` - the reference feature module that
+  reads one rules key and registers it as owned.
+
+Related documents: `docs/HookCatalogue.md` (hook address table),
+`docs/EngineBindings.md` (binding layers), `docs/MakeYourOwnPlatform.md` (writing
+a feature module). The `[Platform] IniTakeover` switch is documented in
+`README.md` and `VentureCore.ini.example`.
+
+## Why read through the engine
+
+`rules(md).ini` and `art(md).ini` are parsed by the engine into `CCINIClass`
+objects; YRpp exposes them as `CCINIClass::INI_Rules` (a pointer) and
+`CCINIClass::INI_Art` (a reference). A feature must read those parsed objects,
+not re-open the files:
+
+* the engine's view is what every other subsystem uses, including its own
+  merging/resolution rules; re-parsing would diverge from it;
+* the takeover layer removes keys from that parsed object, so it is the only view
+  the platform can consistently filter;
+* the file may not even exist (defaults compiled into the engine), while the
+  parsed object always exists once the engine has loaded it.
+
+## Typed reads (`Core/EngineIni.h`)
+
+| Function | Returns |
+| --- | --- |
+| `EngineIni::ReadBool(ini, section, key, def)` | `def` when the INI/section/key is missing, otherwise the engine's boolean parse (`yes`/`no`/`true`/`false`/`on`/`off`/`1`/`0`) |
+| `EngineIni::ReadInt(ini, section, key, def)` | `def` when missing, otherwise the engine's integer parse |
+| `EngineIni::ReadDouble(ini, section, key, def)` | `def` when missing, otherwise the engine's floating-point parse |
+| `EngineIni::ReadString(ini, section, key, def, buffer, size)` | the value, or `def`, copied into `buffer` (always NUL-terminated) |
+
+Every getter tolerates a null INI pointer, section or key and returns the default
+(`EngineIni.h` only forward-declares `CCINIClass`; the call site includes
+`Engine/EngineCompat.h` when it needs `CCINIClass::INI_Rules` / `INI_Art`):
+
+```cpp
+#include "Core/EngineIni.h"
+#include "Engine/EngineCompat.h"   // CCINIClass::INI_Rules
+
+const bool logUnits = venture::EngineIni::ReadBool(
+    CCINIClass::INI_Rules, "Examples", "UnitCounterLog", false);
+```
+
+The same functions work for the art INI:
+
+```cpp
+const int frameCount = venture::EngineIni::ReadInt(
+    &CCINIClass::INI_Art, "SomeAnim", "FrameCount", 1);
+```
+
+### Reading rules keys at the right time
+
+The platform starts from the `ExeRun` hook, which runs **before** the engine
+parses `rules(md).ini`. A feature that needs a value from the rules INI therefore
+cannot reliably read it inside `Initialize()`; instead it registers a rules-INI
+observer (`Core/IniTakeover.h`):
+
+```cpp
+void OnRulesIniReady(venture::IniTakeover::IReader& rules)
+{
+    const bool logUnits = rules.ReadBool("Examples", "UnitCounterLog", false);
+    // ...
+}
+
+void Initialize(const venture::FeatureContext& context)
+{
+    venture::IniTakeover::RegisterOwnedKey("Examples", "UnitCounterLog");
+    venture::IniTakeover::RegisterRulesIniObserver(&OnRulesIniReady);
+}
+```
+
+The observer runs when the engine has parsed the rules INI and is about to read
+it, once per rules load, **before** the takeover purge - so it sees exactly the
+values the game itself will use. `ExampleIniDemo.cpp` is the working example
+(`[Examples] UnitCounterLog=yes|no`, logged when a game starts).
+
+## INI takeover
+
+### Contract
+
+Features define INI keys. When a host platform such as official Phobos is loaded
+next to VentureCore, a key that both sides understand must not be consumed by
+both (a double-count / conflicting-semantics hazard, D33). The platform therefore
+declares which `(section, key)` pairs it owns and removes them from the parsed
+rules INI before any other consumer reads it.
+
+* **Registration** - a feature calls `IniTakeover::RegisterOwnedKey(section, key)`
+  from `Initialize()` while its feature switch is on. Matching is
+  case-insensitive and duplicate registrations are collapsed. When a feature is
+  switched off it registers nothing, so its keys stay visible to hosts (that is
+  what switching the feature off means).
+* **Purge** - the engine hook removes the registered pairs from the parsed rules
+  INI. Only registered pairs are touched; every other key, including an unowned
+  key in the same section, is left alone. The purge is idempotent, and it runs
+  again on every rules load (a second scenario start re-parses and re-reads the
+  INI through the same object).
+* **Case** - both the registry and the removal are case-insensitive, because INI
+  keys/sections are.
+* **Switch** - `[Platform] IniTakeover=yes|no` (default `yes`), read lazily from
+  `<Platform>.ini` when the rules INI is first loaded. With `no`, the read APIs
+  and the rules-INI observers still work but nothing is purged - the user opted
+  out of the interop.
+
+### Route A: purge after parse, at `RulesClass::Init` (implemented)
+
+Hook: **`0x6686C0`, size `0x6`, handler `Venture_RulesClass_Init`**.
+
+The engine parses `rules(md).ini` into `CCINIClass::INI_Rules` and then calls
+`RulesClass::Init(CCINIClass*)` to read it. Both call sites of that function pass
+`CCINIClass::INI_Rules`, and its body reads the INI itself shortly after entry
+(`GetSection` at `0x6689F6`, `ReadInteger` at `0x668A19`), so at the function
+entry the INI is already parsed and nothing has read the platform's keys from it
+yet.
+
+Verified instruction window:
+
+```
+006686C0: 81 ec d0 00 00 00   sub  esp, 0xd0      (6 bytes)
+006686C6: a1 e0 54 b0 00      mov  eax, ds:0xb054e0   <- next instruction
+```
+
+The function is `__thiscall` with one 4-byte stack argument and returns with
+`ret 0x4`; the hook reads the INI pointer with `GET_STACK(CCINIClass*, pINI, 0x4)`.
+No other platform in the supported host set hooks `0x6686C0`; the nearest
+ecosystem site is `0x668BF0` (`RulesClass_Addition`), which is a *different*
+function called from inside `RulesClass::Init` (`0x668A27`, `0x668B05`,
+`0x668BAA`), i.e. **after** this hook. A host that reads its rules extensions
+there (and every later rules/type read) therefore never sees the platform-owned
+keys.
+
+The adapter removes a key with the engine's own single-entry removal path
+(`YRpp INIClass::Clear(section, key)`, gamemd `0x5257C0`): it looks up the stored
+section/entry case-insensitively in the parsed object, then calls the engine
+function with the stored spelling, which drops the entry from the section's
+`EntryIndex`, unlinks it and deletes it with the game's deleting destructor.
+Using the engine's own removal avoids hand-rolled index/list surgery and keeps
+the INI object internally consistent.
+
+Log lines (from the takeover hook):
+
+* `[IniTakeover] [Platform] IniTakeover=yes|no (N owned key(s) registered)` -
+  info, once, at the first rules load;
+* `[IniTakeover] rules INI purge: N owned key(s) removed (...)` - debug, only
+  when something was actually removed (enable `[Platform] VerboseLogging=yes` or
+  a debug log level to see it).
+
+### Route B: read-layer filtering - deliberately deferred
+
+The alternative is a hook on `INIClass::ReadString` (`0x528A10`) that returns the
+default for owned `(section, key)` pairs at read time, with a thread-local bypass
+so the platform's own reads still work. It is **not** implemented, for three
+reasons:
+
+1. **The site is already taken.** Ares hooks `0x528A10` with size `5`; a second
+   hook at the same address shares the overwritten window (SyringeEx uses the
+   largest declared size) and would filter every string read process-wide.
+2. **It is far more invasive.** Route B changes the semantics of every consumer
+   of the engine INI - including map/gamemode INIs that do not exist yet at
+   `RulesClass::Init` time - and needs the bypass mechanism to be correct for
+   every nested read order.
+3. **Route A is sufficient for the contract.** Purging the single parsed rules
+   object covers every later reader of that object (engine, host platforms and
+   the platform itself), without touching global read behaviour.
+
+Route B is the fallback for the INIs route A cannot own: map/gamemode INIs and
+`art(md).ini`-based extension keys. It should be revisited together with those
+loaders (a per-INI purge hook is the preferred first option; `0x528A10` only if
+no clean load site exists).
+
+### Limitations
+
+* **One INI object.** Route A covers the parsed `rules(md).ini` only. Gamemode
+  and map INIs have their own load path and are not purged yet; `art(md).ini`
+  keys can be read with `EngineIni` but are not hidden from hosts yet.
+* **Only registered pairs.** A key that a feature forgets to register, or
+  registers after the rules INI has been parsed, stays visible to hosts. Register
+  from `Initialize()`.
+* **Concrete entries only.** The purge removes the concrete entry. If a mod
+  uses an INI inheritance mechanism (a host platform's `$Inherits` read-layer
+  feature) to alias the same key from a parent section, that read-layer resolution
+  is outside route A's reach.
+* **Single-threaded.** The registry and the observers are populated/consumed on
+  the game's main thread; there are no locks.
+* **Observers see the real value only before the purge.** Any later read of an
+  owned key from the same INI returns the default.
+
+## Hook sites reused from the ecosystem (not installed yet)
+
+These are the type-loading sites the wider Phobos / YRpp ecosystem hooks for
+per-type INI reading. The platform does **not** install them in this increment -
+they are listed so a future type-extension layer can reuse the same verified
+sites instead of re-deriving them:
+
+| Address | Engine function | Typical use |
+| --- | --- | --- |
+| `0x747B49` | `UnitTypeClass` INI read | unit type extension keys |
+| `0x524734` | `InfantryTypeClass` INI read | infantry type extension keys |
+| `0x41CD54` | `AircraftTypeClass` INI read | aircraft type extension keys |
+| `0x715A4D` | `TechnoTypeClass` INI read | shared techno-type extension keys |
+
+The rules-INI purge already removes owned keys from the parsed INI *before* those
+readers run, so a type-level hook is only needed when a feature wants to
+intercept the read itself (for example to log or transform it), not to hide a
+key.
+
+## Verification
+
+`tests/test_engine_ini.cpp` is a pure console test (no game) and covers:
+
+* typed reads over an in-memory INI before the purge, including defaults for
+  missing keys;
+* the registry is case-insensitive, de-duplicating and ignores null/empty
+  registrations;
+* observers run before the purge and see the real value;
+* only owned keys are removed (same-named key in another section and unowned key
+  in the same section survive);
+* removal matches the INI case-insensitively;
+* the purge is idempotent and `Apply` can run without a reader;
+* `IniTakeover=no` semantics: reads (and observers) still work, nothing is
+  purged.
+
+The hook boundary itself is verified with `objdump -d -M intel
+--start-address=0x6686C0 --stop-address=0x6686E0 gamemd.exe` (window above), the
+hook table is checked by `scripts/verify_build.py` against
+`docs/HookCatalogue.md`, and `0x6686C0` was cross-checked against the five host
+platform `.syhks00` hook tables used for host compatibility (none uses it).
+
+## Files
+
+| Path | Contents |
+| --- | --- |
+| `src/Core/EngineIni.h` / `.cpp` | typed reads over a `CCINIClass` |
+| `src/Core/IniTakeover.h` / `.cpp` | owned-key registry, observers, purge, `[Platform] IniTakeover` gating (pure C++, unit-testable) |
+| `src/Engine/Hooks.Ini.cpp` | engine adapter over `CCINIClass` and the `0x6686C0` hook |
+| `src/Features/Example/ExampleIniDemo.cpp` | example module: read + register an owned key |
+| `tests/test_engine_ini.cpp` | unit test of the takeover core |
