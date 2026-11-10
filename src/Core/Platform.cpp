@@ -191,7 +191,18 @@ void OnScenarioClear()
 	// close point (A-04).  The three failure-exit hooks close the load window, but
 	// a scenario change is the last line of defence: never carry an open window or
 	// the deferred records of an aborted load into the next scenario.
-	ExtensionIndex::Instance().ResetForScenarioClear();
+	//
+	// The engine also clears the scenario *inside* a normal savegame load: the
+	// object-state reader (0x67E730) calls ResetScenario (0x6851F0) as its first
+	// step (0x67E739), after our load window was opened at 0x67E44D.  Resetting the
+	// window there would make every object the load constructs allocate its
+	// extension immediately, so the trailer's saved rows could no longer be adopted
+	// (G1 E1 real game, 2026-11-10: "0 adopted / 44 failed").  While a load is in
+	// progress the window therefore stays open; the hooks are the actual A-04 fix.
+	if (ExtensionIndex::Instance().IsLoadingSaveGame())
+		Log::Info("scenario clear: inside a savegame load - keeping the load window open");
+	else
+		ExtensionIndex::Instance().ResetForScenarioClear();
 	ExtensionIndex::Instance().ClearAll();
 	Log::Info("scenario clear: extension state reset (%zu store(s) registered)",
 		ExtensionIndex::Instance().StoreCount());

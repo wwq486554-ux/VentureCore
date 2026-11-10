@@ -30,7 +30,7 @@ The table is machine-read.  Keep these rules when editing it:
 | 地址 | size | 名称 | 用途 | 备注 |
 | --- | --- | --- | --- | --- |
 | 0x7CD810 | 0x9 | Venture_ExeRun | Base initialization: SyringeEx gate, read the INI, build the host detection matrix, initialize feature modules, write the startup log | Core; runs once per process |
-| 0x685659 | 0xa | Venture_ScenarioClear | Scenario cleanup: clear every extension store and the global extension index | Core; scenario teardown |
+| 0x685659 | 0xa | Venture_ScenarioClear | Scenario cleanup: clear every extension store and the global extension index | Core; scenario teardown. NB: the engine also calls `ResetScenario` (this function) **inside** a savegame load (`0x67E730` -> `0x67E739`), after the load window opened at `0x67E44D`; the handler keeps the load window open in that case (resetting it would break the trailer adoption) |
 | 0x7258D0 | 0x6 | Venture_AnnounceInvalidPointer | Pointer-invalidation notice: the engine announces that an owner pointer became invalid; the extension index records the notification and forwards it to pointer-keyed subscribers | Core; the object's destructor hook still owns extension removal - v0 only counts and debug-logs the notification |
 | 0x7353D3 | 0x7 | Venture_Example_UnitClass_CTOR | Example module: allocate the `UnitClass` extension on construction | Example module; demonstrates the extension store |
 | 0x735967 | 0x9 | Venture_Example_UnitClass_DTOR | Example module: remove the `UnitClass` extension on destruction | Example module; first destructor site |

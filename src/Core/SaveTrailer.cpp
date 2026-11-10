@@ -303,12 +303,12 @@ void FinishLoad()
 void EnterLoadWindow()
 {
 	ExtSave::EnterLoadWindow();
-	Log::Debug("savegame: load window opened");
+	Log::Info("savegame: load window opened");
 }
 
 void ExitLoadWindow()
 {
 	ExtSave::ExitLoadWindow();
-	Log::Debug("savegame: load window closed");
+	Log::Info("savegame: load window closed");
 }
 }

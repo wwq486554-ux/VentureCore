@@ -1,5 +1,6 @@
 #include "Ext/ExtSave.h"
 
+#include "Core/Log.h"
 #include "Ext/AbstractExt.h"
 #include "Ext/ExtensionIndex.h"
 #include "Ext/ExtStream.h"
@@ -349,6 +350,19 @@ LoadSummary FinishLoad()
 	LoadSummary summary;
 	ExtensionIndex& index = ExtensionIndex::Instance();
 
+	// Diagnostic counts: "loaded" are the instances the trailer created, "deferred"
+	// are owners the engine constructed itself while the load window was open.
+	// A normal load adopts the trailer instances and skips their deferred entries;
+	// "0 adopted / N failed" with N == loaded means the owners were already claimed
+	// (typically because something closed the load window before the load's object
+	// constructors ran - see G1 E1).
+	std::uint32_t unresolvedOwners = 0;
+	std::uint32_t refusedByStore = 0;
+	Log::Info("savegame: finishing load (%u loaded instance(s), %u deferred allocation(s), %u attached extension(s))",
+		static_cast<unsigned>(index.LoadedExtensions().size()),
+		static_cast<unsigned>(index.DeferredAllocations().size()),
+		static_cast<unsigned>(index.ExtCount()));
+
 	// 1. Adopt the extensions restored from the trailer: the engine's swizzle pass
 	//    has rewritten their owner pointers to the loaded objects by now.
 	for (const ExtensionIndex::LoadedExtension& loaded : index.LoadedExtensions())
@@ -357,6 +371,7 @@ LoadSummary FinishLoad()
 		if (!ext->Owner())
 		{
 			++summary.failed;
+			++unresolvedOwners;
 			delete ext;
 			continue;
 		}
@@ -371,6 +386,7 @@ LoadSummary FinishLoad()
 			// The owner already carries an extension (or the store refused it):
 			// dropping the loaded instance keeps the index consistent.
 			++summary.failed;
+			++refusedByStore;
 			delete ext;
 		}
 	}
@@ -390,6 +406,13 @@ LoadSummary FinishLoad()
 		}
 	}
 	index.ClearDeferredAllocations();
+
+	if (summary.failed != 0)
+	{
+		Log::Warn("savegame: %u restored instance(s) dropped (%u with an unresolved owner, %u refused because the owner already has an extension)",
+			static_cast<unsigned>(summary.failed), static_cast<unsigned>(unresolvedOwners),
+			static_cast<unsigned>(refusedByStore));
+	}
 
 	summary.result = LoadSummary::Result::Loaded;
 	return summary;

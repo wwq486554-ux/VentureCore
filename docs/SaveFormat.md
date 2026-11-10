@@ -149,7 +149,8 @@ deterministic order.
 | --- | --- | --- |
 | save | `0x67D1B4` (after the engine's object-state writer, before the finalize/Commit) | `ExtSave::WritePayload` collects every saveable store, wraps it in the header-first frame and appends it **sequentially** at the current stream position - which is the end of the save data, because this site runs after every ecosystem writer. No `Seek` is needed (the savegame stream cannot seek); short writes are retried. Nothing is appended when the writer's BOOL result (`AL` of `EAX` - the engine itself consumes only `AL`) is 0 (the engine's save failed) or when no store carries state (e.g. the platform refused to start). Logs `savegame trailer: offset=… size=…`; `offset=unknown` when the optional position probe fails (normal: the stream is not seekable). |
 | load start | `0x67E44D` | Opens the load window in `ExtensionIndex`; allocations requested by object constructors are deferred (the trailer may carry an extension for the same owner). |
-| load failure | `0x67E4B1` / `0x67E53A` / `0x67E595` | The engine aborts the load at one of its three early exits and returns **before** the normal close point: the handler at that site closes the load window immediately, so later allocations in the game session take the normal path again (see `Core/Platform.cpp::OnScenarioClear` for the unconditional fallback). |
+| load failure | `0x67E4B1` / `0x67E53A` / `0x67E595` | The engine aborts the load at one of its three early exits and returns **before** the normal close point: the handler at that site closes the load window immediately, so later allocations in the game session take the normal path again. |
+| load reset | `0x67E730` -> `ResetScenario` (`0x6851F0`, hook at `0x685659`) | The engine clears the scenario **inside** the normal load, as the first step of its object-state reader, after the load window opened. The scenario-clear handler therefore must **not** reset the load window while a load is in progress (it would make the load's object constructors claim their extensions immediately, so the trailer's saved rows could no longer be adopted). `Core/Platform.cpp::OnScenarioClear` only applies the window-reset fallback when no load is in progress. |
 | load objects | (engine) | Object constructors run while the window is open → `ExtensionStore::Allocate` records the owner as a deferred allocation and returns `nullptr`. |
 | load end | `0x67F7C8` (end of the engine's load routine) | Reads the frame **sequentially** from the current position - exactly our block, because this handler runs after every ecosystem reader - with loops that tolerate legal COM short reads: 16-byte header, magic/version/size validation, then the payload and its CRC. No `Seek` and no position restore (the stream cannot seek and we consume exactly our own frame at the end). Then `ExtSave::ReadPayload`: payload version + store-set signature check (a mismatch drops the extension state, see *Compatibility notes*), then per store block: create the extension instances with their save-time owner pointer and extension address and load their data. Their swizzle registrations are staged and handed to the engine only once the whole payload validated (see *Failure handling*). |
 | swizzle | (engine's swizzle pass) | Rewrites every registered owner slot to the loaded object address. |
@@ -176,6 +177,11 @@ as a whole - it never restores "what it could read".
 * Size fields are validated against the bytes that are actually present and the
   16 MiB cap **before** anything is allocated from them (A-02); the writer
   enforces the same cap while it assembles the payload (A-11).
+* The load-window fallback in `OnScenarioClear` is deliberately skipped while a
+  load is in progress: the engine calls `ResetScenario` from inside the load
+  routine (`0x67E739`) after the window opened (`0x67E44D`), and resetting the
+  window there breaks the load (G1 E1 real game, 2026-11-10: the trailer's rows
+  could not be adopted).  The three failure-exit hooks remain the actual A-04 fix.
 * The frame reader is sequential and tolerates legal COM short reads by retrying
   until the header/payload is complete (A-13).  A failed read or a read that makes
   no progress drops the frame with a warning instead of spinning.  A stream that
