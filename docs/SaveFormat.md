@@ -98,10 +98,22 @@ deterministic order.
 | load start | `0x67E44D` | Opens the load window in `ExtensionIndex`; allocations requested by object constructors are deferred (the trailer may carry an extension for the same owner). |
 | load failure | `0x67E4B1` / `0x67E53A` / `0x67E595` | The engine aborts the load at one of its three early exits and returns **before** the normal close point: the handler at that site closes the load window immediately, so later allocations in the game session take the normal path again (see `Core/Platform.cpp::OnScenarioClear` for the unconditional fallback). |
 | load objects | (engine) | Object constructors run while the window is open → `ExtensionStore::Allocate` records the owner as a deferred allocation and returns `nullptr`. |
-| load end | `0x67F7C8` (end of the engine's load routine) | `ExtSave::ReadPayload`: backwards scan, magic/version/size/CRC check, then per store block: create the extension instances with their save-time owner pointer and extension address, register both, load their data. The stream position is restored. |
+| load end | `0x67F7C8` (end of the engine's load routine) | `ExtSave::ReadPayload`: backwards scan, magic/version/size/CRC check, then per store block: create the extension instances with their save-time owner pointer and extension address and load their data. Their swizzle registrations are staged and handed to the engine only once the whole payload validated (see *Failure handling*). The stream position is restored. |
 | swizzle | (engine's swizzle pass) | Rewrites every registered owner slot to the loaded object address. |
 | post-swizzle | `0x67E685` | `ExtSave::FinishLoad`: adopt the restored instances into their stores (the owner is valid now), call `PostLoad()`, then allocate fresh extensions (with `OnDeferredAllocation()`) for owners the game created during the load. The load window is closed right after this, before the hooked `call 0x685120` re-executes, so allocations made by that call take the normal path instead of being deferred after the drain and lost. |
 | load end | `0x67E68A` | Second, idempotent close of the load window (kept as the documented success-path close point); normal allocation is already active. |
+
+## Failure handling
+
+The parser validates the **whole payload before it touches the engine's swizzle
+manager**.  The registrations collected while reading store rows are staged in
+the platform (`ExtSwizzle::BeginStaging`) and handed to the engine only after
+every block validated (`CommitStaged`); on a malformed header, a truncated
+row/block, a short read or a bad canary the staged registrations are discarded
+(`DiscardStaged`) *before* the instances created from the partial payload are
+deleted.  The engine's remap pass therefore never sees - let alone writes
+through - a pointer into a deleted extension: a rejected payload leaves extension
+state empty (`Log::Warn`) instead of corrupting the engine's pointer tables.
 
 ## Feature author rules
 

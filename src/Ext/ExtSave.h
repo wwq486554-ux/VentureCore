@@ -56,6 +56,11 @@ bool WritePayload(std::uint32_t savegameId, std::vector<std::uint8_t>& out,
 // Parses a payload and creates the extension instances.  They are not attached to
 // their stores yet: their owner pointers are still save-time addresses and are
 // remapped by the engine's swizzle pass; FinishLoad() adopts them.
+//
+// The parser stages every swizzle registration (ExtSwizzle::BeginStaging) and
+// hands them to the engine only after the whole payload validated; on any failure
+// it discards them *before* deleting the instances created so far, so a rejected
+// payload never leaves the engine holding a pointer into a deleted extension.
 LoadSummary ReadPayload(std::uint32_t savegameId, const std::uint8_t* data, std::size_t size);
 
 // After the swizzle pass: adopt the loaded instances and allocate extensions for

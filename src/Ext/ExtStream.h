@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cassert>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
@@ -142,7 +143,9 @@ public:
 
 	bool ReadBytes(void* const data, const std::size_t size) override
 	{
-		if (m_offset + size > m_size)
+		// `m_offset + size > m_size` wraps on a 32-bit size_t and would let a huge
+		// `size` pass the guard (A-03); compare against the remaining bytes instead.
+		if (m_offset > m_size || size > m_size - m_offset)
 		{
 			MarkFailed();
 			return false;
@@ -155,7 +158,12 @@ public:
 	}
 
 	std::size_t Offset() const override { return m_offset; }
-	std::size_t Remaining() const override { return m_size - m_offset; }
+
+	std::size_t Remaining() const override
+	{
+		assert(m_offset <= m_size && "a byte stream offset must never pass its size");
+		return m_size - m_offset;
+	}
 
 private:
 	const std::uint8_t* m_data;

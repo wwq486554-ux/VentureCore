@@ -3,6 +3,7 @@
 #include "Ext/AbstractExt.h"
 #include "Ext/ExtensionIndex.h"
 #include "Ext/ExtStream.h"
+#include "Ext/ExtSwizzle.h"
 
 #include <unordered_map>
 
@@ -101,6 +102,12 @@ LoadSummary ReadPayload(const std::uint32_t savegameId, const std::uint8_t* cons
 	if (!data || size == 0)
 		return summary;
 
+	// A-01: no registration may reach the engine's swizzle manager until the whole
+	// payload validated.  A late failure deletes the instances created so far, and
+	// the engine must not keep a registration pointing into a deleted extension.
+	// Every exit path below either DiscardStaged()s or (on success) CommitStaged()s.
+	ExtSwizzle::BeginStaging();
+
 	ExtByteStreamReader reader(data, size);
 
 	std::uint32_t payloadSavegameId = 0;
@@ -110,6 +117,7 @@ LoadSummary ReadPayload(const std::uint32_t savegameId, const std::uint8_t* cons
 	if (!reader.ReadU32(payloadSavegameId) || !reader.ReadU32(payloadVersion) || !reader.ReadU32(blockCount))
 	{
 		summary.result = LoadSummary::Result::Invalid;
+		ExtSwizzle::DiscardStaged();
 		return summary;
 	}
 
@@ -118,6 +126,7 @@ LoadSummary ReadPayload(const std::uint32_t savegameId, const std::uint8_t* cons
 		// A trailer written by a different platform identity / format generation:
 		// ignore it instead of misreading the bytes.
 		summary.result = LoadSummary::Result::Invalid;
+		ExtSwizzle::DiscardStaged();
 		return summary;
 	}
 
@@ -133,6 +142,7 @@ LoadSummary ReadPayload(const std::uint32_t savegameId, const std::uint8_t* cons
 		if (!reader.ReadU32(typeId) || !reader.ReadU32(dataVersion) || !reader.ReadU32(blockSize))
 		{
 			summary.result = LoadSummary::Result::Invalid;
+			ExtSwizzle::DiscardStaged();
 			DiscardLoadedFrom(index, loadedBefore);
 			return summary;
 		}
@@ -146,6 +156,7 @@ LoadSummary ReadPayload(const std::uint32_t savegameId, const std::uint8_t* cons
 			if (!SkipBytes(reader, blockSize))
 			{
 				summary.result = LoadSummary::Result::Invalid;
+				ExtSwizzle::DiscardStaged();
 				DiscardLoadedFrom(index, loadedBefore);
 				return summary;
 			}
@@ -157,6 +168,7 @@ LoadSummary ReadPayload(const std::uint32_t savegameId, const std::uint8_t* cons
 		if (blockSize != 0 && !reader.ReadBytes(block.data(), blockSize))
 		{
 			summary.result = LoadSummary::Result::Invalid;
+			ExtSwizzle::DiscardStaged();
 			DiscardLoadedFrom(index, loadedBefore);
 			return summary;
 		}
@@ -166,6 +178,7 @@ LoadSummary ReadPayload(const std::uint32_t savegameId, const std::uint8_t* cons
 		if (!blockReader.Ok())
 		{
 			summary.result = LoadSummary::Result::Invalid;
+			ExtSwizzle::DiscardStaged();
 			DiscardLoadedFrom(index, loadedBefore);
 			return summary;
 		}
@@ -174,9 +187,13 @@ LoadSummary ReadPayload(const std::uint32_t savegameId, const std::uint8_t* cons
 	if (!reader.Ok())
 	{
 		summary.result = LoadSummary::Result::Invalid;
+		ExtSwizzle::DiscardStaged();
 		DiscardLoadedFrom(index, loadedBefore);
 		return summary;
 	}
+
+	// Every block validated: hand the staged swizzle registrations to the engine.
+	ExtSwizzle::CommitStaged();
 
 	summary.created = static_cast<std::uint32_t>(index.LoadedExtensions().size() - loadedBefore);
 	summary.result = LoadSummary::Result::Loaded;

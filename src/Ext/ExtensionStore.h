@@ -314,6 +314,11 @@ private:
 				static_cast<std::uintptr_t>(ownerSaveAddress));
 			auto* const ext = new TExt(rawOwner);
 
+			// While the payload is read, ExtSwizzle collects these registrations
+			// in a staging buffer instead of handing them to the engine: if a later
+			// row/block fails, ExtSave::ReadPayload discards the staged entries
+			// *before* the instances created here are deleted, so the engine's
+			// remap pass can never write through a pointer to a deleted extension.
 			ExtSwizzle::RegisterIdentity(reinterpret_cast<void*>(static_cast<std::uintptr_t>(extSaveAddress)), ext);
 			ExtSwizzle::RegisterForChange(ext->OwnerSlot());
 
