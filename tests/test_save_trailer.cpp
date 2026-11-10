@@ -3,15 +3,22 @@
 // Runs as a plain console program: the savegame layer is engine-free, the test
 // provides a minimal stand-in for the owner classes and a fake swizzle manager
 // (the engine's pointer-remap pass) so a whole save -> new process -> load cycle
-// can be simulated in one process.
+// can be simulated in one process.  The platform writer/reader are also driven
+// through a minimal in-memory IStream implementation, so the end-of-stream seek,
+// the reported byte counts and the stream-position restore are covered.
 //
 // TEST_DEPS: src/Ext/AbstractExt.cpp src/Ext/ExtensionIndex.cpp src/Ext/ExtSave.cpp src/Core/SaveTrailer.cpp src/Core/Log.cpp src/Core/PlatformPaths.cpp
 
+#include <algorithm>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
 #include <unordered_map>
+#include <utility>
 #include <vector>
+
+#include <windows.h>
+#include <Objidl.h>
 
 class AbstractClass
 {
@@ -78,6 +85,153 @@ void FakeProcess()
 	g_changedSlots.clear();
 	g_identities.clear();
 }
+
+LARGE_INTEGER MoveTo(const long long offset)
+{
+	LARGE_INTEGER move{};
+	move.QuadPart = offset;
+	return move;
+}
+
+// --- fake IStream ----------------------------------------------------------
+// Minimal in-memory COM stream.  The savegame writer/reader go through the real
+// IStream vtable, so the end-of-stream seek, the written/read byte counts and the
+// stream-position restore are exercised without the engine.  The failure switches
+// model a non-seekable stream, a failing / partial Write and a failing / short
+// Read (COM allows both, the reader has to cope).
+class FakeStream final : public IStream
+{
+public:
+	explicit FakeStream(std::vector<std::uint8_t> initial = {})
+		: m_data(std::move(initial)) {}
+
+	void SetFailWrites(const bool fail) { m_failWrites = fail; }
+	void SetShortWrites(const bool shortWrites) { m_shortWrites = shortWrites; }
+	void SetFailReads(const bool fail) { m_failReads = fail; }
+	void SetShortReads(const bool shortReads) { m_shortReads = shortReads; }
+	void SetFailSeeks(const bool fail) { m_failSeeks = fail; }
+
+	const std::vector<std::uint8_t>& Data() const { return m_data; }
+	std::uint64_t Position() const { return m_position; }
+	int WriteCalls() const { return m_writeCalls; }
+	int ReadCalls() const { return m_readCalls; }
+
+	// --- IUnknown ---
+	HRESULT STDMETHODCALLTYPE QueryInterface(REFIID, void** const ppvObject) override
+	{
+		if (ppvObject)
+			*ppvObject = nullptr;
+		return E_NOINTERFACE;
+	}
+
+	ULONG STDMETHODCALLTYPE AddRef() override { return 1; }
+	ULONG STDMETHODCALLTYPE Release() override { return 1; }
+
+	// --- ISequentialStream ---
+	HRESULT STDMETHODCALLTYPE Read(void* const pv, const ULONG cb, ULONG* const pcbRead) override
+	{
+		++m_readCalls;
+
+		if (m_failReads)
+		{
+			if (pcbRead)
+				*pcbRead = 0;
+			return E_FAIL;
+		}
+
+		const std::uint64_t size = static_cast<std::uint64_t>(m_data.size());
+		const std::uint64_t offset = m_position < size ? m_position : size;
+		std::uint64_t count = static_cast<std::uint64_t>(cb);
+		const std::uint64_t remaining = size - offset;
+		if (count > remaining)
+			count = remaining;
+		if (m_shortReads && count > 1)
+			count /= 2;
+
+		if (count != 0)
+			std::memcpy(pv, m_data.data() + static_cast<std::size_t>(offset), static_cast<std::size_t>(count));
+		m_position = offset + count;
+		if (pcbRead)
+			*pcbRead = static_cast<ULONG>(count);
+		return S_OK;
+	}
+
+	HRESULT STDMETHODCALLTYPE Write(const void* const pv, const ULONG cb, ULONG* const pcbWritten) override
+	{
+		++m_writeCalls;
+
+		if (m_failWrites)
+		{
+			if (pcbWritten)
+				*pcbWritten = 0;
+			return E_FAIL;
+		}
+
+		std::uint64_t count = static_cast<std::uint64_t>(cb);
+		if (m_shortWrites && count > 1)
+			count /= 2;
+
+		const std::size_t end = static_cast<std::size_t>(m_position + count);
+		if (m_data.size() < end)
+			m_data.resize(end, 0);
+
+		if (count != 0)
+			std::memcpy(m_data.data() + static_cast<std::size_t>(m_position), pv, static_cast<std::size_t>(count));
+		m_position += count;
+		if (pcbWritten)
+			*pcbWritten = static_cast<ULONG>(count);
+		return S_OK;
+	}
+
+	// --- IStream ---
+	HRESULT STDMETHODCALLTYPE Seek(const LARGE_INTEGER dlibMove, const DWORD dwOrigin,
+		ULARGE_INTEGER* const plibNewPosition) override
+	{
+		if (m_failSeeks)
+			return E_NOTIMPL;
+
+		std::int64_t base = 0;
+		switch (dwOrigin)
+		{
+		case STREAM_SEEK_SET: base = 0; break;
+		case STREAM_SEEK_CUR: base = static_cast<std::int64_t>(m_position); break;
+		case STREAM_SEEK_END: base = static_cast<std::int64_t>(m_data.size()); break;
+		default: return STG_E_INVALIDFUNCTION;
+		}
+
+		const std::int64_t target = base + dlibMove.QuadPart;
+		if (target < 0)
+			return STG_E_INVALIDFUNCTION;
+
+		m_position = static_cast<std::uint64_t>(target);
+		if (plibNewPosition)
+			plibNewPosition->QuadPart = static_cast<ULONGLONG>(m_position);
+		return S_OK;
+	}
+
+	HRESULT STDMETHODCALLTYPE SetSize(ULARGE_INTEGER) override { return E_NOTIMPL; }
+	HRESULT STDMETHODCALLTYPE CopyTo(IStream*, ULARGE_INTEGER, ULARGE_INTEGER*, ULARGE_INTEGER*) override
+	{
+		return E_NOTIMPL;
+	}
+	HRESULT STDMETHODCALLTYPE Commit(DWORD) override { return S_OK; }
+	HRESULT STDMETHODCALLTYPE Revert() override { return E_NOTIMPL; }
+	HRESULT STDMETHODCALLTYPE LockRegion(ULARGE_INTEGER, ULARGE_INTEGER, DWORD) override { return E_NOTIMPL; }
+	HRESULT STDMETHODCALLTYPE UnlockRegion(ULARGE_INTEGER, ULARGE_INTEGER, DWORD) override { return E_NOTIMPL; }
+	HRESULT STDMETHODCALLTYPE Stat(STATSTG*, DWORD) override { return E_NOTIMPL; }
+	HRESULT STDMETHODCALLTYPE Clone(IStream**) override { return E_NOTIMPL; }
+
+private:
+	std::vector<std::uint8_t> m_data;
+	std::uint64_t m_position = 0;
+	bool m_failWrites = false;
+	bool m_shortWrites = false;
+	bool m_failReads = false;
+	bool m_shortReads = false;
+	bool m_failSeeks = false;
+	int m_writeCalls = 0;
+	int m_readCalls = 0;
+};
 
 // --- extension under test --------------------------------------------------
 class SavedUnitExt final : public venture::UnitExt
@@ -341,6 +495,130 @@ int __cdecl main()
 		std::vector<std::uint8_t> empty;
 		const bool wrote = venture::ExtSave::WritePayload(kSavegameId, empty, nullptr);
 		Check(wrote && !empty.empty(), "a registered saveable store writes an empty block");
+	}
+
+	// ---- 6. IStream writer/reader (0x67D1B4 write site, A-12) -------------
+	// The write site appends the trailer to the engine's save stream through the
+	// real IStream interface: these tests drive the writer and the reader with an
+	// in-memory stream and check the end-of-stream seek, the failure paths and the
+	// stream-position restore.
+	{
+		venture::ExtensionIndex::Instance().ClearAll();
+		UnitClass writeUnit;
+		SavedUnitExt* const writeExt = store.Allocate(&writeUnit);
+		Check(writeExt != nullptr, "the stream test has a saveable extension");
+		writeExt->Serial = 4242;
+
+		std::vector<std::uint8_t> savedPayload;
+		const bool savedOk = venture::ExtSave::WritePayload(kSavegameId, savedPayload, nullptr);
+		const std::vector<std::uint8_t> savedTrailer = venture::SaveTrailer::WrapPayload(savedPayload);
+		Check(savedOk && !savedTrailer.empty(), "the stream test builds a non-empty trailer");
+
+		// The engine wrote its save data; another platform left the position at the
+		// stream start.  The writer must seek to EOF and append, not overwrite.
+		std::vector<std::uint8_t> engineBytes;
+		for (std::uint32_t i = 0; i < 24; ++i)
+			engineBytes.push_back(static_cast<std::uint8_t>(0x40 + i));
+
+		FakeStream written(engineBytes);
+		written.Seek(MoveTo(0), STREAM_SEEK_SET, nullptr);
+		venture::SaveTrailer::Write(&written);
+		Check(written.Data().size() == engineBytes.size() + savedTrailer.size(),
+			"the writer appends exactly one trailer at the end of the stream");
+		Check(std::equal(engineBytes.begin(), engineBytes.end(), written.Data().begin()),
+			"the writer does not overwrite the engine's save data");
+		Check(std::equal(savedTrailer.begin(), savedTrailer.end(),
+				written.Data().begin() + static_cast<std::ptrdiff_t>(engineBytes.size())),
+			"the appended bytes are the wrapped trailer");
+		Check(written.Position() == static_cast<std::uint64_t>(written.Data().size()),
+			"the writer leaves the stream position at EOF");
+
+		// Round trip: a "new load" reads the written stream and restores the state;
+		// the position another platform left in the stream is restored afterwards.
+		venture::ExtensionIndex::Instance().ClearAll();
+		const std::size_t enginePosition = 9;
+		written.Seek(MoveTo(static_cast<long long>(enginePosition)), STREAM_SEEK_SET, nullptr);
+		venture::ExtSave::EnterLoadWindow();
+		venture::SaveTrailer::Read(&written);
+		Check(written.Position() == enginePosition, "the reader restores the stream position");
+		Check(venture::ExtensionIndex::Instance().LoadedExtensions().size() == 1,
+			"the reader creates the stored extension instance");
+		const venture::ExtSave::LoadSummary adopted = venture::ExtSave::FinishLoad();
+		venture::ExtSave::ExitLoadWindow();
+		Check(adopted.adopted == 1 && adopted.failed == 0,
+			"the extension read through the IStream is adopted");
+		SavedUnitExt* const restored = store.Fetch(&writeUnit);
+		Check(restored != nullptr && restored->Serial == 4242,
+			"the extension state round-trips through the IStream");
+		venture::ExtensionIndex::Instance().ClearAll();
+
+		// A non-seekable stream is not written to (and the engine data stays intact).
+		{
+			const std::vector<std::uint8_t> base(16, 0x11);
+			FakeStream stream(base);
+			stream.SetFailSeeks(true);
+			venture::SaveTrailer::Write(&stream);
+			Check(stream.Data() == base && stream.WriteCalls() == 0,
+				"a non-seekable stream is left untouched by the writer");
+		}
+
+		// A failed write is detected; a short write is detected through the
+		// reported byte count instead of being treated as success.
+		{
+			const std::vector<std::uint8_t> base(16, 0x22);
+
+			FakeStream failed(base);
+			failed.SetFailWrites(true);
+			venture::SaveTrailer::Write(&failed);
+			Check(failed.Data() == base, "a failed stream write leaves the engine data untouched");
+
+			FakeStream shortWrite(base);
+			shortWrite.SetShortWrites(true);
+			venture::SaveTrailer::Write(&shortWrite);
+			Check(shortWrite.Data().size() > base.size()
+					&& shortWrite.Data().size() < base.size() + savedTrailer.size(),
+				"a short write is detected from the reported byte count");
+		}
+
+		// Read failures (short read / error / non-seekable) restore the position and
+		// leave the extension state empty instead of aborting the game's load.
+		{
+			std::vector<std::uint8_t> bytes(engineBytes);
+			bytes.insert(bytes.end(), savedTrailer.begin(), savedTrailer.end());
+			const std::size_t positionBefore = 5;
+
+			FakeStream shortRead(bytes);
+			shortRead.SetShortReads(true);
+			shortRead.Seek(MoveTo(static_cast<long long>(positionBefore)), STREAM_SEEK_SET, nullptr);
+			venture::ExtensionIndex::Instance().EnterLoadWindow();
+			venture::SaveTrailer::Read(&shortRead);
+			venture::ExtensionIndex::Instance().ExitLoadWindow();
+			Check(shortRead.Position() == positionBefore, "a short read restores the stream position");
+			Check(venture::ExtensionIndex::Instance().LoadedExtensions().empty(),
+				"a short read restores no extension state");
+
+			FakeStream failedRead(bytes);
+			failedRead.SetFailReads(true);
+			failedRead.Seek(MoveTo(static_cast<long long>(positionBefore)), STREAM_SEEK_SET, nullptr);
+			venture::ExtensionIndex::Instance().EnterLoadWindow();
+			venture::SaveTrailer::Read(&failedRead);
+			venture::ExtensionIndex::Instance().ExitLoadWindow();
+			Check(failedRead.Position() == positionBefore, "a read error restores the stream position");
+			Check(venture::ExtensionIndex::Instance().LoadedExtensions().empty(),
+				"a read error restores no extension state");
+
+			FakeStream noSeek(bytes);
+			noSeek.SetFailSeeks(true);
+			venture::ExtensionIndex::Instance().EnterLoadWindow();
+			venture::SaveTrailer::Read(&noSeek);
+			venture::ExtensionIndex::Instance().ExitLoadWindow();
+			Check(noSeek.Position() == 0 && noSeek.ReadCalls() == 0,
+				"the reader leaves a non-seekable stream alone");
+			Check(venture::ExtensionIndex::Instance().LoadedExtensions().empty(),
+				"a non-seekable stream restores no extension state");
+		}
+
+		venture::ExtensionIndex::Instance().ClearAll();
 	}
 
 	std::printf("\n%s (%d failure%s)\n", g_failures == 0 ? "PASS" : "FAILED",

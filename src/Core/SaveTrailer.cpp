@@ -116,10 +116,13 @@ void Write(IStream* const stream)
 
 	const std::vector<std::uint8_t> bytes = WrapPayload(payload);
 
+	// Append at the end of the stream: the engine's save data ends where its
+	// object-state writer stopped, but another platform may have moved the stream
+	// position, and writing at the current position would overwrite its bytes.
 	LARGE_INTEGER zero{};
 	zero.QuadPart = 0;
 	ULARGE_INTEGER position{};
-	if (FAILED(stream->Seek(zero, STREAM_SEEK_CUR, &position)))
+	if (FAILED(stream->Seek(zero, STREAM_SEEK_END, &position)))
 	{
 		Log::Warn("savegame trailer: the stream is not seekable - not appended");
 		return;

@@ -18,11 +18,13 @@ otherwise the sequential readers consume each other's bytes and the load fails.
 
 This platform is designed to be safe next to that convention:
 
-* it **writes after every other platform's block**, because the DLL name
-  (`VentureCore.dll`, and any derivative name that keeps the same prefix) sorts
-  after the known platforms (`Ares.dll`, `Kratos.dll`, `Kaleidoscope.dll`,
-  `Mix.dll`, `Phobos.dll`, `RA2YRLWResourceReader.dll`) and SyringeEx chains
-  same-address handlers in DLL order;
+* it **writes at an engine site no other platform hooks** - after the engine's
+  object-state writer has returned and before the engine finalizes/commits the
+  storage - so its block is appended after every other platform's block
+  regardless of handler order.  The original assumption ("the DLL that loads last
+  also writes last") was wrong: Ares hooks the historical tail site `0x67E42E`
+  and its handler always jumps away, so a writer installed there never runs in a
+  process with Ares, and even if it ran, its block would not be the last one;
 * it **reads by scanning backwards from the end of the stream** (`Seek(END)`,
   validate, read, restore the stream position) instead of reading at the current
   sequential position. A save that contains no trailer simply has no extension
@@ -31,10 +33,10 @@ This platform is designed to be safe next to that convention:
   foreign or damaged tail is rejected with a log warning instead of corrupting
   the game's load.
 
-Known limitation: a future platform whose DLL name sorts **after** this one would
-write its block after our trailer, and our backwards scan would then reject the
-tail. The log line reports that case and extension state starts empty; it is a
-platform-ordering concern, not a savegame format break.
+Known limitation: a future platform that appends its block after our write site
+would hide our trailer from the backwards scan. The log line reports that case
+and extension state starts empty; it is a platform-ordering concern, not a
+savegame format break.
 
 ## Stream layout
 
@@ -92,7 +94,7 @@ deterministic order.
 
 | Step | Engine site | What the platform does |
 | --- | --- | --- |
-| save | `0x67E42E` (end of the engine's save routine) | `ExtSave::WritePayload` collects every saveable store, wraps it in the trailer and appends it after the last platform block. Nothing is appended when no store carries state (e.g. the platform refused to start). Logs `savegame trailer: offset=… size=…`. |
+| save | `0x67D1B4` (after the engine's object-state writer, before the finalize/Commit) | `ExtSave::WritePayload` collects every saveable store, wraps it in the trailer, seeks to the end of the stream and appends it after the last platform block. Nothing is appended when the writer's BOOL result (`AL` of `EAX` - the engine itself consumes only `AL`) is 0 (the engine's save failed) or when no store carries state (e.g. the platform refused to start). Logs `savegame trailer: offset=… size=…`. |
 | load start | `0x67E44D` | Opens the load window in `ExtensionIndex`; allocations requested by object constructors are deferred (the trailer may carry an extension for the same owner). |
 | load failure | `0x67E4B1` / `0x67E53A` / `0x67E595` | The engine aborts the load at one of its three early exits and returns **before** the normal close point: the handler at that site closes the load window immediately, so later allocations in the game session take the normal path again (see `Core/Platform.cpp::OnScenarioClear` for the unconditional fallback). |
 | load objects | (engine) | Object constructors run while the window is open → `ExtensionStore::Allocate` records the owner as a deferred allocation and returns `nullptr`. |

@@ -14,12 +14,27 @@
 // block (see src/Core/SaveTrailer.h and docs/SaveFormat.md).
 //
 // The save/load sites are the ecosystem's shared ones:
-//   * 0x67E42E  - end of the engine's save routine.  Every platform installs its
-//                 writer here (Ares size 5, Kratos size 13); our DLL loads after
-//                 them, so our handler runs last and our block is the last one in
-//                 the stream.  Our window is 5 bytes: `test eax,eax`(2) +
-//                 `pop edi`(1) + `pop esi`(1) + `pop ebp`(1) = ends on the next
-//                 instruction (0x67E433, `pop ebx`).
+//   * 0x67D1B4  - inside ScenarioClass::SaveGame, after the engine's object-state
+//                 writer (`call 0x67D300` at 0x67D1AF) has returned and before
+//                 the finalize/Commit step at 0x67D1CC: the data stream is still
+//                 writable there, and writing after the Commit is not guaranteed
+//                 to reach the file.  The ecosystem's anchored tail sites live
+//                 *inside* the routine we just called (Ares and Kratos hook
+//                 0x67E42E there); Ares's handler always returns a jump address,
+//                 so that address can never host our writer - in a process with
+//                 Ares our handler there would never run (or its block would be
+//                 written after ours anyway).  Writing at 0x67D1B4 instead puts
+//                 our block after every platform's block regardless of handler
+//                 order, and no known platform hooks this site (the five
+//                 ecosystem `.syhks00` tables are free there).  Window:
+//                 `mov bl,al`(2) + `mov eax,[esp+0x14]`(4), next instruction
+//                 0x67D1BA.  The save stream is the IStream* the engine loads
+//                 into ECX for 0x67D300, i.e. [esp+0x1C] here.  Only AL of EAX
+//                 is that writer's BOOL result: every failure epilogue executes
+//                 `xor al,al` and leaves the (negative) HRESULT in the upper 24
+//                 bits, while the success tail executes `setge al`; the engine
+//                 itself consumes only AL (`mov bl,al`).  AL == 0 = the save
+//                 failed, do not append.
 //   * 0x67F7C8 - end of the engine's load-objects routine, after every platform's
 //                 sequential reader (Ares/Kratos also read here).  We seek to the
 //                 end of the stream, validate the trailer, read it and restore the
@@ -47,8 +62,8 @@
 // the deferred records (Core/Platform.cpp::OnScenarioClear), so a load aborted
 // through a path without a hook cannot poison the next scenario either.
 //
-// All eight windows are size 5 and every one ends on an instruction boundary (see
-// docs/HookCatalogue.md).
+// All eight windows contain complete instructions and end on the next
+// instruction (see docs/HookCatalogue.md).
 // ---------------------------------------------------------------------------
 
 namespace
@@ -110,15 +125,25 @@ DEFINE_HOOK(0x67E595, Venture_LoadGame_Failed3, 0x5)
 	return 0;
 }
 
-// End of the engine's save routine: append the platform trailer after every other
-// platform's block.  `EAX` carries the engine's HRESULT; do not append on failure.
-DEFINE_HOOK(0x67E42E, Venture_SaveGame_Trailer, 0x5)
+// The engine's object-state writer returned and the save stream is still open
+// for writing (before the finalize/Commit): append the platform trailer.
+// Only AL of `EAX` is the writer's BOOL result - every failure epilogue runs
+// `xor al,al` and leaves the negative HRESULT in the upper 24 bits, so testing
+// the full EAX for 0 would never detect a failed save; the success tail runs
+// `setge al`.  AL == 0 means the save failed - do not append.
+DEFINE_HOOK(0x67D1B4, Venture_SaveGame_Trailer, 0x6)
 {
 	GET(long, status, EAX);
-	if (status < 0)
+	if ((status & 0xFFu) == 0)
 		return 0;
 
-	GET(IStream*, pStm, ESI);
+	GET_STACK(IStream*, pStm, 0x1C);
+	if (!pStm)
+	{
+		venture::Log::Warn("savegame trailer: no save stream at the save site - not appended");
+		return 0;
+	}
+
 	EnsureEngineServices();
 	venture::SaveTrailer::Write(pStm);
 	return 0;

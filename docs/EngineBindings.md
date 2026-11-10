@@ -348,7 +348,7 @@ side:
 
 | Engine site | Handler | Effect |
 | --- | --- | --- |
-| `0x67E42E` (end of the save routine) | `Venture_SaveGame_Trailer` | builds the extension payload and appends `[payload][suffix]` after every other platform's block; skipped when the engine's save status (`EAX`) reports failure or when no store carries state |
+| `0x67D1B4` (after the engine's object-state writer, before the finalize/Commit) | `Venture_SaveGame_Trailer` | builds the extension payload, seeks to the stream end and appends `[payload][suffix]` after every platform's block; skipped when the writer's BOOL result (`AL` of `EAX`) is 0 or when no store carries state |
 | `0x67E44D` (load window open) | `Venture_LoadGame_Begin` | defers allocations driven by object constructors |
 | `0x67F7C8` (end of the load routine) | `Venture_LoadGame_Trailer` | backwards scan of the stream, trailer validation, payload read, stream position restored |
 | `0x67E685` (after the swizzle pass) | `Venture_LoadGame_PostSwizzle` | adopts the restored instances (owner pointers remapped), `PostLoad()`, deferred allocations |
@@ -360,9 +360,12 @@ extension layer itself stays engine-free (and unit-testable with a fake swizzle
 manager).
 
 Write order is the critical constraint: the trailer must be the last block in the
-stream.  This holds because the DLL loads after the known platform DLLs (file-name
-order) and SyringeEx chains same-address handlers in load order.  `docs/SaveFormat.md`
-records the failure mode for a future platform that sorts after this one.
+stream.  The writer is installed at `0x67D1B4`, a site no known platform hooks
+that runs after the engine's object-state writer - the routine containing the
+tail site Ares owns (`0x67E42E`, whose handler always jumps away).  The block is
+therefore last regardless of handler order, and `SaveTrailer::Write` seeks to the
+stream end before appending.  `docs/SaveFormat.md` records the failure mode for a
+future platform that writes after this site.
 
 ## Logging
 

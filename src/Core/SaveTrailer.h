@@ -24,12 +24,16 @@ namespace venture::SaveTrailer
 //
 // `payload` is the extension payload from Ext/ExtSave.h and `crc32` covers it
 // (standard IEEE 802.3 CRC-32).  The 20-byte suffix is fixed size, so the frame
-// can be validated with a single backwards read.  The writer appends after every
-// other platform's block because this DLL loads after the known platforms
-// (file-name order: Ares/Kratos/Kaleido/Mix/Phobos/RA2YRLWResourceReader before
-// VentureCore; a future platform whose DLL name sorts after this one would break
-// the "last block" assumption - the reader then reports a corrupt trailer and
-// keeps the game running).
+// can be validated with a single backwards read.
+//
+// Write order: the writer runs at 0x67D1B4 - after the engine's object-state
+// writer has returned and before the engine finalizes/commits the storage - at a
+// site no known platform hooks, so our block lands after every platform's block
+// (including Ares's: its handler at 0x67E42E always jumps away and runs before
+// this site).  The writer seeks to the end of the stream before appending, so a
+// stream position left anywhere else by another writer cannot make it overwrite
+// data.  A future platform whose handler ran after this site would hide the
+// trailer; the reader then reports a corrupt trailer and keeps the game running.
 //
 // Host compatibility: block reading is order-independent (backwards scan +
 // position restore), but only the party that wrote the save can read a save that
