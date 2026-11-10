@@ -19,6 +19,7 @@ variable names are unusual for a template.
 | `check_yrpp.py` | verifies `external/YRpp` against the pin in `src/Core/EnginePin.h` |
 | `fetch_yrpp.sh` | copies a local YRpp checkout into `external/YRpp` and stamps its commit (atomic; refuses self-copies) |
 | `test_fetch_yrpp.sh` | regression tests for `fetch_yrpp.sh` (self-copy guard, atomic install, git-HEAD pin gate; no Wine needed) |
+| `verify_incremental.sh` | regression test for the incremental build: edits `include/`, `src/`, project files and linker flags in a throwaway copy and asserts the build reacts (real toolchain) |
 | `abi_probe.sh` | prints the engine ABI values pinned by `src/Engine/EngineCompat.h` |
 | `load_probe.sh` | loads the built DLL into a tiny Win32 host under Wine and resolves exports |
 

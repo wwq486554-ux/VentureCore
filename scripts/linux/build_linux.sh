@@ -298,12 +298,53 @@ if [[ $previous_hash != "$flags_hash" ]]; then
   force_all=1
 fi
 
+# The project files are build inputs in their own right: the source/resource
+# lists and the compiler include path come from VentureCore.vcxproj +
+# VentureCore.props, and external/YRpp/YRpp.props contributes the YRpp sources.
+# Their contents are also part of the link hash below.
+project_files=(
+  "$VCS_ROOT/VentureCore.vcxproj"
+  "$VCS_ROOT/VentureCore.props"
+  "$VCS_ROOT/external/YRpp/YRpp.props"
+)
+
+# Linker inputs. The command line is defined here, before the link decision, so
+# that it can be hashed: changing /TLBID, /OPT, the library list or one of the
+# project files must relink even when no object file changed (D-11).
+link_args=(
+  /NOLOGO /DLL /MACHINE:X86 /INCREMENTAL:NO
+  "/OUT:$(vcs_w "$dll_path")" "/PDB:$(vcs_w "$pdb_path")" "/IMPLIB:$(vcs_w "$implib_path")"
+  /DEBUG:FULL /MANIFEST:NO /SUBSYSTEM:WINDOWS
+  /OPT:REF /OPT:ICF /TLBID:1 /DYNAMICBASE /NXCOMPAT /SAFESEH
+  dbghelp.lib onecore.lib
+)
+link_hash="$(
+  {
+    printf 'link-args: %s\n' "${link_args[*]}"
+    for f in "${project_files[@]}"; do
+      [[ -f $f ]] || continue
+      printf 'project-file: %s\n' "${f#"$VCS_ROOT/"}"
+      md5sum "$f" | cut -d' ' -f1
+    done
+  } | md5sum | cut -d' ' -f1
+)"
+link_md5_file="$work_dir/link.md5"
+previous_link_hash="$(cat "$link_md5_file" 2>/dev/null || true)"
+link_inputs_changed=0
+if [[ -n $previous_link_hash && $previous_link_hash != "$link_hash" ]]; then
+  vcs_info "linker inputs changed - relink"
+  link_inputs_changed=1
+fi
+
 # Newest header/resource in the project: any change to it invalidates every
 # object (this build does not parse /showIncludes dependency files yet).
+# include/ is a real build input (VentureCore.props puts it on the include path),
+# so it has to be part of the stamp too - editing the public feature API used to
+# recompile nothing (D-10).
 # awk (not "sort | head") is used on purpose: a truncated pipeline would make
 # the shell report a spurious failure under "set -o pipefail".
 stamp="$work_dir/headers.stamp"
-newest_header="$(find "$VCS_ROOT/src" "$VCS_ROOT/external/YRpp" -type f \
+newest_header="$(find "$VCS_ROOT/src" "$VCS_ROOT/include" "$VCS_ROOT/external/YRpp" -type f \
   \( -name '*.h' -o -name '*.hpp' -o -name '*.inl' -o -name '*.rc' \) \
   -printf '%T@ %p\n' 2>/dev/null | awk '
     { t = $1 + 0; sub(/^[^ ]+ /, ""); if (t > m) { m = t; newest = $0 } }
@@ -311,6 +352,14 @@ newest_header="$(find "$VCS_ROOT/src" "$VCS_ROOT/external/YRpp" -type f \
 if [[ -n $newest_header ]]; then
   touch -r "$newest_header" "$stamp"
 fi
+# A changed project file must also invalidate every object: the source list,
+# include paths and resource list are read from it on the next build.
+for f in "${project_files[@]}"; do
+  [[ -f $f ]] || continue
+  if [[ ! -f $stamp || $f -nt $stamp ]]; then
+    touch -r "$f" "$stamp"
+  fi
+done
 if [[ $gen_dir/VentureCore.Git.h -nt $stamp ]]; then
   touch -r "$gen_dir/VentureCore.Git.h" "$stamp"
 fi
@@ -410,6 +459,12 @@ done
 needs_link=0
 if [[ ! -f $dll_path ]]; then
   needs_link=1
+elif [[ ! -f $link_md5_file ]]; then
+  # No link state was recorded yet (first run after this script was updated):
+  # relink once so the binary is known to match the current link inputs.
+  needs_link=1
+elif (( link_inputs_changed )); then
+  needs_link=1
 elif (( ${#pending[@]} > 0 )); then
   needs_link=1
 else
@@ -426,13 +481,6 @@ if (( needs_link )); then
   # Scratch is the working directory of the tools (rc.exe and link.exe drop
   # temporary/default-named files there).
   find "$scratch_dir" -mindepth 1 -delete 2>/dev/null || true
-  link_args=(
-    /NOLOGO /DLL /MACHINE:X86 /INCREMENTAL:NO
-    "/OUT:$(vcs_w "$dll_path")" "/PDB:$(vcs_w "$pdb_path")" "/IMPLIB:$(vcs_w "$implib_path")"
-    /DEBUG:FULL /MANIFEST:NO /SUBSYSTEM:WINDOWS
-    /OPT:REF /OPT:ICF /TLBID:1 /DYNAMICBASE /NXCOMPAT /SAFESEH
-    dbghelp.lib onecore.lib
-  )
   link_log="$log_dir/link.log"
   set +e
   ( cd "$scratch_dir" && wine "$VCS_VC_BIN/link.exe" "${link_args[@]}" "${link_input_win[@]}" ) \
@@ -485,6 +533,7 @@ if [[ -n $deploy_dir ]]; then
 fi
 
 printf '%s' "$flags_hash" > "$flags_file"
+printf '%s\n' "$link_hash" > "$link_md5_file"
 
 elapsed=$(( $(date +%s) - build_start ))
 printf '\n'
