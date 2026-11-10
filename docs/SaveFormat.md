@@ -5,7 +5,7 @@ data travels through the engine's save/load stream, why it is anchored at the en
 of the stream, and what a platform/feature author has to know about it.
 
 Source of truth: `src/Core/SaveTrailer.h` / `.cpp` (frame), `src/Ext/ExtSave.h` /
-`.cpp` (payload), `src/Ext/ExtensionStore.h` (per-store rows), and the five hooks
+`.cpp` (payload), `src/Ext/ExtensionStore.h` (per-store rows), and the eight hooks
 in `src/Engine/Hooks.Save.cpp` (listed in `docs/HookCatalogue.md`).
 
 ## Why a tail block
@@ -94,11 +94,12 @@ deterministic order.
 | --- | --- | --- |
 | save | `0x67E42E` (end of the engine's save routine) | `ExtSave::WritePayload` collects every saveable store, wraps it in the trailer and appends it after the last platform block. Nothing is appended when no store carries state (e.g. the platform refused to start). Logs `savegame trailer: offset=… size=…`. |
 | load start | `0x67E44D` | Opens the load window in `ExtensionIndex`; allocations requested by object constructors are deferred (the trailer may carry an extension for the same owner). |
+| load failure | `0x67E4B1` / `0x67E53A` / `0x67E595` | The engine aborts the load at one of its three early exits and returns **before** the normal close point: the handler at that site closes the load window immediately, so later allocations in the game session take the normal path again (see `Core/Platform.cpp::OnScenarioClear` for the unconditional fallback). |
 | load objects | (engine) | Object constructors run while the window is open → `ExtensionStore::Allocate` records the owner as a deferred allocation and returns `nullptr`. |
 | load end | `0x67F7C8` (end of the engine's load routine) | `ExtSave::ReadPayload`: backwards scan, magic/version/size/CRC check, then per store block: create the extension instances with their save-time owner pointer and extension address, register both, load their data. The stream position is restored. |
 | swizzle | (engine's swizzle pass) | Rewrites every registered owner slot to the loaded object address. |
-| post-swizzle | `0x67E685` | `ExtSave::FinishLoad`: adopt the restored instances into their stores (the owner is valid now), call `PostLoad()`, then allocate fresh extensions (with `OnDeferredAllocation()`) for owners the game created during the load. |
-| load end | `0x67E68A` | Closes the load window; normal allocation resumes. |
+| post-swizzle | `0x67E685` | `ExtSave::FinishLoad`: adopt the restored instances into their stores (the owner is valid now), call `PostLoad()`, then allocate fresh extensions (with `OnDeferredAllocation()`) for owners the game created during the load. The load window is closed right after this, before the hooked `call 0x685120` re-executes, so allocations made by that call take the normal path instead of being deferred after the drain and lost. |
+| load end | `0x67E68A` | Second, idempotent close of the load window (kept as the documented success-path close point); normal allocation is already active. |
 
 ## Feature author rules
 

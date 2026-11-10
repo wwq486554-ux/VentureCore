@@ -109,6 +109,15 @@ void ExtensionIndex::ExitLoadWindow()
 	m_loadingSaveGame = false;
 }
 
+void ExtensionIndex::ResetForScenarioClear()
+{
+	// A scenario change is also reachable after a failed savegame load, when the
+	// engine returned from LoadGame before its normal close point and the deferred
+	// records of the aborted load are still around: drop both, unconditionally.
+	ExitLoadWindow();
+	ClearDeferredAllocations();
+}
+
 void ExtensionIndex::DeferAllocation(const ExtStoreDesc* const desc, AbstractClass* const owner)
 {
 	if (!desc || !owner)
@@ -161,6 +170,15 @@ void ExtensionIndex::NotifyInvalidPointer(const AbstractClass* const owner, cons
 		return;
 
 	++m_invalidPointerNotifications;
+
+	// A-06: the engine announced that this owner pointer became invalid.  A
+	// deferred allocation still recorded for it was created by an object that is
+	// gone by the time the load window closes; FinishLoad must not resurrect an
+	// extension on the stale address.
+	m_deferred.erase(
+		std::remove_if(m_deferred.begin(), m_deferred.end(),
+			[owner](const DeferredAllocation& entry) { return entry.owner == owner; }),
+		m_deferred.end());
 }
 
 std::size_t ExtensionIndex::StoreCount() const

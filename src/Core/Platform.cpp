@@ -187,6 +187,11 @@ void OnScenarioClear()
 	if (!g_started)
 		return;
 
+	// A failed savegame load returns from the engine's LoadGame before its normal
+	// close point (A-04).  The three failure-exit hooks close the load window, but
+	// a scenario change is the last line of defence: never carry an open window or
+	// the deferred records of an aborted load into the next scenario.
+	ExtensionIndex::Instance().ResetForScenarioClear();
 	ExtensionIndex::Instance().ClearAll();
 	Log::Info("scenario clear: extension state reset (%zu store(s) registered)",
 		ExtensionIndex::Instance().StoreCount());

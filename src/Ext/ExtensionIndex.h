@@ -86,6 +86,11 @@ public:
 	void EnterLoadWindow();
 	void ExitLoadWindow();
 
+	// Scenario clear / return to the main menu (A-04 fallback): closes a load
+	// window the engine's failure exits may have left open and drops the deferred
+	// records of a load that never finished, so the next scenario starts clean.
+	void ResetForScenarioClear();
+
 	void DeferAllocation(const ExtStoreDesc* desc, AbstractClass* owner);
 	const std::vector<DeferredAllocation>& DeferredAllocations() const;
 	void ClearDeferredAllocations();
@@ -98,7 +103,10 @@ public:
 	// Pointer invalidation notification hook. Extensions are owned by their
 	// object's lifetime (ctor/dtor hooks), so they are not removed here; this is
 	// the subscription point for features that keep their own pointer-keyed
-	// caches.
+	// caches.  A deferred allocation recorded for the invalidated owner is
+	// dropped (A-06): the engine says the pointer is dead, so restoring or
+	// creating an extension for it after the load window would use a stale
+	// address.
 	void NotifyInvalidPointer(const AbstractClass* owner, bool removed);
 	std::size_t InvalidPointerNotifications() const;
 

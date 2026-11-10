@@ -30,9 +30,24 @@
 //                 the trailer may carry an extension for the same owner.
 //   * 0x67E685 - first instruction after the engine's swizzle pass.  The owner
 //                 pointers recorded in the trailer have been remapped by now, so
-//                 the loaded extensions can be attached.
+//                 the loaded extensions can be attached.  The window is closed
+//                 right here, before the hooked `call 0x685120` re-executes
+//                 (A-07): allocations made by that call then take the normal path
+//                 instead of being deferred after the drain and lost.
+//   * 0x67E4B1/0x67E53A/0x67E595 - the three early exits of LoadGame (0x67E440):
+//                 the two StgOpenStorage failures and the COM-method failure.
+//                 They return before the engine's close point, so each one closes
+//                 the load window itself (A-04); without these hooks the window
+//                 stays open for the rest of the game session and every later
+//                 extension allocation is silently deferred.  Each window is the
+//                 5-byte prefix of an epilogue and ends on the next instruction
+//                 (0x67E4B6/0x67E53F/0x67E59A, `pop ebx`).
 //
-// All five windows are size 5 and every one ends on an instruction boundary (see
+// A scenario clear / return to the main menu additionally resets the window and
+// the deferred records (Core/Platform.cpp::OnScenarioClear), so a load aborted
+// through a path without a hook cannot poison the next scenario either.
+//
+// All eight windows are size 5 and every one ends on an instruction boundary (see
 // docs/HookCatalogue.md).
 // ---------------------------------------------------------------------------
 
@@ -72,6 +87,29 @@ DEFINE_HOOK(0x67E44D, Venture_LoadGame_Begin, 0x5)
 	return 0;
 }
 
+// A-04: the engine aborts the load at an early exit, before its normal close
+// point (0x67E68A).  Close the window here so later allocations take the normal
+// path again; the close is idempotent, so the success path is unaffected.
+DEFINE_HOOK(0x67E4B1, Venture_LoadGame_Failed1, 0x5)
+{
+	venture::SaveTrailer::ExitLoadWindow();
+	return 0;
+}
+
+// A-04: second StgOpenStorage failure of LoadGame.
+DEFINE_HOOK(0x67E53A, Venture_LoadGame_Failed2, 0x5)
+{
+	venture::SaveTrailer::ExitLoadWindow();
+	return 0;
+}
+
+// A-04: COM-method failure of LoadGame.
+DEFINE_HOOK(0x67E595, Venture_LoadGame_Failed3, 0x5)
+{
+	venture::SaveTrailer::ExitLoadWindow();
+	return 0;
+}
+
 // End of the engine's save routine: append the platform trailer after every other
 // platform's block.  `EAX` carries the engine's HRESULT; do not append on failure.
 DEFINE_HOOK(0x67E42E, Venture_SaveGame_Trailer, 0x5)
@@ -101,10 +139,17 @@ DEFINE_HOOK(0x67E685, Venture_LoadGame_PostSwizzle, 0x5)
 {
 	EnsureEngineServices();
 	venture::SaveTrailer::FinishLoad();
+
+	// A-07: close before the hooked `call 0x685120` re-executes.  FinishLoad has
+	// already drained the deferred list, so an allocation made by that call while
+	// the window were still open would be deferred again and never processed.
+	venture::SaveTrailer::ExitLoadWindow();
 	return 0;
 }
 
-// The engine finished loading: normal allocation resumes.
+// The engine finished loading: normal allocation resumes.  Kept as the documented
+// close point; the post-swizzle hook already closed the window, so this is an
+// idempotent second close (A-07).
 DEFINE_HOOK(0x67E68A, Venture_LoadGame_End, 0x5)
 {
 	venture::SaveTrailer::ExitLoadWindow();
