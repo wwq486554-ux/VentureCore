@@ -13,7 +13,9 @@ installs), `docs/EventChannel.md` (the event the example command raises),
 
 ## How registration works
 
-1. The platform registers command descriptors at load time:
+1. The platform registers command descriptors at load time (a static
+   initializer / `Registrar` object in the owning module is the normal place -
+   before the engine asks for its command list):
 
    ```cpp
    #include "Command/Commands.h"
@@ -34,10 +36,16 @@ installs), `docs/EventChannel.md` (the event the example command raises),
    ```
 
    `Register` returns `Ok`, `InvalidCommand` (a required field is null/empty) or
-   `DuplicateName`. Names are unique and compared exactly. The descriptor is
-   copied into the registry; `Commands::At(index)` / `Commands::Count()` iterate
-   it in registration order, `Find(name)` / `SetEnabled(name, on)` /
-   `IsEnabled(name)` look one up by engine name.
+   `DuplicateName`. Names are unique and compared exactly. The descriptor struct
+   is copied into the registry, but its **pointers are borrowed, not deep-copied**:
+   `name` / `uiName` / `uiCategory` / `uiDescription` must point at
+   static-lifetime storage (string literals are the intended use) and `handler`
+   must be a function that stays valid for the process lifetime - the engine keeps
+   its own command object and may call `Execute` / `GetUIName` at any later time.
+   Never pass a temporary buffer such as `std::string::c_str()`.
+   `Commands::At(index)` / `Commands::Count()` iterate it in registration order,
+   `Find(name)` / `SetEnabled(name, on)` / `IsEnabled(name)` look one up by
+   engine name.
 
 2. The engine calls its command-registration callback once while it builds its
    own command list. The platform hooks that point (`0x533066`, size 6 -

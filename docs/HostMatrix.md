@@ -2,7 +2,7 @@
 
 VentureCore is designed to sit *next to* existing platform DLLs rather than
 replace or extend them.  This document defines which hosts are required, how each
-one is detected, what v0.2.0-experimental does with it, and which support tier the
+one is detected, what v0.3.0-experimental does with it, and which support tier the
 detection resolves to.
 
 Source of truth: `src/Core/HostDetect.h`, `src/Core/HostDetect.cpp` and the
@@ -10,7 +10,7 @@ Source of truth: `src/Core/HostDetect.h`, `src/Core/HostDetect.cpp` and the
 
 ## Matrix
 
-| Host | Module checked | Requirement | Detected by | v0.2.0 behaviour | Tier |
+| Host | Module checked | Requirement | Detected by | v0.3.0 behaviour | Tier |
 | --- | --- | --- | --- | --- | --- |
 | `gamemd.exe` (Yuri's Revenge 1.001) | - | **required** | the process itself; hook addresses are tied to this build | host executable; the platform runs inside it | - |
 | SyringeEx | `Syringe.exe` | **required** | the `SyringeFeatures` flags (`ESPModification`, `ZFPreservation`, `ReladdrInstructionFixup`) set by SyringeEx at injection | **gate**: if the flags are not all set, the platform shows a message box and terminates the game - it refuses to run under an older Syringe | T0 base |
@@ -37,7 +37,11 @@ lowest tier it can run at (`FeatureDescriptor::minTier`):
 | T3 | Kratos or Kaleidoscope loaded | the "best effort" host set |
 
 Resolution is by presence, highest wins: T3 if Kratos or Kaleidoscope is loaded,
-otherwise T2 if Phobos is, otherwise T1 if Ares is, otherwise T0.  A feature is
+otherwise T2 if Phobos is, otherwise T1 if Ares is, otherwise T0.  The resolved
+tier is a **single highest-host label, not an accumulating set**: a T3 result
+(Kratos/Kaleidoscope) does not mean Ares or Phobos are present as well, so a
+feature that genuinely needs Ares (T1) or Phobos (T2) must also inspect
+`FeatureContext::hostMask` rather than trusting `minTier` alone.  A feature is
 enabled only when its INI switch is on **and** the resolved tier is at least its
 `minTier`; if the tier is too low the log records why the feature was disabled.
 The switch itself comes from `<Platform>.ini` `[Features] <iniKey>` (`yes` by
@@ -65,7 +69,7 @@ log and the configured `[Platform] LineagePolicy` decides what happens:
 without our features - while `warn` only logs the conflict.  See
 `docs/Lineage.md` for the marker, the scan and the exact log lines.
 
-## v0.2.0 limitations
+## v0.3.0 limitations
 
 * No functional dependency on any optional host: the base starts at T0 and does
   nothing host-specific.  Host detection exists so derived platforms can gate
@@ -92,9 +96,11 @@ The platform's event channel (`0x70-0x7F`, see `docs/EventChannel.md`) is a
 **same-build contract**, not a compatibility matrix entry:
 
 * every peer in a multiplayer game must run a platform build that registered the
-  same event types with the same payload sizes; the engine sizes an unknown type
-  from the vanilla table, so a peer without the platform (or with a different
-  registry) misreads our events and desynchronises;
+  same event types with the same payload sizes.  A peer **without** the platform
+  asks the vanilla engine for the size of an out-of-range number (undefined
+  behaviour); a peer with the platform but a different registry is answered one
+  byte fail-closed by its own hooks.  Both misparse our events and desynchronise;
+  the fail-closed case is at least memory-safe;
 * there is no automatic peer detection at runtime.  The startup log lists the
   registered event types and the mixed-client warning; a player installing the
   platform on only one side of a network game is misconfigured;
@@ -107,4 +113,4 @@ The platform's event channel (`0x70-0x7F`, see `docs/EventChannel.md`) is a
 * Phobos interop (opt-in calls into Phobos extensions).
 * AE (Ares extensions) support.
 
-None of these are in v0.2.0-experimental; see `README.md` for the full roadmap.
+None of these are in v0.3.0-experimental; see `README.md` for the full roadmap.

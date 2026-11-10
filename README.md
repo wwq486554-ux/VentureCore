@@ -11,7 +11,7 @@ scripts).
 
 It is a template, not a mod: it deliberately contains **no gameplay features**.
 
-> **Status: v0.2.0-experimental** - an empty base plus two Example modules.  The
+> **Status: v0.3.0-experimental** - an empty base plus two Example modules.  The
 > base machinery (startup, logging, config, extension storage with savegame
 > persistence, event channel, command registration, lineage detection, host
 > detection) is implemented; the automated checks for each layer are named in
@@ -48,8 +48,9 @@ named with it (an in-game run is still the only end-to-end check - see
   tiers T0-T3.  No functional dependency on any of them in this sample.
 * **Lineage mutual exclusion** - the DLL exports a lineage marker; a second DLL of
   the same lineage is detected at startup, named in the log and (by default)
-  refused so the process never gets two extension tables / savegame trailers
-  (see `docs/Lineage.md`).
+  refused, so the second copy never initializes features and there is no second
+  extension table or trailer writer.  Its static registrations (commands, event
+  types) still happen - see `docs/Lineage.md` for the exact split.
 * **Compile-time feature registry** - `FeatureDescriptor`, `FeatureContext`,
   `FeatureRegistrar`, `VENTURE_REGISTER_FEATURE` (`include/platform/Feature.h`);
   one `[Features]` switch per feature (`iniKey`, default on) plus `minTier`
@@ -59,13 +60,22 @@ named with it (an in-game run is still the only end-to-end check - see
   most-derived instance per owner object, a typed
   `ExtensionStore<TOwner, TExt>` (O(1) owner map + intrusive allocation-order
   list + last-owner fetch cache) and a type-erased global `ExtensionIndex`;
-  scenario-clear, pointer-invalidation and savegame plumbing included.
-* **Savegame tail block** - extension state is written after every other
-  platform's block and read by scanning backwards from the end of the stream, so
-  old saves and host combinations keep loading; format in `docs/SaveFormat.md`.
+  scenario-clear and savegame plumbing included.  The pointer-invalidation hook
+  is wired (it counts the engine's notifications and drops a stale deferred
+  allocation), but there is no subscriber API for feature caches yet - do not
+  build cache invalidation on it (see `docs/EngineBindings.md`).
+* **Savegame persistence** - extension state is appended to the engine's
+  savegame stream as a header-first, strictly sequential frame
+  (`[magic VNC1][formatVersion][payloadSize][crc32][payload]`) written after every
+  known platform's block; the load side reads it at the end of the ordered
+  ecosystem blocks.  The payload carries a signature of the platform's saveable
+  store set, so a changed feature set or a bumped store version drops the
+  extension state (one-time for `v0.2.0` saves) instead of misreading it; format
+  in `docs/SaveFormat.md`.
 * **Event channel** - platform-private network event types `0x70-0x7F` with fixed
-  payloads, a responder registry and the engine's own event record as wire
-  format (see `docs/EventChannel.md`).
+  payloads, a responder registry, fail-closed sizing for unregistered numbers
+  above the engine's `0x00-0x2E` table, and the engine's 111-byte `EventClass`
+  record as the in-process event record (see `docs/EventChannel.md`).
 * **Command registration** - new player commands with UI name/category/description
   that the player binds in the game's keyboard dialog (see `docs/Commands.md`).
 * **Lifecycle hooks** - `UnitClass` construction, both `UnitClass` destruction
@@ -80,7 +90,7 @@ named with it (an in-game run is still the only end-to-end check - see
   (`scripts/linux/check_yrpp.py`), compile time (`static_assert`s in
   `src/Engine/EngineCompat.h`) and run time (log + version resource).
 * **Hook catalogue + static verification** - `docs/HookCatalogue.md` lists every
-  hook (17 records, 16 distinct handlers); `scripts/verify_build.py` parses that
+  hook (20 records, 19 distinct handlers); `scripts/verify_build.py` parses that
   table and verifies a built DLL against it without hard-coding a second copy.
 * **Unit tests and a benchmark** - `tests/` with engine-free test programs (run
   with `scripts/linux/run_tests.sh`) and the extension-store microbenchmark
@@ -90,7 +100,7 @@ named with it (an in-game run is still the only end-to-end check - see
 
 ## Not in this sample (roadmap)
 
-These are **planned, not implemented**; do not expect them from a v0.2.0 DLL:
+These are **planned, not implemented**; do not expect them from a v0.3.0 DLL:
 
 1. **T1-T3 host-specific features** - behaviour that only runs when Ares /
    Phobos / Kratos / Kaleidoscope are present.
@@ -146,9 +156,11 @@ directory), `--fix-eol` (normalise line endings first).  `--build-type` selects
 the `RELEASE` / `NIGHTLY` preprocessor define; a build without it is a local
 build and is labelled `LOCAL` in the log and version resource.
 
-Builds, tests, the benchmark and the probes share one Wine toolchain, so they take
-an flock in the prefix and serialise against each other (including across git
-worktrees that share the prefix).
+The build, the unit tests, the benchmark and the load probe share one Wine
+toolchain, so they take an flock in the prefix and serialise against each other
+(including across git worktrees that share the prefix).  The ABI probe
+(`scripts/linux/abi_probe.sh`) compiles a tiny probe with `cl.exe` directly and
+does not take that lock, so do not run it while a build is in progress.
 
 ### Windows
 
@@ -173,15 +185,19 @@ scripts/linux/run_tests.sh
 ```
 
 `verify_build.py` checks the PE format (PE32/i386), the `.syhks00` hook records
-against the catalogue, the distinct hook handler exports, the version resource
-strings (platform name, version, YRpp pin), the registered Example feature id and
-the log-policy source hygiene.  It exits 0 only when every check passes.
+against the catalogue, the distinct hook handler exports, the version strings
+(platform name, the version - required both in the UTF-16LE version resource and
+as the compiled-in ASCII literal - and the YRpp pin), the registered Example
+feature id and the log-policy source hygiene.  It exits 0 only when every check
+passes.
 
 `load_probe.sh` performs `LoadLibrary` -> `GetProcAddress` for the base hook
 handlers and the lineage markers, validates the marker payload and prints
 `resolved exports: 7/7`, then loads a second copy of the DLL under another file
-name and expects the conflict counter to go from 0 to 1.  That is the strongest
-check possible without starting the game.
+name and expects the conflict counter to go from 0 to 1.  It loads the DLL (its
+imports and CRT constructors run) but does **not** run `Startup`, so the engine
+hooks, logging, INI and savegame code paths are not exercised by it; an in-game
+run is still required for those.
 
 The real test - launching the game with SyringeEx and the DLL in a writable game
 directory, then entering and leaving a skirmish (plus one save/load round trip) -
@@ -252,7 +268,7 @@ Booleans accept `yes/no`, `true/false`, `on/off` and `1/0`.  See
 | `docs/EngineBindings.md` | how the base binds to gamemd / SyringeEx / YRpp; storage, INI, savegame, event, command, lineage and logging layers |
 | `docs/HookCatalogue.md` | every installed hook: address, window size, purpose |
 | `docs/HostMatrix.md` | required vs optional hosts, detection, support tiers, mixed-client constraints |
-| `docs/SaveFormat.md` | the savegame tail block: stream layout, payload, load sequence |
+| `docs/SaveFormat.md` | the savegame frame: stream layout, payload, load sequence |
 | `docs/Ini.md` | rules/art INI reads and the rules-INI takeover |
 | `docs/EventChannel.md` | event type range, payload format, responders, mixed-client risk |
 | `docs/Commands.md` | registering player commands and binding hotkeys |
@@ -279,10 +295,12 @@ VentureCore 是一个 MIT 授权的“起始基座/模板”：复制仓库 → 
 编译成你自己的单一平台 DLL，不需要改 Ares / Phobos / Kratos，也不用重复造
 启动、日志、INI、宿主检测、功能开关、扩展存储、存档、事件、命令这些基础设施。
 
-当前版本 `v0.2.0-experimental` 是**空基座 + 两个示例模块**：示例只统计 UnitClass
-的创建/销毁、读取一个 rules 键，没有任何玩法功能。基座机械已经齐备并全部自检通过：
+当前版本 `v0.3.0-experimental` 是**空基座 + 两个示例模块**：示例只统计 UnitClass
+的创建/销毁、读取一个 rules 键，没有任何玩法功能。基座各层均已实现，每层对应的
+自动化检查写在本 README 与 `docs/` 里；这些检查不能替代一次实机运行：
 日志分级、`<Platform>.ini`、rules/art INI 读取与同名键接管、宿主矩阵、血统互斥、
-扩展存储（继承链 + 存档尾块持久化）、事件通道 `0x70–0x7F`、玩家命令注册。
+扩展存储（继承链 + 存档持久化，顺序帧 + store 集签名）、事件通道 `0x70–0x7F`、
+玩家命令注册。指针失效通知目前只有计数/清理，没有订阅 API。
 T1–T3 宿主专属功能、Phobos Interop、AE 仍是 roadmap（见上方 "Not in this sample"）。
 硬依赖只有 `gamemd.exe` + SyringeEx；Ares / Phobos / Kratos / Kaleidoscope 只做检测和日志。
 构建与自检：

@@ -70,7 +70,7 @@ See `NOTICE.md` for the full statement.
 * **SyringeEx** is used at run time and as an interface definition (the
   `.syhks00` / `.syexe00` sections).  No SyringeEx headers or source are copied;
   the hook macros come from the external YRpp `Syringe.h`.
-* **Ares / Phobos / Kratos / Kaleidoscope** are optional hosts.  v0.2.0 only
+* **Ares / Phobos / Kratos / Kaleidoscope** are optional hosts.  v0.3.0 only
   detects their loaded modules and logs the result; nothing is copied, linked or
   vendored.  Their own licenses apply to them.
 

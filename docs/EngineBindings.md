@@ -5,7 +5,7 @@ YRpp: which layers exist, which contracts are enforced (and where), and how the
 platform's extension storage hooks into the engine's object lifetime.
 
 Related documents: `docs/HookCatalogue.md` (every installed hook),
-`docs/SaveFormat.md` (the savegame tail block), `docs/Updating.md` (how to
+`docs/SaveFormat.md` (the savegame frame), `docs/Updating.md` (how to
 update the YRpp pin), `docs/HostMatrix.md` (optional hosts).
 
 ## Binding layers
@@ -93,8 +93,9 @@ The platform compiles against one exact YRpp revision
 
 ### ABI assertions
 
-`src/Engine/EngineCompat.h` currently asserts (values measured with
-`scripts/linux/abi_probe.sh` against the pinned revision):
+`src/Engine/EngineCompat.h` currently asserts the engine ABI sizes the base
+touches (see `src/Engine/EngineCompat.h`; the pinned YRpp layout is the source of
+truth, and the build fails if a size moves):
 
 | Type | Expected size |
 | --- | --- |
@@ -119,6 +120,15 @@ Rule: whenever a new engine type or field is used, add its assertion here as
 well.  A YRpp update that silently moves a field must fail the build, not corrupt
 a savegame at run time.
 
+`scripts/linux/abi_probe.sh` prints the sizes of the engine classes it includes
+(`AbstractClass`, `ObjectClass`, `FootClass`, `TechnoClass`, `UnitClass`,
+`BulletClass`, `UnitTypeClass`, `WeaponTypeClass`, `WarheadTypeClass`,
+`CCINIClass`, `REGISTERS` and a few more) so a YRpp update can be re-checked
+against the assertions; it does **not** print `INIClass`, `INIClass::INIEntry`,
+`INIClass::INISection` or `EventClass` - those four assertions are taken from the
+pinned YRpp layout and are enforced by the build, not re-measured by the probe
+yet (adding them to the probe is a tracked follow-up).
+
 ## Rules / art INI binding
 
 Platform startup (`Venture_ExeRun`) runs before the engine parses `rules(md).ini`,
@@ -129,9 +139,9 @@ so rules keys cannot be read from a feature's `Initialize()`.  The binding is:
   the same call works for the rules INI and the art INI).  Every getter falls back
   to the supplied default on a null INI/section/key.
 * **Rules-INI observers** - a feature registers a reader with
-  `IniTakeover::AddRulesReader()` from its `Initialize()`; the readers are called
-  at the rules-INIT hook, i.e. after the engine parsed the file and before the
-  engine (and any host platform) consumes it.
+  `IniTakeover::RegisterRulesIniObserver()` from its `Initialize()`; the readers
+  are called at the rules-INIT hook, i.e. after the engine parsed the file and
+  before the engine (and any host platform) consumes it.
 * **Takeover** - `DEFINE_HOOK(0x6686C0, Venture_RulesClass_Init, 0x6)` sits at
   the entry of the engine's rules-init function: the caller has already parsed
   `CCINIClass::INI_Rules` and the body has not read it yet (Phobos/Ares hook the
@@ -230,36 +240,41 @@ never deletes them itself.
 | `UnitClass` constructed | `Venture_Example_UnitClass_CTOR` (0x7353D3) | Example store `Allocate`s the `ExampleUnitExt` instance (type id 0x0101, base `UnitExt`); index `Attach`es it, so `UnitExt` / `FootExt` / `TechnoExt` views reach the same instance |
 | `UnitClass` destroyed (two sites) | `Venture_Example_UnitClass_DTOR` (0x735967, 0x7359DA) | Example store `Remove`s the extension; index `Detach`es it |
 | scenario teardown | `Venture_ScenarioClear` (0x685659) | `ExtensionIndex::ClearAll()` - every registered store clears itself, then the index is cleared |
-| pointer invalidated | `Venture_AnnounceInvalidPointer` (0x7258D0) | `ExtensionIndex::NotifyInvalidPointer()` - v0 counts and debug-logs the notification; it does **not** delete extensions (removal stays owned by the destructor hook).  This is the subscription point for pointer-keyed feature caches, which do not exist yet |
+| pointer invalidated | `Venture_AnnounceInvalidPointer` (0x7258D0) | `ExtensionIndex::NotifyInvalidPointer()` - increments a diagnostic counter and drops a deferred allocation recorded for the invalidated owner; it does **not** delete extensions (removal stays owned by the destructor hook) and there is **no subscriber/log API** yet, so a feature cannot register a pointer-keyed cache on it today |
 
 Consequences for feature authors:
 
 * never hold an extension pointer across a scenario boundary - scenario clear
   destroys all of them;
-* a base-class view and the derived `Fetch` return the same instance; do not
-  keep a base view cached without invalidating it on the pointer-invalidation
-  notification;
-* extension state **is** persisted by the savegame tail block, but only for
+* a base-class view and the derived `Fetch` return the same instance; do not keep
+  a base view cached across frames (the pointer-invalidation notification is not
+  exposed to features yet - see the lifecycle table above);
+* extension state **is** persisted by the savegame frame, but only for
   stores that opted in (`SetSaveable(true, dataVersion)`); see
   `docs/SaveFormat.md` for the feature-author rules;
-* do not cache engine pointers without invalidating them on the
-  pointer-invalidation notification.
+* do not cache engine pointers without a validity rule you control: the engine's
+  pointer-invalidation announcement is only used internally today.
 
 ### Store cost (measured)
 
 The store container was chosen against a microbenchmark
-(`tests/bench_store.cpp`, `scripts/linux/bench_store.sh`; Wine + MSVC 14.44, the
-same flags as the released DLL, live instance counts 1k / 5k / 20k).  "Before" is
-the flat `vector<unique_ptr>` + linear removal the base started with; "after" is
-the intrusive allocation-order list + `Fetch` cache + `Reserve` hint.
+(`tests/bench_store.cpp`, `scripts/linux/bench_store.sh`; Wine + MSVC 14.44 with
+the **benchmark's own** compile flags - `/W4 /MT /EHsc- /Gz`, no `/O2` or `/Oy`,
+so the numbers are *not* comparable to the optimised release DLL - live instance
+counts 1k / 5k / 20k).  "Before" is the flat `vector<unique_ptr>` + linear removal
+the base started with; those numbers were recorded during the container rework
+and cannot be re-measured from this tree (the old container is gone).  "After" is
+the intrusive allocation-order list + `Fetch` cache + `Reserve` hint, measured
+twice on this machine on 2026-11-11; the ranges span both runs because Wine
+timing is noisy (the 1k-live case in particular):
 
-| Operation | Before | After |
+| Operation | Before (historical) | After (measured) |
 | --- | --- | --- |
-| `Allocate` (per instance) | 512-538 ns | 426-482 ns |
-| `Fetch`, changing owners (hash path) | 41-45 ns | 36-53 ns (unchanged within noise) |
-| `Fetch`, same owner repeatedly (cache) | 34-52 ns | **1.7-2.2 ns** |
-| `Remove` (random order, per instance) | 4.3-4.7 / 21 / 83-84 µs @ 1k/5k/20k | **0.19-0.25 µs @ every size** |
-| `Clear` (per instance) | 107-118 ns | 105-123 ns (unchanged) |
+| `Allocate` (per instance) | 512-538 ns | 426-988 ns (noisy) |
+| `Fetch`, changing owners (hash path) | 41-45 ns | 38-91 ns (noisy, unchanged within noise) |
+| `Fetch`, same owner repeatedly (cache) | 34-52 ns | **1.7-2.8 ns** |
+| `Remove` (random order, per instance) | 4.3-4.7 / 21 / 83-84 µs @ 1k/5k/20k | **0.20-0.29 µs @ every size** |
+| `Clear` (per instance) | 107-118 ns | 107-166 ns (unchanged) |
 
 Memory: the intrusive links cost two pointers (8 bytes) per extension instance
 but remove the former container node (~24 bytes) and the vector's growth slack,
@@ -267,8 +282,9 @@ so the per-instance footprint stays at roughly the same level; the `Reserve` hin
 trades a small upfront allocation for no rehash spikes during a battle.
 
 Why this matters: `Remove` runs once per destroyed object and used to be linear
-in the live count (0.2 → 84 µs across the range above - an O(n) scan per unit
-destroyed, i.e. quadratic work while an army dies).  `Fetch` on the same owner is
+in the live count (the historical before-column: 4.3 → 84 µs across the range
+above - an O(n) scan per unit destroyed, i.e. quadratic work while an army
+dies).  `Fetch` on the same owner is
 the common shape in per-frame/per-shot feature code, where the cache removes the
 hash lookup entirely.  The allocation-order list keeps the savegame row order
 deterministic.
@@ -298,8 +314,9 @@ limitations: `docs/Lineage.md`.
 
 ## Event channel binding
 
-The platform reserves the event-type range `0x70-0x7F` (vanilla `0x00-0x2F`,
-CnCNet `0x30-0x3F`, Phobos `0x40-0x45`, Kratos `0x50-0x51`, Ares `0x60-0x61`).
+The platform reserves the event-type range `0x70-0x7F` (vanilla `0x00-0x2E` - the
+47-entry payload-size table - CnCNet `0x30-0x3F`, Phobos `0x40-0x45`, Kratos
+`0x50-0x51`, Ares `0x60-0x61`).
 A feature registers a type with a fixed payload size (1..104 bytes) and a
 responder; the platform serializes it into the engine's event record, queues it
 and routes it back on every machine.
@@ -342,16 +359,16 @@ discarded: commands ship unbound and the player binds them.  Details:
 
 ## Savegame trailer binding
 
-Extension state is persisted through the platform's framed tail block, which is
+Extension state is persisted through the platform's framed block, which is
 appended and read strictly sequentially (the engine's savegame stream is not
 seekable); the format and the load sequence are documented in
 `docs/SaveFormat.md`.  The binding side:
 
 | Engine site | Handler | Effect |
 | --- | --- | --- |
-| `0x67D1B4` (after the engine's object-state writer, before the finalize/Commit) | `Venture_SaveGame_Trailer` | builds the extension payload and appends the header-first frame `[header][payload]` sequentially - no `Seek`: this site runs after every ecosystem writer, so the current position is the end of the save data; skipped when the writer's BOOL result (`AL` of `EAX`) is 0 or when no store carries state |
+| `0x67D1B4` (after the engine's object-state writer, before the finalize/Commit) | `Venture_SaveGame_Trailer` | builds the extension payload and appends the header-first frame `[header][payload]` sequentially - no `Seek`: this site runs after every ecosystem writer, so the current position is the end of the save data; skipped when the writer's BOOL result (`AL` of `EAX`) is 0 or when no saveable store is registered |
 | `0x67E44D` (load window open) | `Venture_LoadGame_Begin` | defers allocations driven by object constructors |
-| `0x67F7C8` (end of the load routine) | `Venture_LoadGame_Trailer` | sequential read of the frame from the current position (our handler runs after every ecosystem reader, so this is exactly our block; no `Seek`), header/CRC validation, payload read |
+| `0x67F7C8` (end of the engine's load-data routine) | `Venture_LoadGame_Trailer` | sequential read of the frame from the current position (our handler runs after every ecosystem reader, so this is exactly our block; no `Seek`), header/CRC validation, payload read |
 | `0x67E685` (after the swizzle pass) | `Venture_LoadGame_PostSwizzle` | adopts the restored instances (owner pointers remapped), `PostLoad()`, deferred allocations |
 | `0x67E68A` (load window close) | `Venture_LoadGame_End` | resumes normal allocation |
 
@@ -365,8 +382,8 @@ both are sequential: the writer is installed at `0x67D1B4`, a site no known
 platform hooks that runs after the engine's object-state writer - the routine
 containing the tail site Ares owns (`0x67E42E`, whose handler always jumps away) -
 so the append puts our block last regardless of handler order.  The reader runs at
-`0x67F7C8` after every ecosystem sequential reader (our DLL name sorts after the
-known platforms), so it starts exactly at our frame.  `docs/SaveFormat.md` records
+`0x67F7C8` after every ecosystem sequential reader (the known platform modules
+sort before `VentureCore.dll`), so it starts exactly at our frame.  `docs/SaveFormat.md` records
 the failure mode for a platform outside that order.
 
 ## Logging
@@ -385,8 +402,10 @@ the level semantics, the measured cost and the hot-path rules.  The binding side
   build type, PID, start time), so an append-only log stays readable across
   sessions; all historical line formats below it are unchanged for users and
   grep-based tooling;
-* the logger is crash-proof: any file-system failure degrades instead of failing
-  the platform.
+* the logger is best-effort: a failed file open disables file logging (the gated
+  debugger helper carries one explanation line) and a failed write drops the
+  line after reporting it once; no file-system failure aborts the platform (see
+  `docs/Logging.md` for the exact guarantees).
 
 ## Adding a new engine binding
 
@@ -400,7 +419,7 @@ the level semantics, the measured cost and the hot-path rules.  The binding side
    instructions and `address + size` must be the next instruction.
 5. When the YRpp pin changes, follow `docs/Updating.md`.
 
-## Limits in v0.2.0-experimental
+## Limits in v0.3.0-experimental
 
 * The savegame trailer persists extension state (see `docs/SaveFormat.md`); it is
   not a general savegame fork - the engine's own object format is untouched.

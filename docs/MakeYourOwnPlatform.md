@@ -68,7 +68,7 @@ control (`docs/Logging.md`).  A savegame payload carries a signature of the
 platform's saveable store set, so adding, removing, reordering or re-versioning a
 saveable store makes older saves incompatible: their extension state is dropped
 (the game's own state still loads, there is no migration).  Do **not** plan around
-the systems the base does not have yet in v0.2.0: T1-T3 host-specific features,
+the systems the base does not have yet in v0.3.0: T1-T3 host-specific features,
 Phobos interop and AE are roadmap-only.
 
 ## 4. Add a feature module
@@ -178,8 +178,11 @@ Then:
    so a user's log shows which features are on/off and why.
 5. **Handle lifetime correctly**: extension instances are owned by the platform's
    lifecycle hooks - ctor allocates, dtor removes, scenario clear wipes
-   everything.  Never delete an extension yourself, never keep one across a
-   scenario boundary, and do not assume it survives save/load (no save tail yet).
+   everything.  Never delete an extension yourself and never keep one across a
+   scenario boundary.  Savegame persistence is opt-in per store
+   (`SetSaveable(true, dataVersion)` + `Save`/`Load`): a non-saveable extension
+   is recreated empty after a load, a saveable one is restored with its data (see
+   `docs/SaveFormat.md`).
 6. **One extension per owner object**: if a second module extends the same engine
    class, merge its fields into the same extension class instead of adding a
    second store - otherwise the second `Allocate` returns `nullptr` and logs the
@@ -188,10 +191,19 @@ Then:
 ### Optional: use the tier gate
 
 If the feature only makes sense with a host platform, set `minTier`
-(T1 = Ares, T2 = Phobos, T3 = Kratos/Kaleidoscope).  The base enables the feature
-only when the switch is on **and** the detected tier is at least `minTier`; the
-startup log explains why it was disabled.  The switch key and the internal id stay
-independent, so the user-facing name can be nice while the id stays stable.
+(T0 = SyringeEx only, T1 = Ares, T2 = Phobos, T3 = Kratos/Kaleidoscope).  The base
+enables the feature only when the switch is on **and** the detected tier is at
+least `minTier`; the startup log explains why it was disabled.  The switch key and
+the internal id stay independent, so the user-facing name can be nice while the
+id stays stable.
+
+**The tier is a single highest-host label, not an accumulating capability set**:
+`Tier::T3` is resolved when Kratos or Kaleidoscope is loaded, whether or not Ares
+or Phobos are also present, and the `minTier` comparison is numeric.  A feature
+that really needs Ares (`T1`) or Phobos (`T2`) must therefore also check the host
+mask itself (`FeatureContext::hostMask`) - `minTier` alone is only a coarse
+"there is at least one known host" gate.  See `docs/HostMatrix.md` for the
+resolution rule.
 
 ## 5. Make it rebuildable and reviewable
 

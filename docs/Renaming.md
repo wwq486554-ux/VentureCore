@@ -51,9 +51,11 @@ are starting a new platform from scratch.
      delete the Example module.
    The default DLL path in the same file is derived from the repository root and
    the hard-coded file name; update it if you renamed the project output.
-6. **Load probe** - `scripts/linux/load_probe.sh` resolves five hook handler names
-   by name.  If you renamed the handler functions (or removed the Example module),
-   update its `kExports` list and the `resolved exports: N/5` expectation.
+6. **Load probe** - `scripts/linux/load_probe.sh` resolves seven exports by name:
+   five base hook handlers plus the two lineage marker exports
+   (`VentureLineage_GetInfo` / `VentureLineage_CountConflicts`).  If you renamed
+   the handler functions (or removed the Example module), update its `kExports`
+   list; the expected count is derived from that list automatically.
 7. **Hook handler names** - they are exported symbols (prefix `Venture_`).  You may
    keep the prefix (recommended for derived platforms) or rename all handlers
    consistently.  If you rename them, update `docs/HookCatalogue.md` in the same
@@ -94,5 +96,7 @@ are starting a new platform from scratch.
   comes from `VC_PLATFORM_DLL_NAME`/`VC_PLATFORM_NAME`, while the file itself is
   named after `ProjectName`.  Set both, or you get a DLL whose properties disagree
   with its file name.
-* The check in `verify_build.py` searches for the platform name and the version
-  string in the binary; a half-renamed build fails verification (by design).
+* The check in `verify_build.py` searches the binary for the platform name and the
+  version; the version must appear both in the UTF-16LE version resource and as
+  the compiled-in ASCII display string, so a half-renamed build (one of the two
+  sources still carrying the old name/version) fails verification (by design).

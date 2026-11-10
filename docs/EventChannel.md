@@ -172,11 +172,14 @@ event with `EventClass::OutList.Add(...)`, which is how the reference ecosystem
 raises the custom events it defines: the event then travels the normal event
 transport and is executed on every machine, including the sender's own.
 
-Helpers for a transport layer: `WriteFrame`/`ReadFrame` encode and decode one
-frame in a caller buffer; `GetDataSize(type)` returns the registered payload
-size (`0` = not ours); `GetWireSize(type)` is the engine-size policy above
-(`policy` plus `size`, never fails); `IsValidEventType(type)` checks the range
-and `IsOwnEventType(type)` additionally requires a registered handler;
+Helpers: `WriteFrame` serializes one event into a caller buffer and is the codec
+`Send` uses to build the engine event record; `ReadFrame` validates and decodes
+one record from a caller buffer and is currently only exercised by
+`tests/test_event_channel.cpp` (there is no production consumer - the engine owns
+the received record).  `GetDataSize(type)` returns the registered payload size
+(`0` = not ours); `GetWireSize(type)` is the engine-size policy above (`policy`
+plus `size`, never fails); `IsValidEventType(type)` checks the range and
+`IsOwnEventType(type)` additionally requires a registered handler;
 `Name(type)`, `Count()` and `EntryAt(index)` iterate the table for logs.
 
 ## Dispatch and payload validation

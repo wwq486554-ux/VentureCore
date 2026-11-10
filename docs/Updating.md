@@ -98,7 +98,7 @@ Version metadata lives in `src/Core/PlatformVersion.h`:
 * `VC_PRERELEASE_SUFFIX` - `"experimental"` for sample builds; comment it out for a
   stable release (the version resource then drops the `VS_FF_PRERELEASE` flag).
 
-Everything else is derived: the log banner (`v0.2.0.0-experimental`), the version
+Everything else is derived: the log banner (`v0.3.0.0-experimental`), the version
 resource strings, the build-type string (`LOCAL` / `NIGHTLY` / `RELEASE`, set by
 `--build-type`).  Do not edit the generated strings by hand.
 
@@ -107,8 +107,9 @@ Checklist for a version bump:
 1. Bump the numbers (and optionally change/remove the prerelease suffix).
 2. Add a `CHANGELOG.md` section for the new version, dated.
 3. Rebuild with `--build-type RELEASE` for a release artefact and run
-   `python3 scripts/verify_build.py` (it expects `0.2.0.0`; if the bump went
-   beyond 0.2.0.0, update `VERSION_STRINGS` at the top of `verify_build.py`).
+   `python3 scripts/verify_build.py` (it expects the `VERSION_STRINGS` at the top
+   of that file - currently `0.3.0.0` / `0.3.0-experimental`; update them in the
+   same change as the version bump).
 4. Run `scripts/linux/load_probe.sh`.
 5. Verify the version resource of the produced DLL, e.g.
    `winedump -j resource Release/VentureCore.dll` (or the Windows Explorer file
@@ -122,7 +123,9 @@ Checklist for a version bump:
   keeps working when a user drops in a new DLL without editing the INI.
 * Do not rename an existing `iniKey` without a migration note in
   `CHANGELOG.md`: old user INIs would silently fall back to the default.
-* `[Platform]` currently has one key, `VerboseLogging` (`yes` adds DEBUG lines).
+* `[Platform]` currently has five keys (see `README.md` / `VentureCore.ini.example`):
+  `LogLevel`, the legacy `VerboseLogging` alias, `DebugOutput`, `LineagePolicy`
+  and `IniTakeover`.
 * Keep `VentureCore.ini.example` and `docs/MakeYourOwnPlatform.md` in sync with
   any schema change.
 
@@ -153,14 +156,22 @@ When an optional host changes its module name, or a new host is added:
 
 ## 7. Planned increments (roadmap)
 
-The base layers are complete as of `v0.2.0-experimental` (savegame trailer,
-event channel, command registration, lineage detection, logging control - each
-with its own document in `docs/`).  The remaining increments are **T1-T3
-host-specific features**, **Phobos interop** and **AE**; none of these exist in
-`v0.2.0-experimental`.  When one lands, this document gains the sections it needs
-(host-specific hook selection and AE handling in particular must be written down
-before the first release that ships them).
+The implemented base layers as of `v0.3.0-experimental` are: savegame persistence
+(header-first sequential frame, payload v2), event channel (fail-closed sizing),
+command registration, lineage detection and logging control - each with its own
+document in `docs/`.  Every layer has automated checks on this machine (named in
+`README.md` and the per-layer document), but those checks load the DLL or drive
+engine-free code; they do not replace an in-game run.  The remaining increments are
+**T1-T3 host-specific features**, **Phobos interop** and **AE**; none of these
+exist in `v0.3.0-experimental`.  When one lands, this document gains the sections
+it needs (host-specific hook selection and AE handling in particular must be
+written down before the first release that ships them).
 
-When you change the **savegame payload** (new field, new store layout), bump that
-store's `dataVersion` in `SetSaveable` and update `docs/SaveFormat.md`; the
-trailer format version lives in `src/Core/SaveTrailer.h`.
+When you change a saveable store's **row layout** (a field added, removed or
+reordered), bump that store's `dataVersion` in its `SetSaveable(...)` call and
+update `docs/SaveFormat.md`; the row canary and the payload signature both cover
+it, so old saves drop their extension state instead of misreading the rows.
+Adding, removing or reordering a saveable store is also a format change because
+the payload signature covers the store set.  The frame format version
+(`src/Core/SaveTrailer.h`) and the payload version (`src/Ext/ExtSave.h`) change
+only when the on-stream layout itself changes.

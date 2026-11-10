@@ -50,6 +50,18 @@ const bool logUnits = venture::EngineIni::ReadBool(
     CCINIClass::INI_Rules, "Examples", "UnitCounterLog", false);
 ```
 
+**Boolean and integer parsing is not shared with the platform INI.**  `ReadBool`
+here hands the value to the engine's `CCINIClass::ReadBool`, which resolves the
+value from the **first character** of the raw text (`1` / `T` / `Y` → true,
+`0` / `F` / `N` → false, anything else → the supplied default; so `on`/`off` fall
+back to the default).  The platform's own `<Platform>.ini` reader
+(`src/Core/Ini.cpp`) compares the whole token, case-insensitively (`yes`/`no`,
+`true`/`false`, `on`/`off`, `1`/`0`), and its `GetInt` parses the leading decimal
+number and ignores trailing text (`12abc` → 12, no overflow check).  Do not assume
+a spelling accepted by one parser is accepted by the other when documenting a
+key; the full set of `<Platform>.ini` keys is documented in `README.md` and
+`VentureCore.ini.example`.
+
 The same functions work for the art INI:
 
 ```cpp
