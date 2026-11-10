@@ -17,7 +17,8 @@ variable names are unusual for a template.
 | `setup_wineprefix.sh` | creates/validates the Wine prefix (run once) |
 | `check_eol.py` | line-ending check (`--fix` to normalise) |
 | `check_yrpp.py` | verifies `external/YRpp` against the pin in `src/Core/EnginePin.h` |
-| `fetch_yrpp.sh` | copies a local YRpp checkout into `external/YRpp` and stamps its commit |
+| `fetch_yrpp.sh` | copies a local YRpp checkout into `external/YRpp` and stamps its commit (atomic; refuses self-copies) |
+| `test_fetch_yrpp.sh` | regression tests for `fetch_yrpp.sh` (self-copy guard, atomic install, git-HEAD pin gate; no Wine needed) |
 | `abi_probe.sh` | prints the engine ABI values pinned by `src/Engine/EngineCompat.h` |
 | `load_probe.sh` | loads the built DLL into a tiny Win32 host under Wine and resolves exports |
 
@@ -26,7 +27,7 @@ variable names are unusual for a template.
 ```bash
 cd VentureCore
 scripts/linux/setup_wineprefix.sh     # once
-scripts/linux/fetch_yrpp.sh           # once per checkout (or use a submodule)
+scripts/linux/fetch_yrpp.sh           # once per checkout (or use a submodule); no-op when installed
 scripts/linux/build_linux.sh Release --build-type RELEASE
 ```
 
@@ -51,9 +52,14 @@ this machine.
 
 ## Caveats
 
+* `fetch_yrpp.sh` installs through a staging directory and only swaps it in after
+  a complete copy, so an interrupted fetch cannot destroy an existing
+  `external/YRpp`.  It also refuses to copy the installed tree onto itself:
+  with no arguments that is a no-op ("already installed"), an explicit
+  `--from external/YRpp` is an error.
+* Do not run two builds at the same time: they share one Wine prefix.
 * The Wine prefix must live on a **Linux-native, writable** filesystem; NTFS/FUSE
   or read-only mounts fail deep inside `cl.exe` with `error D8037` / `D8050`.
-* Do not run two builds at the same time: they share one Wine prefix.
 * Build output goes to `Release/` (gitignored). The Linux-side build state lives
   in `Release/IntDir/linux/` and can be dropped with `--clean`.
 * The game directory is not deployed to by default; `--deploy DIR` exists for a

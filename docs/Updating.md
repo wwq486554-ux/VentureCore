@@ -17,8 +17,14 @@ and macro behaviour may all change.  The procedure, in order:
 3. Install it into `external/YRpp` and update the stamp:
 
    ```bash
-   scripts/linux/fetch_yrpp.sh --from /path/to/YRpp     # or --commit SHA
+   scripts/linux/fetch_yrpp.sh --from /path/to/YRpp
    ```
+
+   The source must normally be a git checkout whose `HEAD` is the new pin.
+   `--commit SHA` is only accepted for a source tree without `.git`; its
+   content cannot be verified, so the script warns about that.  Re-running the
+   script without arguments when `external/YRpp` is already at the pin is a
+   no-op, and the script refuses to use `external/YRpp` as its own source.
 
 4. Re-measure the ABI and run the probe:
 
