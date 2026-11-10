@@ -825,9 +825,9 @@ int __cdecl main()
 		venture::SaveTrailer::Read(&noTrailer);
 		Check(venture::ExtensionIndex::Instance().LoadedExtensions().empty(),
 			"no trailer: no extension state is restored");
-		const venture::ExtSave::LoadSummary finished = venture::ExtSave::FinishLoad();
+		const venture::ExtSave::LoadSummary noTrailerFinished = venture::ExtSave::FinishLoad();
 		venture::ExtSave::ExitLoadWindow();
-		Check(finished.adopted == 0 && finished.deferred == 1,
+		Check(noTrailerFinished.adopted == 0 && noTrailerFinished.deferred == 1,
 			"no trailer: the deferred owner gets a fresh extension");
 		SavedUnitExt* const fresh = store.Fetch(&deferredUnit);
 		Check(fresh != nullptr && fresh->Serial == 0 && fresh->DeferredCalls == 1,

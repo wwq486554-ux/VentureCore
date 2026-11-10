@@ -187,9 +187,9 @@ void ExtensionIndex::ClearLoadedExtensions()
 
 void ExtensionIndex::NotifyInvalidPointer(const AbstractClass* const owner, const bool removed)
 {
-	// Extensions are removed by the owner's destructor hook, not here; this is the
-	// subscription point for feature-owned pointer-keyed caches (and a diagnostic
-	// counter for the base).
+	// Extensions are removed by the owner's destructor hook, not here; this is a
+	// diagnostic counter for the base and the hook a future subscriber API for
+	// pointer-keyed feature caches would build on (there is none yet).
 	(void)removed;
 	if (!owner)
 		return;

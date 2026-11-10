@@ -29,8 +29,9 @@ DEFINE_HOOK(0x685659, Venture_ScenarioClear, 0xa)
 }
 
 // The engine announces that an AbstractClass pointer became invalid. The base
-// keeps the extension instances with their object's lifetime; this hook is the
-// subscription point for pointer-keyed caches (see ExtensionIndex).
+// keeps the extension instances with their object's lifetime; this hook records a
+// diagnostic count and drops stale deferred allocations (see ExtensionIndex).  It
+// is not a feature-facing subscription point yet.
 DEFINE_HOOK(0x7258D0, Venture_AnnounceInvalidPointer, 0x6)
 {
 	GET(AbstractClass* const, pInvalid, ECX);

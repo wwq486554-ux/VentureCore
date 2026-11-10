@@ -17,7 +17,10 @@
 // its entry lets this module run after the file has been parsed but before any
 // rules key is read - both by the engine and by a host platform such as official
 // Phobos, whose own hook at 0x668BF0 (RulesClass_Addition) is called from inside
-// this same function at 0x668A27 (and twice more, later).
+// this same function at 0x668A27 (and twice more, later).  "RulesClass_Addition"
+// is Phobos's name for its hook at 0x668BF0; the pinned YRpp names the engine
+// function there RulesClass::Read_File - same address, different names, so do
+// not read the Phobos name as a typo for RulesClass::Init.
 //
 // The handler gives the registered rules-INI observers a last look at the parsed
 // INI, then removes the platform-owned (section, key) pairs through the engine's

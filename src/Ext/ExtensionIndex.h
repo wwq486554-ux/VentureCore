@@ -25,6 +25,10 @@ struct ExtStoreDesc
 	const char* name = "store";     // diagnostic name, set by the feature
 	bool saveable = false;          // participates in the savegame trailer
 	void (*clear)() = nullptr;      // drop every instance of this store
+	// Live instance count callback.  The current base does not call it (its own
+	// diagnostics use ExtensionStore::Size()); it is kept as a hook for derived
+	// platforms that walk the descriptor table.  Filled in by the
+	// ExtensionStore constructor together with the other callbacks.
 	std::size_t (*count)() = nullptr;
 
 	// Savegame layer.  All four are null for a store that does not participate;
@@ -101,12 +105,12 @@ public:
 	void ClearLoadedExtensions();
 
 	// Pointer invalidation notification hook. Extensions are owned by their
-	// object's lifetime (ctor/dtor hooks), so they are not removed here; this is
-	// the subscription point for features that keep their own pointer-keyed
-	// caches.  A deferred allocation recorded for the invalidated owner is
-	// dropped (A-06): the engine says the pointer is dead, so restoring or
-	// creating an extension for it after the load window would use a stale
-	// address.
+	// object's lifetime (ctor/dtor hooks), so they are not removed here; this
+	// records a diagnostic count and is the hook a future subscriber API for
+	// pointer-keyed feature caches would build on (there is none yet).  A
+	// deferred allocation recorded for the invalidated owner is dropped (A-06):
+	// the engine says the pointer is dead, so restoring or creating an extension
+	// for it after the load window would use a stale address.
 	void NotifyInvalidPointer(const AbstractClass* owner, bool removed);
 	std::size_t InvalidPointerNotifications() const;
 

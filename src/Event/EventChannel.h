@@ -67,8 +67,10 @@ public:
 	using EngineSender = bool (*)(const std::uint8_t* frame, std::uint32_t frameSize);
 
 	// One engine event record.  Byte for byte the layout of the engine's
-	// EventClass (111 bytes): the frame is what travels event transport, so
-	// keeping the layouts identical means Send() needs no re-packing.
+	// EventClass (111 bytes), so Send() can hand it to the engine event queue
+	// without re-packing.  It is the in-process record, not the network format:
+	// the engine's multiplayer encoder sends only the type byte plus the
+	// registered payload size (see docs/EventChannel.md).
 #pragma pack(push, 1)
 	struct Frame
 	{

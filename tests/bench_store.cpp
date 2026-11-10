@@ -212,7 +212,7 @@ int __cdecl main()
 	BenchStore& store = BenchStore::Instance();
 	store.SetName("UnitClass/BenchUnitExt");
 
-	std::printf("extension store microbenchmark (Wine + MSVC 14.44, same flags as the DLL)\n");
+	std::printf("extension store microbenchmark (Wine + MSVC 14.44; benchmark flags - no /O2//Oy, so not comparable to the release DLL)\n");
 	std::printf("%8s %14s %14s %14s %14s %14s %14s\n",
 		"live", "allocate", "fetch(seq)", "fetch(skew)", "fetch(same)", "remove", "clear");
 	std::printf("%8s %14s %14s %14s %14s %14s %14s\n",

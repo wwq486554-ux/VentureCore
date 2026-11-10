@@ -22,8 +22,10 @@
 #define VC_PLATFORM_INI_NAME VC_PLATFORM_NAME ".ini"
 #define VC_PLATFORM_LOG_NAME VC_PLATFORM_NAME ".log"
 
-// 'V' 'C' '0' '1' - written into the savegame trailer header once save support
-// lands. Unused in v0.2.0-experimental.
+// 'V' 'C' '0' '1' - written into the savegame trailer payload header by
+// SaveTrailer::Write (see src/Core/SaveTrailer.h, docs/SaveFormat.md); a trailer
+// written under another identity is rejected as a whole.  Change it only for a
+// new lineage.
 #define VC_SAVEGAME_ID 0x56433031u
 
 // INI sections.
