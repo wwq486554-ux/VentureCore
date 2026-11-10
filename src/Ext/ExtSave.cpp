@@ -5,8 +5,6 @@
 #include "Ext/ExtStream.h"
 #include "Ext/ExtSwizzle.h"
 
-#include <unordered_map>
-
 namespace
 {
 // Deletes every extension instance that ReadPayload created but did not hand to
@@ -23,26 +21,38 @@ void DiscardLoadedFrom(venture::ExtensionIndex& index, const std::size_t firstIn
 	index.ClearLoadedExtensions();
 
 	for (std::size_t i = 0; i < firstIndex && i < loaded.size(); ++i)
+	{
 		index.RegisterLoadedExtension(loaded[i].desc, loaded[i].ext);
+	}
 }
 
-// Reads and drops a block payload of `size` bytes from the stream.
-bool SkipBytes(venture::ExtStreamReader& stream, const std::uint32_t size)
+// A store takes part in the savegame payload when it is saveable and owns both
+// serializers.  The v2 signature and the block list are built from exactly this
+// set, in ExtensionIndex::Stores() registration order; the loader compares the
+// signature with the same predicate, so a platform whose store set changed
+// (module removed/added, dataVersion bumped, order changed) rejects the payload as
+// a whole instead of partially restoring it (A-05).
+bool IsPayloadStore(const venture::ExtStoreDesc& desc)
 {
-	std::uint8_t scratch[64] = {};
-	std::uint32_t left = size;
-	while (left != 0)
+	return desc.saveable && desc.save != nullptr && desc.load != nullptr;
+}
+
+std::vector<const venture::ExtStoreDesc*> PayloadStores(const venture::ExtensionIndex& index)
+{
+	std::vector<const venture::ExtStoreDesc*> stores;
+
+	for (const venture::ExtStoreDesc* const desc : index.Stores())
 	{
-		const std::uint32_t step = left < sizeof(scratch) ? left : static_cast<std::uint32_t>(sizeof(scratch));
-		if (!stream.ReadBytes(scratch, step))
-			return false;
-		left -= step;
+		if (desc && IsPayloadStore(*desc))
+			stores.push_back(desc);
 	}
-	return true;
+
+	return stores;
 }
 
 // --- payload assembly ------------------------------------------------------
-constexpr std::size_t PayloadHeaderSize = 3u * sizeof(std::uint32_t);
+// [savegameId][payloadVersion][storeBlockCount][signatureCount]
+constexpr std::size_t PayloadHeaderSize = 4u * sizeof(std::uint32_t);
 
 // Writes `value` into the already-sized `out` at `offset` (byte order matches
 // ExtStreamWriter::WriteU32).
@@ -88,25 +98,43 @@ bool WritePayload(const std::uint32_t savegameId, std::vector<std::uint8_t>& out
 	out.clear();
 
 	const ExtensionIndex& index = ExtensionIndex::Instance();
+	const std::vector<const ExtStoreDesc*> stores = PayloadStores(index);
 
-	// Fixed header: the block count is only known after the walk, so reserve the
-	// three u32 values and patch them in at the end.
+	// Nothing to save: no saveable store exists (the platform refused to start, or
+	// it has no stateful feature).
+	if (stores.empty())
+		return false;
+
+	// Fixed header: the block/signature counts are known now, but the header is
+	// patched in at the end so the assembly below stays a single forward pass.
 	out.resize(PayloadHeaderSize, 0);
 
+	// Signature first: the loader validates it before it reads a single block, so
+	// the store set (ids, row versions and order) is an all-or-nothing gate.
+	std::uint32_t signatureCount = 0;
+
+	for (const ExtStoreDesc* const desc : stores)
+	{
+		if (!AppendU32Checked(out, desc->typeId) || !AppendU32Checked(out, desc->dataVersion))
+		{
+			out.clear();
+			if (sizeExceededOut)
+				*sizeExceededOut = true;
+			return false;
+		}
+
+		++signatureCount;
+	}
+
+	// One store's block is materialized at a time (its size has to be known before
+	// the block header can be written); the payload itself is assembled directly in
+	// `out` and checked against the limit on every append.
 	std::uint32_t blockCount = 0;
 
-	for (const ExtStoreDesc* const desc : index.Stores())
+	for (const ExtStoreDesc* const desc : stores)
 	{
-		if (!desc->saveable || !desc->save)
-			continue;
-
-		// One store's block is materialized at a time (its size has to be known
-		// before the block header can be written); the payload itself is assembled
-		// directly in `out` and checked against the limit on every append.
 		ExtByteStreamWriter block;
 		desc->save(block);
-		if (block.Offset() == 0)
-			continue;
 
 		const std::vector<std::uint8_t>& blockData = block.Data();
 
@@ -124,15 +152,10 @@ bool WritePayload(const std::uint32_t savegameId, std::vector<std::uint8_t>& out
 		++blockCount;
 	}
 
-	if (blockCount == 0)
-	{
-		out.clear();
-		return false;
-	}
-
 	StoreU32(out, 0, savegameId);
 	StoreU32(out, sizeof(std::uint32_t), PayloadVersion);
 	StoreU32(out, 2u * sizeof(std::uint32_t), blockCount);
+	StoreU32(out, 3u * sizeof(std::uint32_t), signatureCount);
 
 	if (storeBlocksOut)
 		*storeBlocksOut = blockCount;
@@ -158,19 +181,84 @@ LoadSummary ReadPayload(const std::uint32_t savegameId, const std::uint8_t* cons
 
 	std::uint32_t payloadSavegameId = 0;
 	std::uint32_t payloadVersion = 0;
-	std::uint32_t blockCount = 0;
 
-	if (!reader.ReadU32(payloadSavegameId) || !reader.ReadU32(payloadVersion) || !reader.ReadU32(blockCount))
+	if (!reader.ReadU32(payloadSavegameId) || !reader.ReadU32(payloadVersion))
 	{
 		summary.result = LoadSummary::Result::Invalid;
 		ExtSwizzle::DiscardStaged();
 		return summary;
 	}
 
-	if (payloadSavegameId != savegameId || payloadVersion != PayloadVersion)
+	summary.payloadVersion = payloadVersion;
+
+	if (payloadSavegameId != savegameId)
 	{
-		// A trailer written by a different platform identity / format generation:
-		// ignore it instead of misreading the bytes.
+		// A trailer written by a different platform identity: never misread it.
+		summary.result = LoadSummary::Result::Invalid;
+		ExtSwizzle::DiscardStaged();
+		return summary;
+	}
+
+	if (payloadVersion != PayloadVersion)
+	{
+		// v1 (no store-set signature) and any future payload generation are
+		// rejected as a whole: extension state starts empty, the game's own objects
+		// still load, and there is no migration (decision D19).
+		summary.result = LoadSummary::Result::Incompatible;
+		summary.incompatibility = LoadSummary::Incompatibility::PayloadVersion;
+		ExtSwizzle::DiscardStaged();
+		return summary;
+	}
+
+	std::uint32_t blockCount = 0;
+	std::uint32_t signatureCount = 0;
+
+	if (!reader.ReadU32(blockCount) || !reader.ReadU32(signatureCount))
+	{
+		summary.result = LoadSummary::Result::Invalid;
+		ExtSwizzle::DiscardStaged();
+		return summary;
+	}
+
+	// The signature is the platform's currently registered saveable store set, in
+	// registration order.  Compare it before reading any block: a store that was
+	// removed/added, whose row version changed or whose position changed makes the
+	// whole payload incompatible.  Unknown type ids are caught here - they never
+	// reach a block (A-05).
+	const std::vector<const ExtStoreDesc*> stores = PayloadStores(index);
+
+	if (signatureCount != static_cast<std::uint32_t>(stores.size()))
+	{
+		summary.result = LoadSummary::Result::Incompatible;
+		summary.incompatibility = LoadSummary::Incompatibility::StoreSet;
+		ExtSwizzle::DiscardStaged();
+		return summary;
+	}
+
+	for (std::uint32_t i = 0; i < signatureCount; ++i)
+	{
+		std::uint32_t typeId = 0;
+		std::uint32_t dataVersion = 0;
+
+		if (!reader.ReadU32(typeId) || !reader.ReadU32(dataVersion))
+		{
+			summary.result = LoadSummary::Result::Invalid;
+			ExtSwizzle::DiscardStaged();
+			return summary;
+		}
+
+		if (typeId != stores[i]->typeId || dataVersion != stores[i]->dataVersion)
+		{
+			summary.result = LoadSummary::Result::Incompatible;
+			summary.incompatibility = LoadSummary::Incompatibility::StoreSet;
+			ExtSwizzle::DiscardStaged();
+			return summary;
+		}
+	}
+
+	// v2 writes exactly one block per signature entry.
+	if (blockCount != signatureCount)
+	{
 		summary.result = LoadSummary::Result::Invalid;
 		ExtSwizzle::DiscardStaged();
 		return summary;
@@ -181,12 +269,23 @@ LoadSummary ReadPayload(const std::uint32_t savegameId, const std::uint8_t* cons
 
 	for (std::uint32_t i = 0; i < blockCount; ++i)
 	{
+		const ExtStoreDesc* const desc = stores[i];
+
 		std::uint32_t typeId = 0;
 		std::uint32_t dataVersion = 0;
 		std::uint32_t blockSize = 0;
 
 		if (!reader.ReadU32(typeId) || !reader.ReadU32(dataVersion) || !reader.ReadU32(blockSize))
 		{
+			summary.result = LoadSummary::Result::Invalid;
+			ExtSwizzle::DiscardStaged();
+			DiscardLoadedFrom(index, loadedBefore);
+			return summary;
+		}
+
+		if (typeId != desc->typeId || dataVersion != desc->dataVersion)
+		{
+			// The block header must agree with the signature entry it follows.
 			summary.result = LoadSummary::Result::Invalid;
 			ExtSwizzle::DiscardStaged();
 			DiscardLoadedFrom(index, loadedBefore);
@@ -202,23 +301,6 @@ LoadSummary ReadPayload(const std::uint32_t savegameId, const std::uint8_t* cons
 			ExtSwizzle::DiscardStaged();
 			DiscardLoadedFrom(index, loadedBefore);
 			return summary;
-		}
-
-		const ExtStoreDesc* const desc = index.FindStore(typeId);
-
-		if (!desc || !desc->saveable || !desc->load || desc->dataVersion != dataVersion)
-		{
-			// Unknown store (module removed from the platform) or an older row
-			// layout: the block is self-describing, so it can be skipped exactly.
-			if (!SkipBytes(reader, blockSize))
-			{
-				summary.result = LoadSummary::Result::Invalid;
-				ExtSwizzle::DiscardStaged();
-				DiscardLoadedFrom(index, loadedBefore);
-				return summary;
-			}
-			++summary.skippedBlocks;
-			continue;
 		}
 
 		std::vector<std::uint8_t> block(blockSize);

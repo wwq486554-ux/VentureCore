@@ -60,8 +60,9 @@ The suffix is 20 bytes, so the reader needs a single backwards read of at most
 All integers are little-endian `u32`.
 
 ```
-[savegameId][payloadVersion][storeBlockCount]
-storeBlock*:
+[savegameId][payloadVersion = 2][storeBlockCount][signatureCount]
+signature*: [storeTypeId][storeDataVersion]        (signatureCount entries)
+storeBlock*:                                      (storeBlockCount entries)
   [storeTypeId][storeDataVersion][blockSize]
   block[blockSize]:
     [rowCount]
@@ -71,11 +72,24 @@ storeBlock*:
 * `savegameId` is `VC_SAVEGAME_ID` from `src/Core/PlatformConfig.h`. **Give every
   derived platform its own value** (see `docs/Renaming.md`); a trailer written by
   another platform identity is rejected as a whole.
+* `payloadVersion` is `2`. Payload version 1 (the previous, signature-less
+  format) and any future generation are **rejected as a whole**, with no
+  migration: old saves load the game normally, extension state starts empty.
+* the **signature** is the platform's saveable store set in
+  `ExtensionIndex::Stores()` registration order - exactly the stores that carry a
+  block of their own. The loader compares it item by item (`storeTypeId`,
+  `storeDataVersion`, order) with the currently registered set **before it reads
+  any block**. Any difference (a feature module removed or added, a bumped
+  `dataVersion`, reordered stores) rejects the whole payload with
+  `Log::Warn("store set changed - extension state dropped")` - partial restore is
+  never attempted. This is the A-05 protection: a skipped store used to leave
+  pointers registered by other extensions unmatched in the engine's swizzle pass,
+  which traps the game.
 * `storeTypeId` is the extension class type id of the store (see
-  `docs/EngineBindings.md`), `storeDataVersion` is the store's row format
-  version. A block for an unknown store, or with an unknown data version, is
-  **skipped exactly** using `blockSize` - this is what makes removing a feature
-  module from a platform a forward-compatible change.
+  `docs/EngineBindings.md`), `storeDataVersion` is the store's row format version.
+  A block is present for every signature entry, in the same order, with a
+  matching `storeTypeId`/`storeDataVersion` header (the numbers are repeated so a
+  corrupted block cannot be read against the wrong store).
 * `extSaveAddress` / `ownerSaveAddress` are the instance's and the owner's
   save-time addresses. They are not dereferenced on load: the loader registers the
   owner slot with the engine's swizzle manager, and the engine rewrites it to the
@@ -107,7 +121,7 @@ deterministic order.
 | load start | `0x67E44D` | Opens the load window in `ExtensionIndex`; allocations requested by object constructors are deferred (the trailer may carry an extension for the same owner). |
 | load failure | `0x67E4B1` / `0x67E53A` / `0x67E595` | The engine aborts the load at one of its three early exits and returns **before** the normal close point: the handler at that site closes the load window immediately, so later allocations in the game session take the normal path again (see `Core/Platform.cpp::OnScenarioClear` for the unconditional fallback). |
 | load objects | (engine) | Object constructors run while the window is open → `ExtensionStore::Allocate` records the owner as a deferred allocation and returns `nullptr`. |
-| load end | `0x67F7C8` (end of the engine's load routine) | `ExtSave::ReadPayload`: backwards scan, magic/version/size/CRC check, then per store block: create the extension instances with their save-time owner pointer and extension address and load their data. Their swizzle registrations are staged and handed to the engine only once the whole payload validated (see *Failure handling*). The stream position is restored. |
+| load end | `0x67F7C8` (end of the engine's load routine) | `ExtSave::ReadPayload`: backwards scan, magic/version/size/CRC check, then payload version + store-set signature check (a mismatch drops the extension state, see *Compatibility notes*), then per store block: create the extension instances with their save-time owner pointer and extension address and load their data. Their swizzle registrations are staged and handed to the engine only once the whole payload validated (see *Failure handling*). The stream position is restored. |
 | swizzle | (engine's swizzle pass) | Rewrites every registered owner slot to the loaded object address. |
 | post-swizzle | `0x67E685` | `ExtSave::FinishLoad`: adopt the restored instances into their stores (the owner is valid now), call `PostLoad()`, then allocate fresh extensions (with `OnDeferredAllocation()`) for owners the game created during the load. The load window is closed right after this, before the hooked `call 0x685120` re-executes, so allocations made by that call take the normal path instead of being deferred after the drain and lost. |
 | load end | `0x67E68A` | Second, idempotent close of the load window (kept as the documented success-path close point); normal allocation is already active. |
@@ -131,8 +145,8 @@ state empty (`Log::Warn`) instead of corrupting the engine's pointer tables.
    Use the `Write*`/`Read*` helpers; write game-object pointers with
    `WritePointer` / `ReadPointerForChange` so they survive the load.
 2. Its store calls `SetSaveable(true, dataVersion)`; **bump `dataVersion` whenever
-   the row layout changes** so older saves skip the block instead of misreading
-   it.
+   the row layout changes** so older saves are rejected as incompatible instead
+   of being misread (the whole payload is dropped, not just this store's block).
 3. `PostLoad()` runs after the owner pointer is valid: resolve derived values
    that depend on the owner or on other engine state there, not in `Load()`.
    `Load()` must not dereference `Owner()` (it is still the save-time address at
@@ -145,10 +159,22 @@ state empty (`Log::Warn`) instead of corrupting the engine's pointer tables.
 
 ## Compatibility notes
 
+* **The saveable store set is part of the format.** A save is only accepted when
+  the platform's currently registered saveable stores match the payload's
+  signature in type id, `dataVersion` and registration order. Removing or adding
+  a saveable feature module, bumping a store's `dataVersion` or changing the
+  store registration order makes old saves **incompatible**: the game loads and
+  its own state is restored, but the extension state starts empty (the engine log
+  reports `store set changed - extension state dropped`). There is deliberately
+  no per-store fallback/migration (decision D19).
+* Payload version 1 (`v0.2.0-experimental` saves) has no signature and is
+  rejected the same way (`extension payload version 1 is not supported ... no
+  migration`). Old saves keep working for the game itself; only extension state
+  is lost once.
 * Extension state is preserved across a save/load in the same game process and
-  across a game restart; the format is forward-compatible for *removed* stores
-  and *rejected* (state starts empty) for a bumped `dataVersion`, changed
-  `VC_SAVEGAME_ID` or a damaged trailer.
+  across a game restart **as long as the platform's saveable store set is
+  unchanged**; a changed `VC_SAVEGAME_ID`, a changed format version or a damaged
+  trailer also leaves the extension state empty.
 * Multiplayer saves are not a supported scenario (the engine does not save during
   a network game).
 * The `Example` module persists a per-unit serial number, so a load is visible in

@@ -9,10 +9,12 @@ namespace venture::ExtSave
 // ---------------------------------------------------------------------------
 // Savegame trailer payload builder/parser for extension state.
 //
-// Payload layout (all integers little endian, u32 unless stated):
+// Payload layout, format version 2 (all integers little endian, u32 unless
+// stated):
 //
-//   [savegameId][payloadVersion][storeBlockCount]
-//   storeBlock*:
+//   [savegameId][payloadVersion = 2][storeBlockCount][signatureCount]
+//   signature*: [storeTypeId][storeDataVersion]              (signatureCount entries)
+//   storeBlock*:                                            (storeBlockCount entries)
 //     [storeTypeId][storeDataVersion][blockSize]
 //     payload[blockSize]:
 //       [rowCount]
@@ -23,13 +25,26 @@ namespace venture::ExtSave
 // extension class type id of the store.  Rows are written in allocation order, so
 // the on-disk order is deterministic and a load recreates the allocation order.
 //
+// The **signature** is the platform's saveable store set in
+// ExtensionIndex::Stores() registration order (a store participates when it is
+// saveable and has both serializers).  The loader compares it item by item
+// (type id, data version and order) with the currently registered set *before* it
+// reads anything else: a payload whose store set differs is not partially
+// applied.  That protects pointer swizzling from references to extensions that
+// would never be recreated (a skipped block used to leave such references
+// unmatched in the engine's remap pass, which traps the game).
+//
+// Payload version 1 has no signature and is rejected (no migration).  Both the
+// store set and the format version are therefore compatibility gates, not
+// best-effort skips: a mismatch drops the whole extension state and the game's
+// own objects still load normally.
+//
 // The parser is deliberately defensive: size fields read from the payload are
 // validated against the remaining bytes and MaxPayloadSize before anything is
-// allocated, and an unknown store type, an unknown store data version or a
-// malformed row skips the block (or rejects the trailer with a warning) instead
-// of failing the game's load.
+// allocated, and any malformed header/signature/block rejects the payload with a
+// warning instead of failing the game's load.
 // ---------------------------------------------------------------------------
-constexpr std::uint32_t PayloadVersion = 1;
+constexpr std::uint32_t PayloadVersion = 2;
 
 // Upper bound of one complete extension payload (all store blocks) and of every
 // individual block/row size inside it.  The trailer frame publishes the same
@@ -43,21 +58,35 @@ struct LoadSummary
 {
 	enum class Result
 	{
-		NoData,   // no trailer in the stream (old save, or an empty platform)
-		Invalid,  // trailer found but rejected (bad id/version/size/crc)
-		Loaded,   // extension data restored
+		NoData,        // no payload at all (old save, or an empty platform)
+		Invalid,       // a payload is present but malformed (bad size/CRC/header/block)
+		Incompatible,  // well-formed payload this platform cannot apply (see below)
+		Loaded,        // extension data restored
+	};
+
+	// Why a well-formed payload was refused.  The engine still loads its own
+	// objects; only the extension state is dropped (no migration, decision D19).
+	enum class Incompatibility
+	{
+		None,
+		PayloadVersion,  // written by another payload format generation (e.g. v1)
+		StoreSet,        // saveable store set differs (type ids/data versions/order)
 	};
 
 	Result result = Result::NoData;
+	Incompatibility incompatibility = Incompatibility::None;
+	std::uint32_t payloadVersion = 0; // version found in the payload (0 = not read)
 	std::uint32_t storeBlocks = 0;
 	std::uint32_t created = 0;
 	std::uint32_t adopted = 0;
 	std::uint32_t deferred = 0;
-	std::uint32_t skippedBlocks = 0;
 	std::uint32_t failed = 0;
 };
 
 // Serializes every saveable store into `out` (payload only, no trailer suffix).
+// The payload starts with the store-set signature (the same stores, in the same
+// registration order as their blocks), so the loader can validate the set before
+// reading any block.
 // The payload is assembled directly into `out` and its size is checked while it is
 // built: a payload that would exceed MaxPayloadSize is rejected immediately (`out`
 // cleared, *sizeExceeded set when provided) instead of being materialized and
@@ -71,6 +100,10 @@ bool WritePayload(std::uint32_t savegameId, std::vector<std::uint8_t>& out,
 // Parses a payload and creates the extension instances.  They are not attached to
 // their stores yet: their owner pointers are still save-time addresses and are
 // remapped by the engine's swizzle pass; FinishLoad() adopts them.
+//
+// The store-set signature is compared with the platform's currently registered
+// saveable stores before any block is read; any mismatch (and any v1 payload)
+// returns Result::Incompatible and creates nothing.
 //
 // The parser stages every swizzle registration (ExtSwizzle::BeginStaging) and
 // hands them to the engine only after the whole payload validated; on any failure

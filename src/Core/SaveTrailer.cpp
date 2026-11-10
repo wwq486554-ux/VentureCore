@@ -243,13 +243,28 @@ void Read(IStream* const stream)
 		break;
 
 	case ExtSave::LoadSummary::Result::Invalid:
-		Log::Warn("savegame: extension payload rejected - extension state starts empty");
+		Log::Warn("savegame: extension payload rejected (malformed) - extension state starts empty");
+		break;
+
+	case ExtSave::LoadSummary::Result::Incompatible:
+		// The engine still loads its own objects; only the extension state is
+		// dropped.  Both cases are deliberate compatibility gates (no migration).
+		if (summary.incompatibility == ExtSave::LoadSummary::Incompatibility::PayloadVersion)
+		{
+			Log::Warn("savegame: extension payload version %u is not supported (expected %u) - "
+				"extension state dropped, no migration",
+				static_cast<unsigned>(summary.payloadVersion),
+				static_cast<unsigned>(ExtSave::PayloadVersion));
+		}
+		else
+		{
+			Log::Warn("savegame: store set changed - extension state dropped");
+		}
 		break;
 
 	case ExtSave::LoadSummary::Result::Loaded:
-		Log::Info("savegame: extension payload read (%u store block(s), %u skipped, %u instance(s))",
-			static_cast<unsigned>(summary.storeBlocks), static_cast<unsigned>(summary.skippedBlocks),
-			static_cast<unsigned>(summary.created));
+		Log::Info("savegame: extension payload read (%u store block(s), %u instance(s))",
+			static_cast<unsigned>(summary.storeBlocks), static_cast<unsigned>(summary.created));
 		break;
 	}
 }

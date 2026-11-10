@@ -19,7 +19,7 @@ are starting a new platform from scratch.
 | version resource `ProductName` / `InternalName` / `OriginalFilename` | `VC_PLATFORM_NAME` and `VC_PLATFORM_DLL_NAME` in `src/version.rc` | |
 | version resource `CompanyName` / `LegalCopyright` / `FileDescription` | literals in `src/version.rc` | edit by hand |
 | log banner name | `VC_PLATFORM_NAME` | `[Platform] <version>` line at startup |
-| savegame trailer id | `VC_SAVEGAME_ID` in `src/Core/PlatformConfig.h` | reserved; unused until save support lands.  Must be unique per platform lineage |
+| savegame trailer id | `VC_SAVEGAME_ID` in `src/Core/PlatformConfig.h` | must be unique per platform lineage.  It is part of every save this platform writes: changing it (or the saveable store set) makes older saves' **extension state** incompatible, while the game itself still loads them |
 
 ## Checklist
 

@@ -7,6 +7,10 @@
 // through a minimal in-memory IStream implementation, so the end-of-stream seek,
 // the reported byte counts and the stream-position restore are covered.
 //
+// The payload is format v2, so it starts with the platform's saveable store-set
+// signature; the defensive-parsing cases below cover that gate (unknown store,
+// changed store dataVersion, other payload version) as well as frame corruption.
+//
 // TEST_DEPS: src/Ext/AbstractExt.cpp src/Ext/ExtensionIndex.cpp src/Ext/ExtSave.cpp src/Core/SaveTrailer.cpp src/Core/Log.cpp src/Core/PlatformPaths.cpp
 
 #include <algorithm>
@@ -280,7 +284,8 @@ void SetUp(bool saveable)
 	SavedStore::Instance().SetSaveable(saveable, 1);
 }
 
-// Builds a payload by hand for the "unknown store / bad header" cases.
+// Builds a payload v2 by hand for the "store set / bad header" cases: one
+// signature entry and one block with the same type id / data version.
 std::vector<std::uint8_t> BuildRawPayload(
 	const std::uint32_t savegameId, const std::uint32_t payloadVersion,
 	const std::uint32_t typeId, const std::uint32_t dataVersion,
@@ -289,8 +294,11 @@ std::vector<std::uint8_t> BuildRawPayload(
 	venture::ExtByteStreamWriter writer;
 	writer.WriteU32(savegameId);
 	writer.WriteU32(payloadVersion);
-	writer.WriteU32(1);
-	writer.WriteU32(typeId);
+	writer.WriteU32(1); // block count
+	writer.WriteU32(1); // signature count
+	writer.WriteU32(typeId);       // signature entry
+	writer.WriteU32(dataVersion);
+	writer.WriteU32(typeId);       // block header
 	writer.WriteU32(dataVersion);
 	writer.WriteU32(static_cast<std::uint32_t>(block.size()));
 	if (!block.empty())
@@ -422,18 +430,22 @@ int __cdecl main()
 
 	// ---- 4. defensive parsing ---------------------------------------------
 	{
-		// A block of a store this platform does not know (module removed): skipped.
+		// A store this platform does not know (module removed): the payload v2
+		// signature is compared before any block is read, so the whole payload is
+		// incompatible instead of being partially applied.
 		const std::vector<std::uint8_t> block(8, 0xAB);
 		const std::vector<std::uint8_t> unknown = BuildRawPayload(kSavegameId,
 			venture::ExtSave::PayloadVersion, 0x7777u, 1, block);
 		venture::ExtensionIndex::Instance().ClearAll();
 		venture::ExtSave::EnterLoadWindow();
-		const venture::ExtSave::LoadSummary skipped =
+		const venture::ExtSave::LoadSummary unknownStore =
 			venture::ExtSave::ReadPayload(kSavegameId, unknown.data(), unknown.size());
 		venture::ExtSave::ExitLoadWindow();
-		Check(skipped.result == venture::ExtSave::LoadSummary::Result::Loaded
-				&& skipped.skippedBlocks == 1 && skipped.created == 0,
-			"an unknown store block is skipped exactly");
+		Check(unknownStore.result == venture::ExtSave::LoadSummary::Result::Incompatible
+				&& unknownStore.incompatibility
+					== venture::ExtSave::LoadSummary::Incompatibility::StoreSet
+				&& unknownStore.created == 0,
+			"an unknown store is rejected by the payload v2 signature before any block is read");
 	}
 	{
 		const std::vector<std::uint8_t> block;
@@ -447,15 +459,32 @@ int __cdecl main()
 		std::vector<std::uint8_t> wrongVersion = BuildRawPayload(kSavegameId,
 			venture::ExtSave::PayloadVersion + 1, SavedUnitExt::TypeId, 1, block);
 		summary = venture::ExtSave::ReadPayload(kSavegameId, wrongVersion.data(), wrongVersion.size());
-		Check(summary.result == venture::ExtSave::LoadSummary::Result::Invalid,
-			"a payload with a future payload version is rejected");
+		Check(summary.result == venture::ExtSave::LoadSummary::Result::Incompatible
+				&& summary.incompatibility
+					== venture::ExtSave::LoadSummary::Incompatibility::PayloadVersion
+				&& summary.payloadVersion == venture::ExtSave::PayloadVersion + 1,
+			"a payload with another payload version is incompatible (no migration)");
 
 		std::vector<std::uint8_t> wrongStoreVersion = BuildRawPayload(kSavegameId,
 			venture::ExtSave::PayloadVersion, SavedUnitExt::TypeId, 99, block);
-		summary = venture::ExtSave::ReadPayload(kSavegameId, wrongStoreVersion.data(), wrongStoreVersion.size());
-		Check(summary.result == venture::ExtSave::LoadSummary::Result::Loaded
-				&& summary.skippedBlocks == 1,
-			"a store block with an older/newer row layout is skipped, not misread");
+		summary = venture::ExtSave::ReadPayload(kSavegameId, wrongStoreVersion.data(),
+			wrongStoreVersion.size());
+		Check(summary.result == venture::ExtSave::LoadSummary::Result::Incompatible
+				&& summary.incompatibility == venture::ExtSave::LoadSummary::Incompatibility::StoreSet
+				&& summary.created == 0,
+			"a store with a different dataVersion is rejected by the signature");
+
+		// A v0.2.0 (payload version 1) payload is refused as a whole: no migration.
+		venture::ExtByteStreamWriter v1Writer;
+		v1Writer.WriteU32(kSavegameId);
+		v1Writer.WriteU32(1);
+		const std::vector<std::uint8_t>& v1 = v1Writer.Data();
+		summary = venture::ExtSave::ReadPayload(kSavegameId, v1.data(), v1.size());
+		Check(summary.result == venture::ExtSave::LoadSummary::Result::Incompatible
+				&& summary.incompatibility
+					== venture::ExtSave::LoadSummary::Incompatibility::PayloadVersion
+				&& summary.payloadVersion == 1,
+			"a v1 payload is rejected as incompatible (no migration)");
 	}
 	{
 		venture::ExtSave::LoadSummary summary = venture::ExtSave::ReadPayload(kSavegameId, nullptr, 0);

@@ -1,6 +1,6 @@
 // Unit test: malformed-payload safety for the extension savegame layer.
 //
-// Covers the A-01/A-02/A-03/A-11 hardening of the savegame payload:
+// Covers the A-01/A-02/A-03/A-05/A-11 hardening of the savegame payload:
 //   * swizzle registrations are staged while a payload is parsed and are only
 //     committed after the whole payload validated.  A rejected payload must leave
 //     the engine-side fake with ZERO registrations, because the instances created
@@ -13,7 +13,13 @@
 //     cap before anything is allocated from it, so a modified save cannot make
 //     the loader allocate gigabytes or terminate the process;
 //   * the writer enforces the same 16 MiB cap while it assembles the payload: an
-//     oversized payload is rejected instead of being materialized and written.
+//     oversized payload is rejected instead of being materialized and written;
+//   * payload v2 carries a store-set signature (type ids, data versions, order).
+//     A payload whose signature does not match the platform's currently
+//     registered saveable store set - and every v1 payload - is refused as a
+//     whole (`Incompatible`, extension state dropped, nothing registered): a
+//     partially restored set used to leave cross-extension pointers unmatched in
+//     the engine's swizzle pass, which traps the game.
 //
 // The fake swizzle manager below is strict on purpose: like the engine it fails
 // the remap pass when a registered slot has no matching identity, and it records
@@ -186,6 +192,25 @@ constexpr std::uint32_t kDataVersion = 1;
 
 using Bytes = std::vector<std::uint8_t>;
 
+// One entry of the payload v2 store-set signature.
+struct SignatureEntry
+{
+	std::uint32_t typeId;
+	std::uint32_t dataVersion;
+};
+
+// Signature of the test platform while only PayloadUnitStore participates.
+constexpr SignatureEntry kPayloadSignature{ PayloadUnitExt::TypeId, kDataVersion };
+
+// Little-endian read-back used to inspect a writer-produced payload.
+std::uint32_t ReadU32At(const Bytes& bytes, const std::size_t offset)
+{
+	return static_cast<std::uint32_t>(bytes[offset])
+		| (static_cast<std::uint32_t>(bytes[offset + 1]) << 8)
+		| (static_cast<std::uint32_t>(bytes[offset + 2]) << 16)
+		| (static_cast<std::uint32_t>(bytes[offset + 3]) << 24);
+}
+
 // --- payload builders -----------------------------------------------------
 void AppendU32(Bytes& out, const std::uint32_t value)
 {
@@ -224,26 +249,51 @@ Bytes BuildBlock(const std::uint32_t rowCount, const Bytes& rows)
 	return writer.Data();
 }
 
-// Writes a payload with the store block layout of ExtSave.h, one typeId/dataVersion
-// pair per block (all our store).  Deliberately hand-built so a test can produce
-// blocks that a correct writer would never emit.
-Bytes BuildPayload(const std::vector<Bytes>& blocks)
+// Builds a payload v2 in the layout of ExtSave.h:
+//   [savegameId][payloadVersion][blockCount][signatureCount]
+//   signature*: [typeId][dataVersion]
+//   block*:     [typeId][dataVersion][blockSize][data...]
+// Deliberately hand-built so a test can produce payloads that a correct writer
+// would never emit (wrong store set, bogus sizes, truncated blocks, ...).
+Bytes BuildPayloadV2(const std::vector<SignatureEntry>& signature,
+	const std::vector<SignatureEntry>& blockHeaders, const std::vector<Bytes>& blockData)
 {
 	venture::ExtByteStreamWriter writer;
 	writer.WriteU32(kSavegameId);
 	writer.WriteU32(venture::ExtSave::PayloadVersion);
-	writer.WriteU32(static_cast<std::uint32_t>(blocks.size()));
+	writer.WriteU32(static_cast<std::uint32_t>(blockData.size()));
+	writer.WriteU32(static_cast<std::uint32_t>(signature.size()));
 
-	for (const Bytes& block : blocks)
+	for (const SignatureEntry& entry : signature)
 	{
-		writer.WriteU32(PayloadUnitExt::TypeId);
-		writer.WriteU32(kDataVersion);
-		writer.WriteU32(static_cast<std::uint32_t>(block.size()));
-		if (!block.empty())
-			writer.Write(block.data(), block.size());
+		writer.WriteU32(entry.typeId);
+		writer.WriteU32(entry.dataVersion);
+	}
+
+	for (std::size_t i = 0; i < blockData.size(); ++i)
+	{
+		writer.WriteU32(blockHeaders[i].typeId);
+		writer.WriteU32(blockHeaders[i].dataVersion);
+		writer.WriteU32(static_cast<std::uint32_t>(blockData[i].size()));
+		if (!blockData[i].empty())
+			writer.Write(blockData[i].data(), blockData[i].size());
 	}
 
 	return writer.Data();
+}
+
+// Payload whose block headers repeat the signature (the well-formed case).
+Bytes BuildPayloadV2(const std::vector<SignatureEntry>& signature, const std::vector<Bytes>& blocks)
+{
+	return BuildPayloadV2(signature, signature, blocks);
+}
+
+// Default payload for this test platform: one signature entry and one block
+// header of the test store per raw block.
+Bytes BuildPayload(const std::vector<Bytes>& blocks)
+{
+	const std::vector<SignatureEntry> signature(blocks.size(), kPayloadSignature);
+	return BuildPayloadV2(signature, blocks);
 }
 
 // One-block payload whose blockSize field is independent of the bytes actually
@@ -254,7 +304,10 @@ Bytes BuildPayloadWithBlockSize(const std::uint32_t typeId, const std::uint32_t 
 	venture::ExtByteStreamWriter writer;
 	writer.WriteU32(kSavegameId);
 	writer.WriteU32(venture::ExtSave::PayloadVersion);
-	writer.WriteU32(1);
+	writer.WriteU32(1); // blockCount
+	writer.WriteU32(1); // signatureCount
+	writer.WriteU32(kPayloadSignature.typeId);
+	writer.WriteU32(kPayloadSignature.dataVersion);
 	writer.WriteU32(typeId);
 	writer.WriteU32(dataVersion);
 	writer.WriteU32(blockSize);
@@ -291,6 +344,37 @@ int ExpectRejected(const Bytes& payload, const char* const what)
 		"rejected payload: every instance created on the way was deleted");
 
 	return PayloadUnitExt::Constructions - constructedBefore;
+}
+
+// Runs ReadPayload on a payload the platform must refuse as incompatible (v1
+// format or a changed store set) and checks the same safety invariants.
+void ExpectIncompatible(const Bytes& payload,
+	const venture::ExtSave::LoadSummary::Incompatibility expectedKind, const char* const what)
+{
+	venture::ExtensionIndex::Instance().ClearAll();
+	FakeReset();
+
+	const int constructedBefore = PayloadUnitExt::Constructions;
+	const int destroyedBefore = PayloadUnitExt::Destructions;
+
+	venture::ExtSave::EnterLoadWindow();
+	const venture::ExtSave::LoadSummary summary = venture::ExtSave::ReadPayload(
+		kSavegameId, payload.data(), payload.size());
+	venture::ExtSave::ExitLoadWindow();
+
+	Check(summary.result == venture::ExtSave::LoadSummary::Result::Incompatible, what);
+	Check(summary.incompatibility == expectedKind,
+		"incompatible payload reports the expected reason");
+	Check(g_commandCount == 0,
+		"incompatible payload: ZERO registrations reached the engine swizzle manager");
+	Check(!venture::ExtSwizzle::IsStaging(), "incompatible payload: staging mode is closed again");
+	Check(venture::ExtensionIndex::Instance().ExtCount() == 0
+			&& PayloadUnitStore::Instance().Size() == 0
+			&& venture::ExtensionIndex::Instance().LoadedExtensions().empty(),
+		"incompatible payload: no extension is attached or left 'loaded'");
+	Check(PayloadUnitExt::Constructions - constructedBefore
+			== PayloadUnitExt::Destructions - destroyedBefore,
+		"incompatible payload: nothing was created");
 }
 
 // --- A-03: ExtByteStreamReader bounds check -------------------------------
@@ -401,7 +485,10 @@ void TestRejectedPayloads()
 		Bytes payload;
 		AppendU32(payload, kSavegameId);
 		AppendU32(payload, venture::ExtSave::PayloadVersion);
-		AppendU32(payload, 1);
+		AppendU32(payload, 1); // blockCount
+		AppendU32(payload, 1); // signatureCount
+		AppendU32(payload, PayloadUnitExt::TypeId);
+		AppendU32(payload, kDataVersion); // signature entry complete
 		AppendU32(payload, PayloadUnitExt::TypeId);
 		AppendU32(payload, kDataVersion); // blockSize missing
 		ExpectRejected(payload, "a payload truncated inside a block header is rejected");
@@ -409,15 +496,9 @@ void TestRejectedPayloads()
 
 	// 3. blockSize promises more bytes than the payload still carries.
 	{
-		venture::ExtByteStreamWriter writer;
-		writer.WriteU32(kSavegameId);
-		writer.WriteU32(venture::ExtSave::PayloadVersion);
-		writer.WriteU32(1);
-		writer.WriteU32(PayloadUnitExt::TypeId);
-		writer.WriteU32(kDataVersion);
-		writer.WriteU32(64); // blockSize
-		writer.WriteU32(1);  // ...but only 4 block bytes follow
-		ExpectRejected(writer.Data(), "a block whose size exceeds the remaining payload is rejected");
+		const Bytes payload = BuildPayloadWithBlockSize(PayloadUnitExt::TypeId, kDataVersion,
+			64, Bytes(4, 0xAB));
+		ExpectRejected(payload, "a block whose size exceeds the remaining payload is rejected");
 	}
 
 	// 4. Row cut inside its header (rowCount says two rows, one is present).
@@ -450,17 +531,27 @@ void TestRejectedPayloads()
 			"the truncated-row-data case exercised create-then-delete with zero registrations");
 	}
 
-	// 7. First block valid, second block corrupt: the successfully loaded instance
-	//    from block one must be deleted (before deletion its registrations are
-	//    discarded), and nothing may be registered.
+	// 7. Two registered saveable stores; the first block is valid, the second is
+	//    corrupt: the instance loaded from block one must be deleted (before
+	//    deletion its registrations are discarded) and nothing may be registered.
 	{
+		BulkUnitStore& bulkStore = BulkUnitStore::Instance();
+		bulkStore.SetName("UnitClass/BulkUnitExt");
+		bulkStore.SetSaveable(true, 1);
+
 		Bytes validRows;
 		AppendRow(validRows, 0x1000, 0x2000, kCanary, BuildRowData(42, 0x3000));
-		Bytes badRows;
-		AppendRow(badRows, 0x4000, 0x5000, kCanary ^ 0x01u, BuildRowData(9, 0x6000));
-		const Bytes payload = BuildPayload({ BuildBlock(1, validRows), BuildBlock(1, badRows) });
+
+		const std::vector<SignatureEntry> signature{ kPayloadSignature,
+			SignatureEntry{ BulkUnitExt::TypeId, 1 } };
+		const Bytes payload = BuildPayloadV2(signature,
+			{ BuildBlock(1, validRows), Bytes(8, 0xAB) });
+
 		Check(ExpectRejected(payload, "a corrupt later block rejects the whole payload") == 1,
 			"the partially loaded instance is deleted and never registered");
+
+		bulkStore.SetSaveable(false, 1);
+		venture::ExtensionIndex::Instance().ClearAll();
 	}
 
 	// 8. blockSize is savegame-controlled: 0xFFFFFFFF / 0x7FFFFFFF must be rejected
@@ -517,6 +608,71 @@ void TestRejectedPayloads()
 	}
 }
 
+// --- A-05: payload v2 store-set signature ---------------------------------
+void TestStoreSetSignature()
+{
+	// A v1 payload (no signature) is refused with the version reason, no migration.
+	{
+		venture::ExtByteStreamWriter writer;
+		writer.WriteU32(kSavegameId);
+		writer.WriteU32(1); // payload format 1
+		writer.WriteU32(0); // block count
+		const Bytes payload = writer.Data();
+
+		ExpectIncompatible(payload, venture::ExtSave::LoadSummary::Incompatibility::PayloadVersion,
+			"a v1 payload is rejected as incompatible (no migration)");
+	}
+
+	// An unknown typeId in the signature.
+	{
+		const std::vector<SignatureEntry> signature{ SignatureEntry{ 0x7777u, 1 } };
+		const Bytes payload = BuildPayloadV2(signature, std::vector<Bytes>(1));
+		ExpectIncompatible(payload, venture::ExtSave::LoadSummary::Incompatibility::StoreSet,
+			"an unknown typeId in the signature is rejected before any block is read");
+	}
+
+	// A missing store: the payload carries no signature entry at all.
+	{
+		const Bytes payload = BuildPayloadV2({}, std::vector<Bytes>());
+		ExpectIncompatible(payload, venture::ExtSave::LoadSummary::Incompatibility::StoreSet,
+			"a payload missing a registered store is rejected");
+	}
+
+	// A changed store dataVersion.
+	{
+		const std::vector<SignatureEntry> signature{
+			SignatureEntry{ PayloadUnitExt::TypeId, kDataVersion + 1 } };
+		const Bytes payload = BuildPayloadV2(signature, std::vector<Bytes>(1));
+		ExpectIncompatible(payload, venture::ExtSave::LoadSummary::Incompatibility::StoreSet,
+			"a changed store dataVersion is rejected");
+	}
+
+	// An extra store in the signature (count larger than the registered set).
+	{
+		const std::vector<SignatureEntry> signature{ kPayloadSignature,
+			SignatureEntry{ 0x7777u, 1 } };
+		const Bytes payload = BuildPayloadV2(signature, std::vector<Bytes>(2));
+		ExpectIncompatible(payload, venture::ExtSave::LoadSummary::Incompatibility::StoreSet,
+			"an extra store in the signature is rejected");
+	}
+
+	// The same two stores in the wrong order: both sides count two entries, but
+	// the first entry already differs.
+	{
+		BulkUnitStore& bulkStore = BulkUnitStore::Instance();
+		bulkStore.SetSaveable(true, 1);
+
+		const std::vector<SignatureEntry> signature{ SignatureEntry{ BulkUnitExt::TypeId, 1 },
+			kPayloadSignature };
+		const Bytes payload = BuildPayloadV2(signature, std::vector<Bytes>(2));
+		ExpectIncompatible(payload, venture::ExtSave::LoadSummary::Incompatibility::StoreSet,
+			"a reordered store set is rejected");
+
+		bulkStore.SetSaveable(false, 1);
+		venture::ExtensionIndex::Instance().ClearAll();
+	}
+}
+
 // --- happy path: the staged registrations are committed and used ----------
 void TestSuccessPath()
 {
@@ -540,6 +696,15 @@ void TestSuccessPath()
 	std::uint32_t storeBlocks = 0;
 	Check(venture::ExtSave::WritePayload(kSavegameId, payload, &storeBlocks) && storeBlocks == 1,
 		"success path: WritePayload produces one store block");
+
+	// The writer emits the v2 header and the store-set signature.
+	Check(payload.size() >= 4u * sizeof(std::uint32_t) + 2u * sizeof(std::uint32_t)
+			&& ReadU32At(payload, sizeof(std::uint32_t)) == venture::ExtSave::PayloadVersion
+			&& ReadU32At(payload, 2u * sizeof(std::uint32_t)) == 1
+			&& ReadU32At(payload, 3u * sizeof(std::uint32_t)) == 1
+			&& ReadU32At(payload, 4u * sizeof(std::uint32_t)) == PayloadUnitExt::TypeId
+			&& ReadU32At(payload, 5u * sizeof(std::uint32_t)) == kDataVersion,
+		"success path: payload carries the v2 header and the store-set signature");
 
 	// Second process: the engine loaded the objects at new addresses.
 	venture::ExtensionIndex::Instance().ClearAll();
@@ -633,6 +798,7 @@ int __cdecl main()
 	TestReadBytesBounds();
 	TestStagingApi();
 	TestRejectedPayloads();
+	TestStoreSetSignature();
 	TestSuccessPath();
 	TestWriteSizeCap();
 
