@@ -1,13 +1,19 @@
 // Unit test: malformed-payload safety for the extension savegame layer.
 //
-// Covers the A-01/A-03 hardening of the savegame payload:
+// Covers the A-01/A-02/A-03/A-11 hardening of the savegame payload:
 //   * swizzle registrations are staged while a payload is parsed and are only
 //     committed after the whole payload validated.  A rejected payload must leave
 //     the engine-side fake with ZERO registrations, because the instances created
 //     from the partial payload are deleted - registering (or deleting after
 //     registering) would make the engine's remap pass touch freed memory;
 //   * the byte-stream bounds check rejects truncated reads and sizes that would
-//     wrap the 32-bit `offset + size` comparison (0xFFFFFFF8).
+//     wrap the 32-bit `offset + size` comparison (0xFFFFFFF8);
+//   * every size field read from the payload (blockSize / row dataSize) is
+//     validated against the bytes that are actually left AND the 16 MiB payload
+//     cap before anything is allocated from it, so a modified save cannot make
+//     the loader allocate gigabytes or terminate the process;
+//   * the writer enforces the same 16 MiB cap while it assembles the payload: an
+//     oversized payload is rejected instead of being materialized and written.
 //
 // The fake swizzle manager below is strict on purpose: like the engine it fails
 // the remap pass when a registered slot has no matching identity, and it records
@@ -144,6 +150,37 @@ public:
 
 using PayloadUnitStore = venture::ExtensionStore<UnitClass, PayloadUnitExt>;
 
+// Write-side cap test (A-11): a store whose Save() emits a configurable amount of
+// bytes, so a payload can be pushed towards (and past) the 16 MiB limit without
+// allocating millions of instances.
+class BulkUnitExt final : public venture::UnitExt
+{
+public:
+	static constexpr std::uint32_t TypeId = 0x0131u;
+	static constexpr std::uint32_t BaseTypeId = venture::UnitExt::TypeId;
+
+	static inline std::size_t BulkBytes = 0;
+
+	explicit BulkUnitExt(AbstractClass* const owner) : UnitExt(owner) {}
+
+	std::uint32_t ExtTypeId() const override { return TypeId; }
+
+	void Save(venture::ExtStreamWriter& stream) const override
+	{
+		stream.WriteU32(static_cast<std::uint32_t>(BulkBytes));
+
+		const std::uint8_t chunk[512] = {};
+		for (std::size_t left = BulkBytes; left != 0;)
+		{
+			const std::size_t step = left < sizeof(chunk) ? left : sizeof(chunk);
+			stream.Write(chunk, step);
+			left -= step;
+		}
+	}
+};
+
+using BulkUnitStore = venture::ExtensionStore<UnitClass, BulkUnitExt>;
+
 constexpr std::uint32_t kCanary = 0x56430000u | (PayloadUnitExt::TypeId & 0xFFFFu);
 constexpr std::uint32_t kDataVersion = 1;
 
@@ -206,6 +243,23 @@ Bytes BuildPayload(const std::vector<Bytes>& blocks)
 			writer.Write(block.data(), block.size());
 	}
 
+	return writer.Data();
+}
+
+// One-block payload whose blockSize field is independent of the bytes actually
+// appended (a modified save can claim any size).
+Bytes BuildPayloadWithBlockSize(const std::uint32_t typeId, const std::uint32_t dataVersion,
+	const std::uint32_t blockSize, const Bytes& blockBytes)
+{
+	venture::ExtByteStreamWriter writer;
+	writer.WriteU32(kSavegameId);
+	writer.WriteU32(venture::ExtSave::PayloadVersion);
+	writer.WriteU32(1);
+	writer.WriteU32(typeId);
+	writer.WriteU32(dataVersion);
+	writer.WriteU32(blockSize);
+	if (!blockBytes.empty())
+		writer.Write(blockBytes.data(), blockBytes.size());
 	return writer.Data();
 }
 
@@ -408,6 +462,59 @@ void TestRejectedPayloads()
 		Check(ExpectRejected(payload, "a corrupt later block rejects the whole payload") == 1,
 			"the partially loaded instance is deleted and never registered");
 	}
+
+	// 8. blockSize is savegame-controlled: 0xFFFFFFFF / 0x7FFFFFFF must be rejected
+	//    BEFORE a vector of that size is allocated (A-02).
+	{
+		const Bytes payload = BuildPayloadWithBlockSize(PayloadUnitExt::TypeId, kDataVersion,
+			0xFFFFFFFFu, Bytes{});
+		ExpectRejected(payload, "a blockSize of 0xFFFFFFFF is rejected before allocation");
+	}
+	{
+		const Bytes payload = BuildPayloadWithBlockSize(PayloadUnitExt::TypeId, kDataVersion,
+			0x7FFFFFFFu, Bytes{});
+		ExpectRejected(payload, "a blockSize of 0x7FFFFFFF is rejected before allocation");
+	}
+
+	// 9. blockSize only slightly larger than the bytes the payload still carries.
+	{
+		const Bytes payload = BuildPayloadWithBlockSize(PayloadUnitExt::TypeId, kDataVersion,
+			9, Bytes(8, 0xAB));
+		ExpectRejected(payload, "a blockSize larger than the remaining payload is rejected");
+	}
+
+	// 10. Row dataSize is savegame-controlled too: 0xFFFFFFFF / 0x7FFFFFFF must be
+	//     rejected before the row buffer is allocated (A-02).
+	{
+		Bytes rows;
+		AppendU32(rows, 0x1000);
+		AppendU32(rows, 0x2000);
+		AppendU32(rows, kCanary);
+		AppendU32(rows, 0xFFFFFFFFu); // dataSize
+		const Bytes payload = BuildPayload({ BuildBlock(1, rows) });
+		ExpectRejected(payload, "a row dataSize of 0xFFFFFFFF is rejected before allocation");
+	}
+	{
+		Bytes rows;
+		AppendU32(rows, 0x1000);
+		AppendU32(rows, 0x2000);
+		AppendU32(rows, kCanary);
+		AppendU32(rows, 0x7FFFFFFFu); // dataSize
+		const Bytes payload = BuildPayload({ BuildBlock(1, rows) });
+		ExpectRejected(payload, "a row dataSize of 0x7FFFFFFF is rejected before allocation");
+	}
+
+	// 11. Row dataSize only slightly larger than the bytes left in its block.
+	{
+		Bytes rows;
+		AppendU32(rows, 0x1000);
+		AppendU32(rows, 0x2000);
+		AppendU32(rows, kCanary);
+		AppendU32(rows, 5); // dataSize claims 5 bytes...
+		AppendU32(rows, 7); // ...but only 4 data bytes follow
+		const Bytes payload = BuildPayload({ BuildBlock(1, rows) });
+		ExpectRejected(payload, "a row dataSize larger than the remaining block is rejected");
+	}
 }
 
 // --- happy path: the staged registrations are committed and used ----------
@@ -468,6 +575,51 @@ void TestSuccessPath()
 	Check(newExt != nullptr && newExt->Target == &newTarget,
 		"success path: the saved pointer is swizzled to the loaded object");
 }
+
+// --- write-side 16 MiB cap (A-11) -----------------------------------------
+void TestWriteSizeCap()
+{
+	venture::ExtensionIndex::Instance().ClearAll();
+
+	BulkUnitStore& bulkStore = BulkUnitStore::Instance();
+	bulkStore.SetName("UnitClass/BulkUnitExt");
+	bulkStore.SetSaveable(true, 1);
+
+	UnitClass bulkOwner;
+	Check(bulkStore.Allocate(&bulkOwner) != nullptr,
+		"write cap: a bulk-data extension exists");
+
+	// Baseline: no bulk bytes.  The payload size then grows exactly one-for-one
+	// with BulkBytes, so the cap boundary can be hit to the byte.
+	BulkUnitExt::BulkBytes = 0;
+	Bytes payload;
+	std::uint32_t blocks = 0;
+	bool exceeded = false;
+	Check(venture::ExtSave::WritePayload(kSavegameId, payload, &blocks, &exceeded)
+			&& !exceeded && !payload.empty() && blocks == 2,
+		"write cap: a payload below the limit is written");
+
+	const std::size_t baseSize = payload.size();
+	const std::size_t maxSize = venture::ExtSave::MaxPayloadSize;
+
+	// Exactly at the limit is accepted (the cap is "more than", not "at least").
+	BulkUnitExt::BulkBytes = maxSize - baseSize;
+	exceeded = true;
+	Check(venture::ExtSave::WritePayload(kSavegameId, payload, &blocks, &exceeded)
+			&& !exceeded && payload.size() == maxSize && blocks == 2,
+		"write cap: a payload exactly at the 16 MiB limit is written");
+
+	// One byte over is rejected while the payload is built, and nothing is kept.
+	BulkUnitExt::BulkBytes = maxSize - baseSize + 1;
+	exceeded = false;
+	Check(!venture::ExtSave::WritePayload(kSavegameId, payload, &blocks, &exceeded)
+			&& exceeded && payload.empty(),
+		"write cap: a payload over the 16 MiB limit is rejected while building");
+
+	BulkUnitExt::BulkBytes = 0;
+	bulkStore.SetSaveable(false, 1);
+	venture::ExtensionIndex::Instance().ClearAll();
+}
 }
 
 int __cdecl main()
@@ -482,6 +634,7 @@ int __cdecl main()
 	TestStagingApi();
 	TestRejectedPayloads();
 	TestSuccessPath();
+	TestWriteSizeCap();
 
 	std::printf("\n%s (%d failure%s)\n", g_failures == 0 ? "PASS" : "FAILED",
 		g_failures, g_failures == 1 ? "" : "s");

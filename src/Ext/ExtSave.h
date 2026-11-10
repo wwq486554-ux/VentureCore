@@ -23,11 +23,21 @@ namespace venture::ExtSave
 // extension class type id of the store.  Rows are written in allocation order, so
 // the on-disk order is deterministic and a load recreates the allocation order.
 //
-// The parser is deliberately defensive: an unknown store type, an unknown store
-// data version or a malformed row skips the block (or rejects the trailer with a
-// warning) instead of failing the game's load.
+// The parser is deliberately defensive: size fields read from the payload are
+// validated against the remaining bytes and MaxPayloadSize before anything is
+// allocated, and an unknown store type, an unknown store data version or a
+// malformed row skips the block (or rejects the trailer with a warning) instead
+// of failing the game's load.
 // ---------------------------------------------------------------------------
 constexpr std::uint32_t PayloadVersion = 1;
+
+// Upper bound of one complete extension payload (all store blocks) and of every
+// individual block/row size inside it.  The trailer frame publishes the same
+// limit as SaveTrailer::MaxPayloadSize (a static_assert in SaveTrailer.cpp keeps
+// the two in sync).  Both sides enforce it: a payload from a modified save is
+// rejected before anything is allocated from an oversized size field, and a save
+// whose payload would exceed the limit is not written.
+constexpr std::uint32_t MaxPayloadSize = 16u * 1024u * 1024u;
 
 struct LoadSummary
 {
@@ -48,10 +58,15 @@ struct LoadSummary
 };
 
 // Serializes every saveable store into `out` (payload only, no trailer suffix).
+// The payload is assembled directly into `out` and its size is checked while it is
+// built: a payload that would exceed MaxPayloadSize is rejected immediately (`out`
+// cleared, *sizeExceeded set when provided) instead of being materialized and
+// checked afterwards.
 // Returns false when there is nothing to save (no saveable store is instantiated,
-// i.e. the platform never started or has no stateful feature).
+// i.e. the platform never started or has no stateful feature) or when the payload
+// limit was exceeded.
 bool WritePayload(std::uint32_t savegameId, std::vector<std::uint8_t>& out,
-	std::uint32_t* storeBlocks = nullptr);
+	std::uint32_t* storeBlocks = nullptr, bool* sizeExceeded = nullptr);
 
 // Parses a payload and creates the extension instances.  They are not attached to
 // their stores yet: their owner pointers are still save-time addresses and are

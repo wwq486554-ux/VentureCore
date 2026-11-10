@@ -33,6 +33,11 @@ const char* ParseResultName(const venture::SaveTrailer::ParseResult result)
 
 namespace venture::SaveTrailer
 {
+// The frame limit and the payload builder limit are the same 16 MiB cap; keep the
+// two public constants from drifting apart.
+static_assert(MaxPayloadSize == ExtSave::MaxPayloadSize,
+	"the trailer frame limit and the payload builder limit must agree");
+
 std::vector<std::uint8_t> WrapPayload(const std::vector<std::uint8_t>& payload)
 {
 	std::vector<std::uint8_t> out;
@@ -99,16 +104,28 @@ void Write(IStream* const stream)
 	if (!stream)
 		return;
 
+	// The payload is assembled and size-checked against MaxPayloadSize while it is
+	// built (A-02/A-11); an oversized payload fails here without being appended.
 	std::vector<std::uint8_t> payload;
 	std::uint32_t storeBlocks = 0;
-	if (!ExtSave::WritePayload(VC_SAVEGAME_ID, payload, &storeBlocks))
+	bool sizeExceeded = false;
+	if (!ExtSave::WritePayload(VC_SAVEGAME_ID, payload, &storeBlocks, &sizeExceeded))
 	{
-		Log::Debug("savegame trailer: no saveable extension data - nothing appended");
+		if (sizeExceeded)
+		{
+			Log::Error("savegame trailer: extension payload exceeds the %u byte limit - not appended",
+				static_cast<unsigned>(MaxPayloadSize));
+		}
+		else
+		{
+			Log::Debug("savegame trailer: no saveable extension data - nothing appended");
+		}
 		return;
 	}
 
 	if (payload.size() > MaxPayloadSize)
 	{
+		// Defensive: ExtSave::WritePayload already enforces the cap while building.
 		Log::Error("savegame trailer: payload of %u bytes exceeds the %u byte limit - not appended",
 			static_cast<unsigned>(payload.size()), static_cast<unsigned>(MaxPayloadSize));
 		return;

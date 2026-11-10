@@ -304,6 +304,15 @@ private:
 				return;
 			}
 
+			// A-02/W5b: the row data size is savegame-controlled.  Validate it
+			// before allocating: it must fit in the bytes the store block still
+			// carries (the block itself was already bounded by ReadPayload).
+			if (dataSize > stream.Remaining())
+			{
+				stream.Fail();
+				return;
+			}
+
 			std::vector<std::uint8_t> data(dataSize);
 			if (dataSize != 0 && !stream.ReadBytes(data.data(), dataSize))
 				return;

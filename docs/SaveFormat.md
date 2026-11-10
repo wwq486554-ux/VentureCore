@@ -85,6 +85,15 @@ storeBlock*:
 * `data` is the bytes written by the extension's `Save(ExtStreamWriter&)`. Pointers
   inside it are written with `WritePointer` and read with
   `ReadPointerForChange`, which registers the field for the swizzle pass.
+* every `blockSize` / `dataSize` field is savegame-controlled and is validated
+  **before** the bytes it claims are allocated or read: it must not exceed the
+  bytes the enclosing payload/block still carries and must stay within the 16 MiB
+  payload cap.  A violation rejects the whole payload (`Invalid`, extension state
+  starts empty) instead of attempting the claimed allocation (A-02).
+* the writer enforces the same 16 MiB cap **while it builds the payload**: a
+  payload that would exceed it is not appended to the savegame (`Log::Error`) -
+  that save is written without extension state, which the next load reports as
+  empty, rather than aborting the engine's save (A-11).
 
 Rows are written in **allocation order** (`ExtensionStore` keeps instances in a
 vector, and stores are visited in registration order), so a load recreates a

@@ -40,57 +40,103 @@ bool SkipBytes(venture::ExtStreamReader& stream, const std::uint32_t size)
 	}
 	return true;
 }
+
+// --- payload assembly ------------------------------------------------------
+constexpr std::size_t PayloadHeaderSize = 3u * sizeof(std::uint32_t);
+
+// Writes `value` into the already-sized `out` at `offset` (byte order matches
+// ExtStreamWriter::WriteU32).
+void StoreU32(std::vector<std::uint8_t>& out, const std::size_t offset, const std::uint32_t value)
+{
+	out[offset + 0] = static_cast<std::uint8_t>(value & 0xFFu);
+	out[offset + 1] = static_cast<std::uint8_t>((value >> 8) & 0xFFu);
+	out[offset + 2] = static_cast<std::uint8_t>((value >> 16) & 0xFFu);
+	out[offset + 3] = static_cast<std::uint8_t>((value >> 24) & 0xFFu);
+}
+
+// Appends `size` bytes only when the payload still stays within MaxPayloadSize.
+// This is checked while the payload is built (A-02/A-11), so an oversized payload
+// fails immediately instead of being materialized and rejected afterwards.
+bool AppendChecked(std::vector<std::uint8_t>& out, const void* const data, const std::size_t size)
+{
+	if (size == 0)
+		return true;
+
+	const std::size_t limit = venture::ExtSave::MaxPayloadSize;
+	if (out.size() > limit || size > limit - out.size())
+		return false;
+
+	const auto* const bytes = static_cast<const std::uint8_t*>(data);
+	out.insert(out.end(), bytes, bytes + size);
+	return true;
+}
+
+bool AppendU32Checked(std::vector<std::uint8_t>& out, const std::uint32_t value)
+{
+	return AppendChecked(out, &value, sizeof(value));
+}
 }
 
 namespace venture::ExtSave
 {
 bool WritePayload(const std::uint32_t savegameId, std::vector<std::uint8_t>& out,
-	std::uint32_t* const storeBlocksOut)
+	std::uint32_t* const storeBlocksOut, bool* const sizeExceededOut)
 {
+	if (sizeExceededOut)
+		*sizeExceededOut = false;
+
+	out.clear();
+
 	const ExtensionIndex& index = ExtensionIndex::Instance();
 
-	struct Block
-	{
-		const ExtStoreDesc* desc;
-		std::vector<std::uint8_t> payload;
-	};
+	// Fixed header: the block count is only known after the walk, so reserve the
+	// three u32 values and patch them in at the end.
+	out.resize(PayloadHeaderSize, 0);
 
-	std::vector<Block> blocks;
+	std::uint32_t blockCount = 0;
 
 	for (const ExtStoreDesc* const desc : index.Stores())
 	{
 		if (!desc->saveable || !desc->save)
 			continue;
 
-		ExtByteStreamWriter writer;
-		desc->save(writer);
-		if (writer.Offset() == 0)
+		// One store's block is materialized at a time (its size has to be known
+		// before the block header can be written); the payload itself is assembled
+		// directly in `out` and checked against the limit on every append.
+		ExtByteStreamWriter block;
+		desc->save(block);
+		if (block.Offset() == 0)
 			continue;
 
-		blocks.push_back(Block{ desc, writer.Data() });
+		const std::vector<std::uint8_t>& blockData = block.Data();
+
+		if (!AppendU32Checked(out, desc->typeId)
+			|| !AppendU32Checked(out, desc->dataVersion)
+			|| !AppendU32Checked(out, static_cast<std::uint32_t>(blockData.size()))
+			|| !AppendChecked(out, blockData.data(), blockData.size()))
+		{
+			out.clear();
+			if (sizeExceededOut)
+				*sizeExceededOut = true;
+			return false;
+		}
+
+		++blockCount;
 	}
 
-	if (blocks.empty())
+	if (blockCount == 0)
+	{
+		out.clear();
 		return false;
+	}
 
-	ExtByteStreamWriter writer;
-	writer.WriteU32(savegameId);
-	writer.WriteU32(PayloadVersion);
-	writer.WriteU32(static_cast<std::uint32_t>(blocks.size()));
+	StoreU32(out, 0, savegameId);
+	StoreU32(out, sizeof(std::uint32_t), PayloadVersion);
+	StoreU32(out, 2u * sizeof(std::uint32_t), blockCount);
 
 	if (storeBlocksOut)
-		*storeBlocksOut = static_cast<std::uint32_t>(blocks.size());
+		*storeBlocksOut = blockCount;
 
-	for (const Block& block : blocks)
-	{
-		writer.WriteU32(block.desc->typeId);
-		writer.WriteU32(block.desc->dataVersion);
-		writer.WriteU32(static_cast<std::uint32_t>(block.payload.size()));
-		if (!block.payload.empty())
-			writer.Write(block.payload.data(), block.payload.size());
-	}
-
-	out = writer.Data();
 	return true;
 }
 
@@ -140,6 +186,17 @@ LoadSummary ReadPayload(const std::uint32_t savegameId, const std::uint8_t* cons
 		std::uint32_t blockSize = 0;
 
 		if (!reader.ReadU32(typeId) || !reader.ReadU32(dataVersion) || !reader.ReadU32(blockSize))
+		{
+			summary.result = LoadSummary::Result::Invalid;
+			ExtSwizzle::DiscardStaged();
+			DiscardLoadedFrom(index, loadedBefore);
+			return summary;
+		}
+
+		// A-02/W5b: the size fields are savegame-controlled.  Validate the block
+		// size before anything is allocated from it: it must fit in the bytes the
+		// payload still carries and in the payload size cap.
+		if (blockSize > MaxPayloadSize || blockSize > reader.Remaining())
 		{
 			summary.result = LoadSummary::Result::Invalid;
 			ExtSwizzle::DiscardStaged();
