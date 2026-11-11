@@ -276,15 +276,16 @@ the `/O2 /Oy` alignment), and they cannot be re-measured from this tree because
 the old container is gone - so compare them directionally, not as an
 apples-to-apples flag test.  "After" is the intrusive allocation-order list +
 `Fetch` cache + `Reserve` hint, measured with `/O2 /Oy` in three runs on this
-machine on 2026-11-11; the ranges span the runs because Wine timing is noisy:
+machine on 2026-11-11, including the final clean-build acceptance run; the
+ranges span the runs because Wine timing is noisy:
 
 | Operation | Before (historical) | After (measured, `/O2 /Oy`) |
 | --- | --- | --- |
-| `Allocate` (per instance) | 512-538 ns | **161-182 ns** |
-| `Fetch`, changing owners (hash path) | 41-45 ns | **3.5-4.0 ns** |
-| `Fetch`, same owner repeatedly (cache) | 34-52 ns | **0.6-0.7 ns** |
-| `Remove` (random order, per instance) | 4.3-4.7 / 21 / 83-84 µs @ 1k/5k/20k | **0.071-0.074 / 0.080-0.082 / 0.100-0.102 µs** |
-| `Clear` (per instance) | 107-118 ns | **51-56 ns** |
+| `Allocate` (per instance) | 512-538 ns | **161-192 ns** |
+| `Fetch`, changing owners (hash path) | 41-45 ns | **3.5-5.6 ns** |
+| `Fetch`, same owner repeatedly (cache) | 34-52 ns | **0.6-0.8 ns** |
+| `Remove` (random order, per instance) | 4.3-4.7 / 21 / 83-84 µs @ 1k/5k/20k | **0.071-0.109 µs @ every size** |
+| `Clear` (per instance) | 107-118 ns | **51-72 ns** |
 
 The benchmark binary is rebuilt whenever `tests/bench_store.cpp`, a source from
 its `TEST_DEPS` line, any header under `src/`/`include/` or the generated git
