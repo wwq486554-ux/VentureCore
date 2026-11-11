@@ -16,9 +16,14 @@
 #
 # Options:
 #   --list        list the discovered tests and exit
-#   --verbose     echo the compiler command line and always print the output
+#   --verbose     echo the compiler command line and print each test's run output
 #   --no-run      only compile, do not execute
 #   -h, --help
+#
+# Each test binary runs with a time limit (default 120 s, override with
+# VCS_TEST_TIMEOUT=N).  A test that hangs is killed and reported as a failure:
+# the runner holds the toolchain lock, so a hung binary would otherwise block
+# every later build until the lock timeout.
 #
 # The toolchain lock from common.sh is held while compiling, so this can run
 # next to a build without corrupting the shared Wine prefix - but it does not
@@ -56,11 +61,25 @@ while (( $# )); do
   shift
 done
 
+test_timeout="${VCS_TEST_TIMEOUT:-120}"
+if ! [[ $test_timeout =~ ^[0-9]+$ ]] || (( test_timeout <= 0 )); then
+  vcs_die "VCS_TEST_TIMEOUT must be a positive number of seconds (got '$test_timeout')"
+fi
+timeout_prefix=()
+if command -v timeout >/dev/null 2>&1; then
+  timeout_prefix=(timeout -k 10 "$test_timeout")
+else
+  vcs_warn "coreutils 'timeout' is not installed - tests run without a time limit"
+fi
+
 tests_dir="$VCS_ROOT/tests"
-[[ -d $tests_dir ]] || { vcs_warn "no tests/ directory in $VCS_ROOT"; exit 0; }
+# A missing or empty tests/ is a failing configuration, not a pass: the runner is
+# used by CI and by the release checklist, and exiting 0 would report "all tests
+# passed" when none ran (D-13).
+[[ -d $tests_dir ]] || vcs_die "no tests/ directory in $VCS_ROOT"
 
 mapfile -t all_tests < <(find "$tests_dir" -maxdepth 1 -type f -name 'test_*.cpp' -printf '%f\n' | sort)
-(( ${#all_tests[@]} > 0 )) || { vcs_warn "tests/ contains no test_*.cpp"; exit 0; }
+(( ${#all_tests[@]} > 0 )) || vcs_die "tests/ contains no test_*.cpp - nothing to run"
 
 selected=()
 for t in "${all_tests[@]}"; do
@@ -107,8 +126,11 @@ for test in "${selected[@]}"; do
   exe="$work_dir/$name.exe"
   log="$work_dir/$name.build.log"
 
-  # TEST_DEPS: one comment line with repo-relative source paths.
-  deps_line="$(grep -m1 '^// *TEST_DEPS:' "$src" | sed -e 's|^// *TEST_DEPS: *||' -e 's|\r$||')"
+  # TEST_DEPS: one comment line with repo-relative source paths.  A test without
+  # the line is valid (it links only itself), so a no-match grep must not abort
+  # the run under "set -o pipefail" - that used to fail the whole runner without
+  # a message for such a test.
+  deps_line="$(grep -m1 '^// *TEST_DEPS:' "$src" | sed -e 's|^// *TEST_DEPS: *||' -e 's|\r$||' || true)"
   sources=("$src")
   for dep in $deps_line; do
     [[ -f "$VCS_ROOT/$dep" ]] || vcs_die "$test: TEST_DEPS names a missing source: $dep"
@@ -158,9 +180,17 @@ for test in "${selected[@]}"; do
 
   run_log="$work_dir/$name.run.log"
   set +e
-  ( cd "$work_dir" && wine "$(vcs_w "$exe")" ) >"$run_log" 2>&1
+  ( cd "$work_dir" && "${timeout_prefix[@]}" wine "$(vcs_w "$exe")" ) >"$run_log" 2>&1
   run_rc=$?
   set -e
+
+  if (( run_rc == 124 )); then
+    failed=$((failed + 1))
+    failed_names+=("$name (timeout after ${test_timeout}s)")
+    printf '  [run]   %-34s FAIL (timeout after %ss)\n' "$test" "$test_timeout"
+    sed -n '1,80p' "$run_log" | sed 's/^/    /' >&2
+    continue
+  fi
 
   if (( run_rc == 0 )); then
     passed=$((passed + 1))
@@ -185,7 +215,12 @@ else
   vcs_info "compiler diagnostics: 0 warnings in ${#selected[@]} test build(s)"
 fi
 if (( failed == 0 )); then
-  vcs_info "tests: $passed/$((passed + failed)) passed"
+  if (( no_run )); then
+    # Compiling is not running: say so, or a CI log would read like a pass.
+    vcs_info "tests: $passed/$((passed + failed)) compiled (--no-run: not executed)"
+  else
+    vcs_info "tests: $passed/$((passed + failed)) passed"
+  fi
   exit 0
 fi
 vcs_info "tests: $passed/$((passed + failed)) passed, $failed failed"

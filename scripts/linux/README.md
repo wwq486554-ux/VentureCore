@@ -22,6 +22,8 @@ variable names are unusual for a template.
 | `verify_incremental.sh` | regression test for the incremental build: edits `include/`, `src/`, project files and linker flags in a throwaway copy and asserts the build reacts (real toolchain) |
 | `abi_probe.sh` | prints the engine ABI values pinned by `src/Engine/EngineCompat.h` |
 | `load_probe.sh` | loads the built DLL into a tiny Win32 host under Wine and resolves exports |
+| `run_tests.sh` | compiles and runs every `tests/test_*.cpp` (a missing/empty `tests/` is a failure; each test runs with a time limit) |
+| `bench_store.sh` | builds and runs the extension-store microbenchmark (`tests/bench_store.cpp`) |
 
 ## Build
 
@@ -50,6 +52,7 @@ this machine.
 | `VCS_DEBUG_INFO` | `z7` (robust under Wine) or `zi` (MSBuild default) | `z7` |
 | `VCS_MODULES` | `1` also passes `/experimental:module` | `0` |
 | `VCS_DEPLOY_DIR` | default `--deploy` target | unset |
+| `VCS_TEST_TIMEOUT` | time limit per test binary in `run_tests.sh`, seconds | `120` |
 
 ## Caveats
 
