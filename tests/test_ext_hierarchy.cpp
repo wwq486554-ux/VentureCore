@@ -6,6 +6,7 @@
 //
 // TEST_DEPS: src/Ext/AbstractExt.cpp src/Ext/ExtensionIndex.cpp src/Core/Log.cpp src/Core/PlatformPaths.cpp
 
+#include <cstddef>
 #include <cstdint>
 #include <cstdio>
 
@@ -113,6 +114,10 @@ int __cdecl main()
 		"store is registered with the global index");
 	Check(ExtensionIndex::Instance().StoreCount() >= 3, "all stores are registered");
 
+	// Relative counts: the numbers below must describe what this test allocated,
+	// not depend on "no other store has allocated anything yet" (A-17).
+	const std::size_t extCountAtStart = ExtensionIndex::Instance().ExtCount();
+
 	// -- allocation and fetch ------------------------------------------------
 	UnitClass unitA;
 	UnitClass unitB;
@@ -132,7 +137,8 @@ int __cdecl main()
 	Check(venture::FetchExtAs<AbstractExt>(&unitA) == extA, "root view returns the derived instance");
 	Check(TestUnitExt::Fetch(&unitB) == extB, "feature Fetch helper returns the instance");
 	Check(ExtensionIndex::Instance().Fetch(&unitA) == extA, "global index sees the same instance");
-	Check(ExtensionIndex::Instance().ExtCount() == 2, "global index counts every instance");
+	Check(ExtensionIndex::Instance().ExtCount() == extCountAtStart + 2,
+		"global index counts the two instances this test allocated");
 
 	// -- type validation -----------------------------------------------------
 	Check(venture::IsExtTypeDerivedFrom(TestUnitExt::TypeId, UnitExt::TypeId), "type chain: user -> UnitExt");
@@ -202,7 +208,8 @@ int __cdecl main()
 	BuildingExt* const buildingExt = buildingStore.Allocate(&building);
 	Check(buildingExt != nullptr, "a second owner class has its own store");
 	Check(TechnoExt::Fetch(&building) == buildingExt, "TechnoExt view reaches the building extension");
-	Check(ExtensionIndex::Instance().ExtCount() == 3, "global index counts instances of every owner class");
+	Check(ExtensionIndex::Instance().ExtCount() == extCountAtStart + 3,
+		"global index counts instances of every owner class (relative to the start)");
 	Check(UnitExt::Fetch(&building) == nullptr, "UnitExt view rejects an extension of another class");
 	Check(TestUnitExt::Fetch(&unitA) == extA && TestUnitExt::Fetch(&building) == nullptr,
 		"typed Fetch is class-exact across owners");
