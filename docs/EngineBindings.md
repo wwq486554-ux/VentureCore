@@ -212,12 +212,15 @@ derived platform drop a module without touching engine class layouts.
   symptom of a copy-pasted `TypeId`).  A rejected id is **poisoned**:
   `IsExtTypeDerivedFrom` reports false for it, so `FetchExtAs` returns `nullptr`
   instead of risking a wrong `static_cast`; each problem is logged through the
-  platform logger when it happens.  A broken composition therefore fails loudly
-  and safely instead of corrupting memory later.
+  platform logger when it happens.  The same lookup is bounded: a parent chain
+  that does not reach the root within the depth limit is treated as a cycle,
+  reported once and its type poisoned, so a broken table cannot hang a frame.
+  A broken composition therefore fails loudly and safely instead of corrupting
+  memory later.
 * **Global index** (`src/Ext/ExtensionIndex.h`): `unordered_map<owner,
   AbstractExt*>` for polymorphic attach/fetch/detach, plus the registry of
   stores.  A store registers a type-erased `ExtStoreDesc` on first use (type id,
-  diagnostic name, saveable flag, clear/count callbacks), so scenario clear - and
+  diagnostic name, saveable flag, clear callback), so scenario clear - and
   the savegame layer - walk every store without knowing its C++ type.
 * **Store** (`src/Ext/ExtensionStore.h`): one store per (game class, most
   derived extension class) pair, with

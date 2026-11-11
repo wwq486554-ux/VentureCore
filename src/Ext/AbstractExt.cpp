@@ -167,10 +167,24 @@ bool IsExtTypeDerivedFrom(const std::uint32_t actualTypeId, const std::uint32_t 
 		return true;
 
 	std::uint32_t current = actualTypeId;
+	std::size_t depth = 0;
 	while (current != 0)
 	{
 		if (current == wantedTypeId)
 			return true;
+
+		if (++depth > kMaxParentChain)
+		{
+			// A parent chain that does not reach the root within the depth limit is
+			// a cycle.  RegisterExtType rejects cycles, so this is defence in depth
+			// for a derived platform that writes the table itself - the lookup must
+			// fail loudly instead of walking forever (A-18).
+			ReportProblem(
+				actualTypeId,
+				0u,
+				"the parent chain is cyclic or deeper than any real hierarchy");
+			return false;
+		}
 
 		const auto& parents = TypeParents();
 		const auto it = parents.find(current);

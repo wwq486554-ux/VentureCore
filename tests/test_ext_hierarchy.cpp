@@ -173,6 +173,30 @@ int __cdecl main()
 	Check(venture::ExtTypeProblemCount() == firstProblemCount + 5,
 		"every rejected registration is counted once");
 	Check(g_problemMessages == 5, "every rejected registration is reported through the problem sink");
+
+	// -- parent-chain depth guard (A-18) -------------------------------------
+	// Build a forward-referenced chain deeper than any real hierarchy (each pair
+	// is accepted because its base is not registered yet).  The lookup must stop
+	// at the depth limit, report the chain once and poison the type instead of
+	// walking forever.
+	bool chainRegistered = true;
+	for (std::uint32_t i = 0; i < 35; ++i)
+		chainRegistered = venture::RegisterExtType(0x200u + i, 0x201u + i) && chainRegistered;
+	Check(chainRegistered, "a deep forward-referenced chain can be registered");
+
+	const std::size_t beforeDepthGuard = venture::ExtTypeProblemCount();
+	const int messagesBeforeDepthGuard = g_problemMessages;
+	Check(!venture::IsExtTypeDerivedFrom(0x200u, venture::AbstractExt::TypeId),
+		"the lookup stops at the parent-chain depth limit instead of walking forever");
+	Check(venture::ExtTypeProblemCount() == beforeDepthGuard + 1,
+		"the depth limit is reported once");
+	Check(g_problemMessages == messagesBeforeDepthGuard + 1,
+		"the depth-limit problem reaches the sink");
+	Check(!venture::IsExtTypeDerivedFrom(0x200u, venture::AbstractExt::TypeId),
+		"the poisoned deep type stays unusable");
+	Check(venture::ExtTypeProblemCount() == beforeDepthGuard + 1,
+		"a repeated lookup does not report the same chain again");
+
 	venture::SetExtTypeProblemSink(nullptr);
 
 	BuildingExt* const buildingExt = buildingStore.Allocate(&building);

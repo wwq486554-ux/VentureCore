@@ -25,11 +25,6 @@ struct ExtStoreDesc
 	const char* name = "store";     // diagnostic name, set by the feature
 	bool saveable = false;          // participates in the savegame trailer
 	void (*clear)() = nullptr;      // drop every instance of this store
-	// Live instance count callback.  The current base does not call it (its own
-	// diagnostics use ExtensionStore::Size()); it is kept as a hook for derived
-	// platforms that walk the descriptor table.  Filled in by the
-	// ExtensionStore constructor together with the other callbacks.
-	std::size_t (*count)() = nullptr;
 
 	// Savegame layer.  All four are null for a store that does not participate;
 	// a saveable store fills every one of them.

@@ -192,7 +192,6 @@ private:
 		RegisterExtType(TExt::TypeId, TExt::BaseTypeId);
 		m_desc.typeId = TExt::TypeId;
 		m_desc.clear = &ClearCallback;
-		m_desc.count = &CountCallback;
 		m_desc.save = &SaveCallback;
 		m_desc.load = &LoadCallback;
 		m_desc.adopt = &AdoptCallback;
@@ -264,11 +263,6 @@ private:
 	static void ClearCallback()
 	{
 		Instance().Clear();
-	}
-
-	static std::size_t CountCallback()
-	{
-		return Instance().Size();
 	}
 
 	// --- savegame layer ----------------------------------------------------
