@@ -68,8 +68,8 @@ control (`docs/Logging.md`).  A savegame payload carries a signature of the
 platform's saveable store set, so adding, removing, reordering or re-versioning a
 saveable store makes older saves incompatible: their extension state is dropped
 (the game's own state still loads, there is no migration).  Do **not** plan around
-the systems the base does not have yet in v1.0.0: T1-T3 host-specific features,
-Phobos interop and AE are roadmap-only.
+systems the base does not have: T1-T3 host-specific features, Phobos interop and
+AE are not part of v1.0.0.
 
 ## 4. Add a feature module
 
@@ -205,6 +205,21 @@ mask itself (`FeatureContext::hostMask`) - `minTier` alone is only a coarse
 "there is at least one known host" gate.  See `docs/HostMatrix.md` for the
 resolution rule.
 
+## 4a. Feature-author conventions (enforced by the base)
+
+* **Command names** are compared case-insensitively and must carry the platform
+  prefix (for example `Venture Test Command`); a name that differs only in case
+  is rejected, and a collision with an already registered engine command is
+  logged (`docs/Commands.md`).
+* **Owned rules-INI keys** must live in a platform-namespaced section
+  (`[VentureCore]`, `[Examples]`, ...).  Registering a key in an engine core
+  section (`[General]`, `[Basic]`, `[AudioVisual]`, `[MultiPlayer]`, ...) is
+  refused with a warning (`docs/Ini.md`).
+* **Extension type ids** must be `>= AbstractExt::FirstUserTypeId` (0x100); a
+  conflicting base or a cyclic chain is rejected and the type id is poisoned -
+  `Fetch` returns `nullptr` instead of risking a wrong cast
+  (`docs/EngineBindings.md`).
+
 ## 5. Make it rebuildable and reviewable
 
 Before declaring a feature done:
@@ -243,6 +258,6 @@ Before declaring a feature done:
 * don't use the engine's `AbstractClass` extension slot (Phobos-lineage DLLs own
   it) - use the base's extension storage;
 * don't add hooks without a `docs/HookCatalogue.md` row;
-* don't document capabilities the base does not have yet (host-specific T1-T3
+* don't document capabilities the base does not have (host-specific T1-T3
   features, Phobos interop, AE);
 * don't rename `.syhks00` / `.syexe00` or the pinned YRpp path.

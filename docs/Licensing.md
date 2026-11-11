@@ -1,8 +1,7 @@
 # Licensing
 
 VentureCore is a MIT-licensed *starter base*.  Feature packs built on top of it
-are planned to be GPL-3.0, and a platform you build from the base may choose its
-own license.  This document explains what that means in practice and which
+are GPL-3.0, and a platform you build from the base may choose its own license.  This document explains what that means in practice and which
 components are **not** covered by the MIT grant.
 
 ## Summary
@@ -10,7 +9,7 @@ components are **not** covered by the MIT grant.
 | Component | License | Distributed here? |
 | --- | --- | --- |
 | VentureCore base source (this repository) | MIT - see `LICENSE.md` | yes |
-| Venture feature packs (a separate repository, not created yet) | GPL-3.0 (planned) | no |
+| Venture feature packs (a separate repository) | GPL-3.0 (project policy) | no |
 | A platform you build from this base ("derived platform") | your choice, see below | your repository |
 | YRpp (engine wrapper headers) | *no license declaration* - not redistributed | no |
 | SyringeEx (`Syringe.exe`) | not covered; not redistributed | no |
@@ -26,14 +25,14 @@ If you distribute a derived platform, keep `LICENSE.md` and `NOTICE.md` and add
 your own copyright line if you changed the code.  MIT does not require you to
 open-source your derived platform.
 
-## Our feature packs: GPL-3.0 (planned)
+## Our feature packs: GPL-3.0
 
-The feature packs that will be published later under the Venture umbrella are
-planned to be licensed **GPL-3.0**, because they are the product line that
-actually adds gameplay behaviour and we want those modules to stay open.
+Feature packs published under the Venture umbrella are licensed **GPL-3.0**,
+because they are the product line that actually adds gameplay behaviour and we
+want those modules to stay open.
 
-That repository does not exist yet.  When it does, a module copied from it into a
-derived platform brings GPL-3.0 obligations with it.
+A module copied from such a feature pack into a derived platform brings GPL-3.0
+obligations with it.
 
 ## Derived platforms: your call
 
@@ -42,8 +41,8 @@ You may license your own platform however you like - MIT, GPL, proprietary -
 
 * you keep the MIT notice for the base code you copied (`LICENSE.md`, and the
   relevant part of `NOTICE.md`), and
-* if you incorporate GPL-3.0-licensed modules (for example from a planned Venture
-  feature pack), the combined work must be distributed under GPL-3.0.  GPL-3.0 is
+* if you incorporate GPL-3.0-licensed modules (for example from a Venture feature
+  pack), the combined work must be distributed under GPL-3.0.  GPL-3.0 is
   viral in that direction: MIT-licensed base code can go into a GPL-3.0 work, but
   GPL-3.0 code cannot be relicensed as MIT/proprietary.
 

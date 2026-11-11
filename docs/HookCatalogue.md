@@ -84,14 +84,13 @@ the instruction listing and check it against the ecosystem conventions.
    unrelated patches along.
 5. Rebuild, then run `python3 scripts/verify_build.py`.
 
-## Planned hook sites (not implemented in v1.0.0)
+## Hook sites not used by v1.0.0
 
-The following are roadmap items only - they are **not** in the table above and
-**not** in the DLL yet.  When one is implemented it moves into the table.
+The following sites are **not** in the table above and **not** in the DLL.  If one
+is implemented it moves into the table.
 
-* Host-specific (T1-T3) feature hooks for Ares / Phobos / Kratos environments:
-  planned for a later increment, after the host matrix grows beyond
-  detect-and-log.
+* Host-specific (T1-T3) feature hooks for Ares / Phobos / Kratos environments
+  (v1.0.0 only detects and logs the host matrix).
 
 ## See also
 

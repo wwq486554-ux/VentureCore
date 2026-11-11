@@ -105,7 +105,8 @@ resource strings, the build-type string (`LOCAL` / `NIGHTLY` / `RELEASE`, set by
 
 Checklist for a version bump:
 
-1. Bump the numbers (and optionally change/remove the prerelease suffix).
+1. Bump the numbers.  For a non-stable build add `VC_PRERELEASE_SUFFIX`; remove
+   it for a stable release.
 2. Add a `CHANGELOG.md` section for the new version, dated.
 3. Rebuild with `--build-type RELEASE` for a release artefact and run
    `python3 scripts/verify_build.py` (it expects the `VERSION_STRINGS` at the top
@@ -155,18 +156,19 @@ When an optional host changes its module name, or a new host is added:
 * The build generates `Release/IntDir/Generated/VentureCore.Git.h` for both the
   MSBuild and the Linux path; it is generated, not authored.
 
-## 7. Planned increments (roadmap)
+## 7. Base scope (what is not included)
 
-The implemented base layers as of `v1.0.0` are: savegame persistence
-(header-first sequential frame, payload v2), event channel (fail-closed sizing),
-command registration, lineage detection and logging control - each with its own
-document in `docs/`.  Every layer has automated checks on this machine (named in
-`README.md` and the per-layer document), but those checks load the DLL or drive
-engine-free code; they do not replace an in-game run.  The remaining increments are
-**T1-T3 host-specific features**, **Phobos interop** and **AE**; none of these
-exist in `v1.0.0`.  When one lands, this document gains the sections
-it needs (host-specific hook selection and AE handling in particular must be
-written down before the first release that ships them).
+The implemented base layers are: savegame persistence (header-first sequential
+frame, payload v2), event channel (fail-closed sizing), command registration,
+lineage detection and logging control - each with its own document in `docs/`.
+Every layer has automated checks on this machine (named in `README.md` and the
+per-layer document), but those checks load the DLL or drive engine-free code;
+they do not replace an in-game run.
+
+**T1-T3 host-specific features, Phobos interop and AE are not part of the base.**
+If any of them is added, this document must gain the sections it needs first
+(host-specific hook selection and AE handling in particular) before a release
+ships it.
 
 When you change a saveable store's **row layout** (a field added, removed or
 reordered), bump that store's `dataVersion` in its `SetSaveable(...)` call and

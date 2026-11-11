@@ -150,12 +150,12 @@ so rules keys cannot be read from a feature's `Initialize()`.  The binding is:
   removal (`INIClass::Clear(section, key)`, `0x5257C0`), so a host platform that
   reads the same key does not see it.  Gated by `[Platform] IniTakeover=yes|no`
   (default yes: off keeps the keys visible for hosts and only reads the values).
-* **Not implemented yet** - route B (a read-layer filter at
-  `INIClass::ReadString`, `0x528A10`) is deliberately deferred: Ares occupies that
-  site (size 5) and chaining there charges every INI read of the whole load.  It
-  is the planned route for gamemode/map INIs, which are parsed after this hook.
+* **Not implemented** - route B (a read-layer filter at
+  `INIClass::ReadString`, `0x528A10`) is deliberately not taken: Ares occupies
+  that site (size 5) and chaining there charges every INI read of the whole load.
+  It would be the route for gamemode/map INIs, which are parsed after this hook.
   Only the single parsed rules file is purged today; `docs/Ini.md` has the
-  details, the future type-level sites and the limitation list.
+  details, the type-level sites and the limitation list.
 
 The INI container layouts the takeover walks are asserted in
 `src/Engine/EngineCompat.h` (`INIClass` 0x40, `CCINIClass` 0x58, `INIEntry` 0x28,

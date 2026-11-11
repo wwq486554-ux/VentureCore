@@ -47,7 +47,7 @@ are starting a new platform from scratch.
    * `PLATFORM_NAME` - your new name,
    * `VERSION_STRINGS` - your version string(s),
    * `YRPP_PIN` (only if you changed the pin),
-   * `FEATURE_ID` - the id of your sample feature, or remove that check if you
+   * `FEATURE_ID` - the id of the Example feature, or remove that check if you
      delete the Example module.
    The default DLL path in the same file is derived from the repository root and
    the hard-coded file name; update it if you renamed the project output.

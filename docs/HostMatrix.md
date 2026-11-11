@@ -66,7 +66,9 @@ Every DLL built from this base exports the `VentureLineage_GetInfo()` marker
 probes the loaded modules for that marker; a matching second DLL is named in the
 log and the configured `[Platform] LineagePolicy` decides what happens:
 `refuse` (the default) leaves the platform disabled - the game keeps running
-without our features - while `warn` only logs the conflict.  See
+without our features - while `warn` only logs the conflict.  A refused copy is
+**inert**: it does not register commands, does not answer or dispatch its event
+types, purges no rules-INI keys and does not touch the savegame stream.  See
 `docs/Lineage.md` for the marker, the scan and the exact log lines.
 
 ## v1.0.0 limitations
@@ -74,7 +76,7 @@ without our features - while `warn` only logs the conflict.  See
 * No functional dependency on any optional host: the base starts at T0 and does
   nothing host-specific.  Host detection exists so derived platforms can gate
   their own features.
-* No host-specific (T1-T3) features are implemented yet.
+* No host-specific (T1-T3) features are implemented.
 * No Phobos interop and no AE handling.
 * The extension-storage layer deliberately does not use the engine's unused
   `AbstractClass` extension slot, because DLLs in the Phobos lineage own it.
@@ -107,10 +109,10 @@ The platform's event channel (`0x70-0x7F`, see `docs/EventChannel.md`) is a
 * single-player is unaffected (the event path still runs and is logged, which is
   how the platform's own user test verifies it).
 
-## Planned (roadmap)
+## Not part of this base
 
 * T1-T3 host-specific feature packages (Ares-only, Phobos-aware, ...).
 * Phobos interop (opt-in calls into Phobos extensions).
 * AE (Ares extensions) support.
 
-None of these are in v1.0.0; see `README.md` for the full roadmap.
+None of these are implemented in v1.0.0.

@@ -225,12 +225,12 @@ no clean load site exists).
 * **Observers see the real value only before the purge.** Any later read of an
   owned key from the same INI returns the default.
 
-## Hook sites reused from the ecosystem (not installed yet)
+## Hook sites reused from the ecosystem (not installed)
 
 These are the type-loading sites the wider Phobos / YRpp ecosystem hooks for
-per-type INI reading. The platform does **not** install them in this increment -
-they are listed so a future type-extension layer can reuse the same verified
-sites instead of re-deriving them:
+per-type INI reading.  The base does **not** install them; they are listed so a
+type-extension layer can reuse the same verified sites instead of re-deriving
+them:
 
 | Address | Engine function | Typical use |
 | --- | --- | --- |

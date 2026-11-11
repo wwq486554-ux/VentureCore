@@ -63,8 +63,8 @@ tier from that (see `docs/HostMatrix.md`).  In v1.0.0 there is:
 
 The extension-storage layer deliberately does **not** use the engine's unused
 `AbstractClass` extension slot, because DLLs in the Phobos lineage own that slot.
-Features that later interoperate with a host platform must be opt-in and are
-planned, not part of the base (see `README.md` roadmap).
+Features that interoperate with a host platform would have to be opt-in and are
+not part of the base.
 
 ## No Phobos code
 

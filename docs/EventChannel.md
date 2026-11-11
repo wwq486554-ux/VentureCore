@@ -250,7 +250,7 @@ question. Consequences:
   same number has the same parse problem: the receiver consumes its own size,
   not the sender's.
 
-There is **no automatic peer detection** in this increment: the channel cannot
+There is **no automatic peer detection** in this build: the channel cannot
 know which events a remote peer understands. Avoiding a mixed client is the
 user's responsibility - every player in a multiplayer game has to run a platform
 build that registers the same event types and payload sizes. This is documented
