@@ -177,8 +177,14 @@ by simply playing a battle and grepping the log for `[Example]`.
 ## Release-source assertion (`verify_build.py` check 7)
 
 `python3 scripts/verify_build.py` runs a seventh check, `Log policy (source)`,
-which scans every `src/**/*.cpp` and `src/**/*.h` file and fails if a call to the
-debugger API appears outside a `#ifdef DEBUG` / `#if defined(DEBUG)` region.
+which scans every `src/**/*.cpp` and `src/**/*.h` file and fails when either:
+
+* a call to the debugger API appears **outside** a `#ifdef DEBUG` /
+  `#if defined(DEBUG)` region, or
+* the call appears in **any file other than `src/Core/Log.cpp`** - the base owns
+  exactly one gated debugger helper, so a second copy is rejected even inside a
+  DEBUG region.
+
 It reports `file:line: <source line>` for each violation, for example:
 
 ```text
@@ -190,15 +196,22 @@ It reports `file:line: <source line>` for each violation, for example:
 ```
 
 The check is line-based and documented on purpose - it tracks the preprocessor
-conditional nesting, no C++ parsing.  Two consequences:
+conditional nesting, no C++ parsing.  Three consequences:
 
 * it inspects the **source tree**, not the DLL, so it also catches a violation
   when the DLL in `Release/` was built from an older state (the check is printed
   even when the DLL cannot be found);
-* an `#else`/`#elif` branch of an `#ifdef DEBUG` region counts as gated.  That
-  is deliberate: the single helper in `src/Core/Log.cpp` uses exactly that shape
-  for its `#else` branch, which is additionally gated on the run-time
-  `DebugOutput` switch.  Do not add another debugger call outside that helper.
+* an `#else` branch keeps the gate of the region it continues, while an `#elif`
+  is re-evaluated from its own condition: `#elif defined(DEBUG)` opens a DEBUG
+  region even when the `#if` before it was not a DEBUG gate.  Keeping `#else`
+  gated is deliberate: the single helper in `src/Core/Log.cpp` uses exactly that
+  shape for its `#else` branch, which is additionally gated on the run-time
+  `DebugOutput` switch;
+* it proves a **lexical** property only: every literal occurrence of the API name
+  in `src/` sits inside a gated region of the one helper.  It cannot prove that
+  the release branch is unreachable (that is the runtime `DebugOutput` switch's
+  job), and it does not see calls hidden behind macros or outside `src/`.
+  Do not add another debugger call anywhere.
 
 ## Failure behaviour
 

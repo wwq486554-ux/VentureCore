@@ -64,15 +64,21 @@ What is checked
 7. Log policy (source)
        The release-source assertion behind the logger's cost policy:
        ``OutputDebugStringA`` may only appear inside a ``#ifdef DEBUG`` /
-       ``#if defined(DEBUG)`` region, i.e. it is compiled in for a DEBUG build.
+       ``#if defined(DEBUG)`` region **and only in** ``src/Core/Log.cpp`` - the
+       base has exactly one gated debugger helper, so a second copy is rejected
+       even when it sits inside a DEBUG region.
        The check is line-based: it walks every ``src/**/*.cpp`` / ``*.h`` file,
-       tracks the preprocessor conditional nesting and reports ``file:line`` for
-       a call outside such a region.  A RELEASE build therefore never reaches
-       debugger output except through the one helper in ``src/Core/Log.cpp``,
-       where the ``#else`` branch is itself gated on the ``[Platform]
-       DebugOutput=yes`` run-time switch.  Because it inspects the *sources* this
-       check keeps working when the DLL was built from an older state, and its
-       failure tells you exactly which line to move.
+       tracks the preprocessor conditional nesting (``#if``/``#ifdef``/
+       ``#ifndef`` push, ``#elif`` recomputes its branch from its own condition,
+       ``#else`` keeps the gate of the region it continues, ``#endif`` pops) and
+       reports ``file:line`` for a call outside such a region or outside the
+       helper file.  A RELEASE build therefore never reaches debugger output
+       except through the one helper in ``src/Core/Log.cpp``, where the ``#else``
+       branch is itself gated on the ``[Platform] DebugOutput=yes`` run-time
+       switch.  Because it inspects the *sources* this check keeps working when
+       the DLL was built from an older state, and its failure tells you exactly
+       which line to move.  It is a lexical hygiene check, not a proof that the
+       release branch is unreachable (see docs/Logging.md).
 
 Exit status is 0 when every check passes and 1 otherwise.  The expected strings
 and ids live in the constants below; when the platform is renamed (see
@@ -676,13 +682,28 @@ SRC_DIR = os.path.join(REPO_ROOT, "src")
 # not try to parse comments.
 DEBUG_OUTPUT_NEEDLE = "OutputDebugStringA"
 
+# The base owns exactly one debugger helper: the one EmitDebugOutput() in the
+# logger.  The needle must not appear anywhere else in src/, even inside a
+# DEBUG-gated region - a second helper is a second path to the debugger API that
+# would have to be kept in sync by hand (D-14).
+DEBUG_OUTPUT_HELPER_FILE = "src/Core/Log.cpp"
+
 # "A DEBUG build is what makes this region exist": the two spellings the project
 # uses.  A region opened like this protects everything up to its matching
-# #endif, including its #else/#elif branches (the one such branch in
-# src/Core/Log.cpp is the explicit [Platform] DebugOutput=yes switch).
+# #endif, including its #else branch (the one such branch in src/Core/Log.cpp is
+# the explicit [Platform] DebugOutput=yes switch - keeping #else gated there is
+# deliberate, docs/Logging.md).  An #elif branch is *not* covered by the gate it
+# follows: it is re-evaluated from its own condition (a #elif defined(DEBUG)
+# opens a DEBUG region even when the #if branch was not a DEBUG gate).
 DEBUG_GATE_RE = re.compile(
     r"^\s*#\s*(?:ifdef\s+DEBUG\b|if\s+defined\s*\(?\s*DEBUG\b)")
+# The condition half of an #elif: an #elif has no "#if" prefix, so it needs its
+# own spelling of the same gate.  Only the defined(DEBUG) form is recognised;
+# that is the only shape the project uses and the only one the policy allows.
+DEBUG_ELIF_GATE_RE = re.compile(r"^\s*#\s*elif\s+defined\s*\(?\s*DEBUG\b")
 CONDITIONAL_RE = re.compile(r"^\s*#\s*(?:if|ifdef|ifndef)\b")
+ELIF_RE = re.compile(r"^\s*#\s*elif\b")
+ELSE_RE = re.compile(r"^\s*#\s*else\b")
 ENDIF_RE = re.compile(r"^\s*#\s*endif\b")
 
 
@@ -690,6 +711,8 @@ def check_log_policy_source() -> Check:
     """Release builds must not emit debugger output unconditionally."""
     title = "Log policy (source)"
     violations: List[str] = []
+    region_violations = 0
+    helper_violations = 0
     scanned = 0
 
     if not os.path.isdir(SRC_DIR):
@@ -707,13 +730,25 @@ def check_log_policy_source() -> Check:
             except OSError as exc:
                 return Check(False, title, "cannot read %s: %s" % (path, exc))
             scanned += 1
+            rel_path = os.path.relpath(path, REPO_ROOT).replace(os.sep, "/")
 
             # Stack of "is the innermost open region DEBUG-only?" flags.  An
-            # #else/#elif keeps the flag of the region it continues, which is
-            # what makes the documented Log.cpp helper acceptable: its release
-            # branch is unreachable without the explicit INI opt-in.
+            # #elif recomputes the flag from its own condition (D-14: a
+            # '#elif defined(DEBUG)' branch is a DEBUG region even if the #if
+            # before it was not a DEBUG gate).  An #else keeps the flag of the
+            # region it continues, which is what makes the documented Log.cpp
+            # helper acceptable: its release branch is unreachable without the
+            # explicit INI opt-in.
             debug_stack: List[bool] = []
             for line_number, line in enumerate(lines, 1):
+                if ELIF_RE.match(line):
+                    parent_debug = debug_stack[-2] if len(debug_stack) > 1 else False
+                    if debug_stack:
+                        debug_stack[-1] = parent_debug or bool(DEBUG_ELIF_GATE_RE.match(line))
+                    continue
+                if ELSE_RE.match(line):
+                    # Deliberate: keep the current branch's gate (docs/Logging.md).
+                    continue
                 if CONDITIONAL_RE.match(line):
                     parent_debug = debug_stack[-1] if debug_stack else False
                     debug_stack.append(parent_debug or bool(DEBUG_GATE_RE.match(line)))
@@ -722,13 +757,31 @@ def check_log_policy_source() -> Check:
                     if debug_stack:
                         debug_stack.pop()
                     continue
+                if DEBUG_OUTPUT_NEEDLE not in line:
+                    continue
                 in_debug_region = debug_stack[-1] if debug_stack else False
-                if DEBUG_OUTPUT_NEEDLE in line and not in_debug_region:
+                if rel_path != DEBUG_OUTPUT_HELPER_FILE:
+                    helper_violations += 1
                     violations.append(
-                        "%s:%d: %s" % (os.path.relpath(path, REPO_ROOT),
-                                       line_number, line.strip()))
+                        "%s:%d: %s\n        (the only allowed %s helper is %s)"
+                        % (rel_path, line_number, line.strip(),
+                           DEBUG_OUTPUT_NEEDLE, DEBUG_OUTPUT_HELPER_FILE))
+                elif not in_debug_region:
+                    region_violations += 1
+                    violations.append(
+                        "%s:%d: %s" % (rel_path, line_number, line.strip()))
 
     if violations:
+        reasons: List[str] = []
+        if region_violations:
+            reasons.append(
+                "%d call(s) to %s outside a #ifdef DEBUG region"
+                % (region_violations, DEBUG_OUTPUT_NEEDLE))
+        if helper_violations:
+            reasons.append(
+                "%d call(s) to %s outside the single allowed helper file %s"
+                % (helper_violations, DEBUG_OUTPUT_NEEDLE,
+                   DEBUG_OUTPUT_HELPER_FILE))
         extra = violations[:10]
         if len(violations) > 10:
             extra.append("... and %d more" % (len(violations) - 10))
@@ -736,14 +789,14 @@ def check_log_policy_source() -> Check:
         extra.append("(or under #ifdef DEBUG); see docs/Logging.md.")
         return Check(
             False, title,
-            "%d call(s) to %s outside a #ifdef DEBUG region (%d file(s) scanned)"
-            % (len(violations), DEBUG_OUTPUT_NEEDLE, scanned),
+            "%s (%d file(s) scanned)" % ("; ".join(reasons), scanned),
             extra)
 
     return Check(
         True, title,
         "%d source file(s) scanned; every %s call is inside a #ifdef DEBUG / "
-        "#if defined(DEBUG) region" % (scanned, DEBUG_OUTPUT_NEEDLE))
+        "#if defined(DEBUG) region of %s"
+        % (scanned, DEBUG_OUTPUT_NEEDLE, DEBUG_OUTPUT_HELPER_FILE))
 
 
 # ---------------------------------------------------------------------------
