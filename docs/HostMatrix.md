@@ -2,7 +2,7 @@
 
 VentureCore is designed to sit *next to* existing platform DLLs rather than
 replace or extend them.  This document defines which hosts are required, how each
-one is detected, what v0.3.0-experimental does with it, and which support tier the
+one is detected, what v0.4.0-experimental does with it, and which support tier the
 detection resolves to.
 
 Source of truth: `src/Core/HostDetect.h`, `src/Core/HostDetect.cpp` and the
@@ -10,7 +10,7 @@ Source of truth: `src/Core/HostDetect.h`, `src/Core/HostDetect.cpp` and the
 
 ## Matrix
 
-| Host | Module checked | Requirement | Detected by | v0.3.0 behaviour | Tier |
+| Host | Module checked | Requirement | Detected by | v0.4.0 behaviour | Tier |
 | --- | --- | --- | --- | --- | --- |
 | `gamemd.exe` (Yuri's Revenge 1.001) | - | **required** | the process itself; hook addresses are tied to this build | host executable; the platform runs inside it | - |
 | SyringeEx | `Syringe.exe` | **required** | the `SyringeFeatures` flags (`ESPModification`, `ZFPreservation`, `ReladdrInstructionFixup`) set by SyringeEx at injection | **gate**: if the flags are not all set, the platform shows a message box and terminates the game - it refuses to run under an older Syringe | T0 base |
@@ -69,7 +69,7 @@ log and the configured `[Platform] LineagePolicy` decides what happens:
 without our features - while `warn` only logs the conflict.  See
 `docs/Lineage.md` for the marker, the scan and the exact log lines.
 
-## v0.3.0 limitations
+## v0.4.0 limitations
 
 * No functional dependency on any optional host: the base starts at T0 and does
   nothing host-specific.  Host detection exists so derived platforms can gate
@@ -113,4 +113,4 @@ The platform's event channel (`0x70-0x7F`, see `docs/EventChannel.md`) is a
 * Phobos interop (opt-in calls into Phobos extensions).
 * AE (Ares extensions) support.
 
-None of these are in v0.3.0-experimental; see `README.md` for the full roadmap.
+None of these are in v0.4.0-experimental; see `README.md` for the full roadmap.

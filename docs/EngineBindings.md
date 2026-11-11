@@ -435,7 +435,7 @@ the level semantics, the measured cost and the hot-path rules.  The binding side
    instructions and `address + size` must be the next instruction.
 5. When the YRpp pin changes, follow `docs/Updating.md`.
 
-## Limits in v0.3.0-experimental
+## Limits in v0.4.0-experimental
 
 * The savegame trailer persists extension state (see `docs/SaveFormat.md`); it is
   not a general savegame fork - the engine's own object format is untouched.

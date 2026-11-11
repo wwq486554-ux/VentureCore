@@ -106,12 +106,12 @@ DEFAULT_CATALOGUE = os.path.join(REPO_ROOT, "docs", "HookCatalogue.md")
 PLATFORM_NAME = "VentureCore"
 
 # The version strings expected in the image (src/Core/PlatformVersion.h).  The
-# version resource writes VC_VERSION_DISPLAY ("v0.3.0.0-experimental"), which
-# contains the long version "0.3.0.0" as a substring, so the first entry also
+# version resource writes VC_VERSION_DISPLAY ("v0.4.0.0-experimental"), which
+# contains the long version "0.4.0.0" as a substring, so the first entry also
 # covers the resource text.  The second entry is kept for a configurable
 # prerelease spelling; see check_version_strings() for why both encodings of
 # the version are required.
-VERSION_STRINGS: Tuple[str, ...] = ("0.3.0.0", "0.3.0-experimental")
+VERSION_STRINGS: Tuple[str, ...] = ("0.4.0.0", "0.4.0-experimental")
 
 # The three-gate YRpp pin (src/Core/EnginePin.h).
 YRPP_PIN = "c6c522f77b58508588d9a8652c53356e4aef7a96"

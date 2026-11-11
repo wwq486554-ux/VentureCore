@@ -11,7 +11,7 @@ scripts).
 
 It is a template, not a mod: it deliberately contains **no gameplay features**.
 
-> **Status: v0.3.0-experimental** - an empty base plus two Example modules.  The
+> **Status: v0.4.0-experimental** - an empty base plus two Example modules.  The
 > base machinery (startup, logging, config, extension storage with savegame
 > persistence, event channel, command registration, lineage detection, host
 > detection) is implemented; the automated checks for each layer are named in
@@ -100,7 +100,7 @@ named with it (an in-game run is still the only end-to-end check - see
 
 ## Not in this sample (roadmap)
 
-These are **planned, not implemented**; do not expect them from a v0.3.0 DLL:
+These are **planned, not implemented**; do not expect them from a v0.4.0 DLL:
 
 1. **T1-T3 host-specific features** - behaviour that only runs when Ares /
    Phobos / Kratos / Kaleidoscope are present.
@@ -293,7 +293,7 @@ VentureCore 是一个 MIT 授权的“起始基座/模板”：复制仓库 → 
 编译成你自己的单一平台 DLL，不需要改 Ares / Phobos / Kratos，也不用重复造
 启动、日志、INI、宿主检测、功能开关、扩展存储、存档、事件、命令这些基础设施。
 
-当前版本 `v0.3.0-experimental` 是**空基座 + 两个示例模块**：示例只统计 UnitClass
+当前版本 `v0.4.0-experimental` 是**空基座 + 两个示例模块**：示例只统计 UnitClass
 的创建/销毁、读取一个 rules 键，没有任何玩法功能。基座各层均已实现，每层对应的
 自动化检查写在本 README 与 `docs/` 里；这些检查不能替代一次实机运行：
 日志分级、`<Platform>.ini`、rules/art INI 读取与同名键接管、宿主矩阵、血统互斥、

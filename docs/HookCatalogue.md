@@ -25,7 +25,7 @@ The table is machine-read.  Keep these rules when editing it:
   `gamemd.exe` build (Yuri's Revenge 1.001, as pinned by the build target).  A
   different executable build will not match these addresses.
 
-## v0.3.0-experimental hook table
+## v0.4.0-experimental hook table
 
 | 地址 | size | 名称 | 用途 | 备注 |
 | --- | --- | --- | --- | --- |
@@ -84,7 +84,7 @@ the instruction listing and check it against the ecosystem conventions.
    unrelated patches along.
 5. Rebuild, then run `python3 scripts/verify_build.py`.
 
-## Planned hook sites (not implemented in v0.3.0-experimental)
+## Planned hook sites (not implemented in v0.4.0-experimental)
 
 The following are roadmap items only - they are **not** in the table above and
 **not** in the DLL yet.  When one is implemented it moves into the table.

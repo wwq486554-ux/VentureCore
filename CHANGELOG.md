@@ -5,9 +5,88 @@ All notable changes to VentureCore are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 The project uses a pre-1.0 version scheme: `0.<MINOR>.<PATCH>-<suffix>`, where the
 suffix (`experimental`, `alpha`, ...) marks a non-stable sample and is carried in
-the DLL version resource (`v0.3.0.0-experimental`).
+the DLL version resource (`v0.4.0.0-experimental`).
 
-## [0.3.0-experimental] - unreleased
+## [0.4.0-experimental] - 2026-11-11
+
+Hardening release over 0.3.0: the ten "recommended" findings of the independent
+blind review's Batch B are fixed, plus three latent problems found while
+implementing them.  Still **no gameplay features**: installing the DLL does not
+change the game.
+
+**Behaviour changes for derived platforms and users:**
+
+- a **lineage-refused DLL is now inert**: it keeps its hook windows and exports,
+  but every engine-facing handler returns immediately, its command is not added
+  to the engine command list, its event types are neither sized nor dispatched,
+  the rules-INI takeover purges nothing and the savegame hooks do not touch the
+  stream (C-06).  `docs/Lineage.md` documents "inert, not absent".
+- command names are compared **case-insensitively**; a second command that
+  differs only in case is rejected, and the registration hook warns when a
+  command collides with one already in the engine list.  Platform commands must
+  carry the platform prefix (`docs/Commands.md`, C-08).
+- a platform-owned INI key in an **engine core section** (`[General]`, ...) is
+  refused with a warning instead of being registered and purged (C-09); own
+  keys belong in a platform-namespaced section (`docs/Ini.md`).
+- extension type registrations are validated; a rejected type id is poisoned and
+  can no longer be fetched through a wrong `static_cast` (D-22/A-18).
+
+### Added
+
+- `src/Core/PlatformGate.h`: process-wide `Pending` / `Running` / `Refused`
+  startup gate checked by the engine-facing handlers and by the command/event
+  registries; `Platform::IsStarted()`.
+- `RegisterExtType` validation (type-id range, self-reference, conflicting base,
+  cyclic/deep chain; forward references stay legal), a problem sink routed to
+  the platform logger, poisoned type ids and a bounded parent-chain walk.
+- `CommandNameEquals` (ASCII case fold), case-insensitive registry lookup and a
+  registration-hook summary/collision log.
+- INI takeover deny-list of engine core sections (`IsReservedEngineSection`), a
+  warn sink and `RefusedKeyCount()` reported in the takeover startup line.
+- Tooling: `run_tests.sh` fails on a missing/empty `tests/` and runs every test
+  under a per-test timeout (`VCS_TEST_TIMEOUT`, default 120 s); `verify_build.py`
+  log-policy scan understands `#elif` and enforces the single debugger helper in
+  `src/Core/Log.cpp`; `abi_probe.sh` takes the toolchain lock and prints the four
+  previously omitted `EngineCompat.h` types; `build_linux.sh` warns about a
+  `src/**/*.cpp` that is not in `VentureCore.vcxproj`; the benchmark builds with
+  the release `/O2 /Oy` flags and rebuilds on any Ext source/header change.
+- 75 new test assertions across `test_ext_hierarchy`, `test_lineage`,
+  `test_commands`, `test_event_channel` and `test_engine_ini`.
+
+### Changed
+
+- Parent-chain walks are depth-limited (a broken table fails loudly instead of
+  hanging); `ExtStoreDesc` lost the dead `count` callback.
+- `docs/Lineage.md`, `docs/Commands.md`, `docs/Ini.md`, `docs/EngineBindings.md`,
+  `docs/Logging.md` and `scripts/linux/README.md` describe the new behaviour.
+- Store benchmark numbers re-measured with `/O2 /Oy` (faster across the board;
+  the "Before" column is historical and directional only).
+
+### Fixed
+
+- D-22: a copy-pasted `TypeId`/`BaseTypeId` pair could silently capture the
+  built-in hierarchy mapping and produce a wrong `static_cast` (the build has no
+  RTTI).
+- A-18: a cyclic parent-chain registration could hang a lookup; dead field.
+- D-06: the lineage scan's Windows-directory skip matched a bare string prefix,
+  so modules under `C:\WindowsApps\` or `C:\Windows.old\` were skipped - a
+  false negative for the mutual-exclusion safety net.  The match is now on a
+  directory boundary.
+- D-12/D-13/D-14/D-16/D-17: the verification tooling no longer reports a pass
+  while doing nothing (empty test directory, `#elif` blind spot, unlocked ABI
+  probe, unoptimised benchmark with stale inputs, silently uncompiled sources).
+- Two latent `TEST_DEPS` issues: a test/benchmark source without the comment
+  aborted the runner under `set -o pipefail` (found while implementing D-13/D-17).
+
+### Real-game verification (2026-11-11, YR + Ares)
+
+- normal path, one match + save/load + the example command: command and event
+  path live, savegame trailer appended, load restored 44/44 adopted extensions;
+- lineage-refuse, two copies of the DLL: both copies log the conflict and stay
+  disabled - no command registration, no event-channel answers, no rules-INI
+  purge, no savegame writes; the game itself runs normally.
+
+## [0.3.0-experimental] - 2026-11-11
 
 Hardening release over 0.2.0: every Batch-A finding of the independent blind
 review that blocked a public release is fixed (one BLOCKER, eight MAJOR, the

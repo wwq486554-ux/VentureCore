@@ -10,7 +10,7 @@
 #include "EnginePin.h"
 
 #define VC_VERSION_MAJOR    0
-#define VC_VERSION_MINOR    3
+#define VC_VERSION_MINOR    4
 #define VC_VERSION_REVISION 0
 #define VC_VERSION_PATCH    0
 #define VC_PRERELEASE_SUFFIX "experimental"
