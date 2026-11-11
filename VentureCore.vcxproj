@@ -58,6 +58,7 @@
     <ClInclude Include="src\Core\PlatformVersion.h" />
     <ClInclude Include="src\Core\PlatformPaths.h" />
     <ClInclude Include="src\Core\Platform.h" />
+    <ClInclude Include="src\Core\PlatformGate.h" />
     <ClInclude Include="src\Core\Log.h" />
     <ClInclude Include="src\Core\LogPolicy.h" />
     <ClInclude Include="src\Core\Ini.h" />

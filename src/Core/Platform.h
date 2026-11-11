@@ -19,6 +19,13 @@ bool Startup();
 
 void Shutdown();
 
+// True once Startup() completed successfully.  The engine-facing hook handlers
+// (Engine/Hooks.*.cpp) return immediately when it is false, so a platform that
+// was refused (lineage conflict under LineagePolicy=refuse) does not touch the
+// engine's command list, event stream, rules INI or savegame stream even though
+// SyringeEx keeps its hooks installed (C-06).  See src/Core/PlatformGate.h.
+bool IsStarted();
+
 // Lifecycle entry points called by the engine hooks in Engine/Hooks.Lifecycle.cpp.
 void OnScenarioClear();
 void OnInvalidatePointer(AbstractClass* pInvalid, bool removed);

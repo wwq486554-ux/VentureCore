@@ -6,6 +6,7 @@
 
 #include "Command/Commands.h"
 #include "Core/Log.h"
+#include "Core/Platform.h"
 #include "Event/EventChannel.h"
 
 #include <cstddef>
@@ -176,6 +177,11 @@ const Registrar g_registrar;
 // this is the only point where the final, engine-visible list is known.
 DEFINE_HOOK(0x533066, Venture_Commands_Register, 0x6)
 {
+	// C-06: a refused platform (lineage conflict) keeps its hooks installed but
+	// must not act on the engine.
+	if (!venture::IsStarted())
+		return 0;
+
 	Log::Info("commands: %zu command(s) in the platform registry", venture::Commands::Count());
 
 	for (std::size_t index = 0; index < venture::Commands::Count(); ++index)

@@ -13,6 +13,7 @@
 #include <cwchar>
 
 #include "Command/Commands.h"
+#include "Core/PlatformGate.h"
 
 namespace
 {
@@ -159,6 +160,37 @@ int __cdecl main(void)
 	Check(Commands::IsEnabled("Venture Second Command"), "second command reports enabled");
 	Check(!Commands::SetEnabled("No Such Command", true), "unknown name cannot be enabled");
 	Check(Commands::Count() == 2, "enable/disable never changes the registry size");
+
+	// --- startup gate (C-06) ------------------------------------------------
+	// Static registrars populate the registry while the gate is pending; once the
+	// platform has refused to start the registry is closed, so a refused DLL can
+	// never reach the engine's command list.
+	std::printf("-- startup gate --\n");
+	Check(venture::PlatformGate::IsPending(), "the gate starts pending");
+	venture::PlatformGate::MarkRefused();
+	Check(Commands::Register({
+			"Venture Gated Command",
+			L"Venture Gated Command",
+			L"VentureCore",
+			L"Registered after a refusal - must be rejected",
+			true,
+			&HandlerOne})
+			== RegisterResult::PlatformRefused,
+		"a refused platform rejects new commands");
+	Check(Commands::Count() == 2, "the rejected registration is not stored");
+	Check(Commands::Find("Venture Gated Command") == nullptr, "the refused command is not findable");
+	venture::PlatformGate::MarkRunning();
+	Check(Commands::Register({
+			"Venture Gated Command",
+			L"Venture Gated Command",
+			L"VentureCore",
+			L"Registered after the start - accepted",
+			true,
+			&HandlerOne})
+			== RegisterResult::Ok,
+		"a running platform accepts commands");
+	Check(Commands::Count() == 3, "the running registration is stored");
+	venture::PlatformGate::MarkPending();
 
 	std::printf("\n");
 	if (g_failures == 0)

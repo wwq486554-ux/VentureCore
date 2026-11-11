@@ -36,12 +36,16 @@ public:
 	{
 		Ok = 0,
 		InvalidCommand, // a required field is missing
+		PlatformRefused, // the platform refused to start (lineage conflict) - the registry is closed
 		DuplicateName,  // the name is already registered
 	};
 
 	// Registers one command descriptor (copied into the registry).  Names are
 	// unique and compared exactly; registration happens at load time, before
-	// the engine asks for the command list.
+	// the engine asks for the command list.  Once the platform has refused to
+	// start (PlatformGate::IsRefused()) the registry is closed and every call
+	// returns PlatformRefused: a refused DLL must not reach the engine's command
+	// list (C-06).
 	static RegisterResult Register(const Command& command);
 
 	static std::size_t Count();

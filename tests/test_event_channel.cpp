@@ -19,6 +19,7 @@
 #include <cstdio>
 #include <cstring>
 
+#include "Core/PlatformGate.h"
 #include "Event/EventChannel.h"
 
 namespace
@@ -441,6 +442,27 @@ int __cdecl main(void)
 		Check(failClosedSeen == 256 - 0x2F - static_cast<int>(venture::EventChannelSlotCount),
 			"exhaustive check saw fail-closed for every other byte value");
 	}
+
+	// --- startup gate (C-06) ------------------------------------------------
+	// The registry is filled at load time while the gate is pending; a refused
+	// platform closes it, so a refused DLL neither claims an event number nor
+	// answers for one (the engine-facing hooks are gated too).
+	std::printf("-- startup gate --\n");
+	Check(venture::PlatformGate::IsPending(), "the gate starts pending");
+	venture::PlatformGate::MarkRefused();
+	Check(Channel::Register(0x72, "Venture_Test_Refused", 1, &ResponderA)
+			== RegisterResult::PlatformRefused,
+		"a refused platform rejects new event registrations");
+	Check(Channel::Count() == venture::EventChannelSlotCount,
+		"the rejected registration does not change the count");
+	Check(Channel::Register(0x70, "Venture_Test_Refused", 4, &ResponderA)
+			== RegisterResult::PlatformRefused,
+		"the refusal is reported before the duplicate check");
+	venture::PlatformGate::MarkRunning();
+	Check(Channel::Register(0x70, "Venture_Test_Running", 4, &ResponderA)
+			== RegisterResult::AlreadyRegistered,
+		"a running platform reports the normal duplicate result");
+	venture::PlatformGate::MarkPending();
 
 	std::printf("\n");
 	if (g_failures == 0)

@@ -9,7 +9,8 @@ in a process.
 
 Source of truth: `include/platform/Lineage.h` (the public C ABI),
 `src/Core/Lineage.h` / `src/Core/Lineage.cpp` (the pure decision and the module
-scan) and the startup wiring in `src/Core/Platform.cpp`.
+scan), the startup wiring in `src/Core/Platform.cpp` and the process-wide
+`src/Core/PlatformGate.h` that the engine-facing handlers check.
 
 ## Why only one lineage DLL per process
 
@@ -139,26 +140,34 @@ append `[savegame id differs from this build: 0x...]`: even under `warn` the
 mismatch means the two modules cannot share savegame data, so it must be
 recorded.
 
-What `refuse` does *not* do:
+What `refuse` does:
 
 * no message box, no `ExitProcess`, no crash - the game keeps running with the
   platform's feature initialization skipped;
 * the platform log is written immediately (one synchronous `WriteFile` per line;
   no `FlushFileBuffers`) and is closed after the error line, so the reason is on
   disk;
-* `g_started` in `src/Core/Platform.cpp` is never set: `Shutdown()` and the
-  scenario-clear / pointer-invalidation entry points are no-ops, no feature was
-  initialized, and no *saveable* store is registered (a save appends nothing; a
-  load drops any trailer state it finds).
+* the startup gate (`src/Core/PlatformGate.h`) becomes **Refused**, and every
+  engine-facing handler checks it and returns immediately.  A refused copy does
+  **not** act on the engine:
+  * its command is not appended to the engine command list (it does not appear in
+    Options -> Keyboard);
+  * its event types are neither sized nor dispatched by the channel hooks, and the
+    event channel startup block is not logged;
+  * the rules-INI takeover does not purge anything - a refused DLL must not delete
+    keys a host platform is about to read;
+  * the savegame hooks return before touching the stream, and the swizzle
+    adapters are not installed into the engine services;
+  * `Shutdown()` and the scenario-clear / pointer-invalidation entry points are
+    no-ops, no feature was initialized, and no *saveable* store is registered.
 
 It is *not* identical to not installing the DLL: SyringeEx still injects it and
-installs every engine hook, and registrations that happen before `Startup()` still
-take effect - the example command is appended to the engine command list (it
-appears in Options -> Keyboard) and the example event `0x70` is registered and
-sized/dispatched by the channel hooks.  Everything that depends on `Startup()`
-having completed stays inert; making those static registrations respect the
-refusal is a tracked follow-up, so do not rely on a refused DLL being invisible to
-the engine.
+installs every engine hook, the manifest's hook windows are patched, and the
+DLL's C exports (the lineage marker) are visible.  The static initializers also
+still populate the process's own command/event registries - but the registries
+reject new entries once the gate is Refused and the engine-facing consumers are
+gated, so none of that reaches the game.  Treat a refused DLL as inert rather
+than absent: it costs the hook windows and the module, and it does nothing else.
 
 `warn` is meant for diagnosis only: the second DLL's features *will* fight over
 the extension table and the savegame trailer, so do not ship a configuration

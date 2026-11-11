@@ -5,6 +5,7 @@
 #include <Objidl.h>
 
 #include "Core/Log.h"
+#include "Core/Platform.h"
 #include "Core/SaveTrailer.h"
 #include "Engine/EngineCompat.h"
 #include "Ext/ExtSwizzle.h"
@@ -91,6 +92,10 @@ void RegisterIdentityEngine(void* const was, void* const is)
 
 void EnsureEngineServices()
 {
+	// A refused platform installs no engine services either (C-06).
+	if (!venture::IsStarted())
+		return;
+
 	static bool installed = false;
 	if (installed)
 		return;
@@ -103,6 +108,11 @@ void EnsureEngineServices()
 // The engine starts loading a savegame: open the deferred-allocation window.
 DEFINE_HOOK(0x67E44D, Venture_LoadGame_Begin, 0x5)
 {
+	// C-06: a refused platform (lineage conflict) keeps its hooks installed but
+	// must not act on the engine.
+	if (!venture::IsStarted())
+		return 0;
+
 	EnsureEngineServices();
 	venture::SaveTrailer::EnterLoadWindow();
 	return 0;
@@ -113,6 +123,11 @@ DEFINE_HOOK(0x67E44D, Venture_LoadGame_Begin, 0x5)
 // path again; the close is idempotent, so the success path is unaffected.
 DEFINE_HOOK(0x67E4B1, Venture_LoadGame_Failed1, 0x5)
 {
+	// C-06: a refused platform (lineage conflict) keeps its hooks installed but
+	// must not act on the engine.
+	if (!venture::IsStarted())
+		return 0;
+
 	venture::SaveTrailer::ExitLoadWindow();
 	return 0;
 }
@@ -120,6 +135,11 @@ DEFINE_HOOK(0x67E4B1, Venture_LoadGame_Failed1, 0x5)
 // A-04: second StgOpenStorage failure of LoadGame.
 DEFINE_HOOK(0x67E53A, Venture_LoadGame_Failed2, 0x5)
 {
+	// C-06: a refused platform (lineage conflict) keeps its hooks installed but
+	// must not act on the engine.
+	if (!venture::IsStarted())
+		return 0;
+
 	venture::SaveTrailer::ExitLoadWindow();
 	return 0;
 }
@@ -127,6 +147,11 @@ DEFINE_HOOK(0x67E53A, Venture_LoadGame_Failed2, 0x5)
 // A-04: COM-method failure of LoadGame.
 DEFINE_HOOK(0x67E595, Venture_LoadGame_Failed3, 0x5)
 {
+	// C-06: a refused platform (lineage conflict) keeps its hooks installed but
+	// must not act on the engine.
+	if (!venture::IsStarted())
+		return 0;
+
 	venture::SaveTrailer::ExitLoadWindow();
 	return 0;
 }
@@ -139,6 +164,11 @@ DEFINE_HOOK(0x67E595, Venture_LoadGame_Failed3, 0x5)
 // `setge al`.  AL == 0 means the save failed - do not append.
 DEFINE_HOOK(0x67D1B4, Venture_SaveGame_Trailer, 0x6)
 {
+	// C-06: a refused platform (lineage conflict) keeps its hooks installed but
+	// must not act on the engine.
+	if (!venture::IsStarted())
+		return 0;
+
 	GET(long, status, EAX);
 	if ((status & 0xFFu) == 0)
 		return 0;
@@ -158,6 +188,11 @@ DEFINE_HOOK(0x67D1B4, Venture_SaveGame_Trailer, 0x6)
 // End of the engine's load routine: find and read the tail block.
 DEFINE_HOOK(0x67F7C8, Venture_LoadGame_Trailer, 0x5)
 {
+	// C-06: a refused platform (lineage conflict) keeps its hooks installed but
+	// must not act on the engine.
+	if (!venture::IsStarted())
+		return 0;
+
 	GET(IStream*, pStm, ESI);
 	EnsureEngineServices();
 	venture::SaveTrailer::Read(pStm);
@@ -168,6 +203,11 @@ DEFINE_HOOK(0x67F7C8, Venture_LoadGame_Trailer, 0x5)
 // extensions to their (now remapped) owners.
 DEFINE_HOOK(0x67E685, Venture_LoadGame_PostSwizzle, 0x5)
 {
+	// C-06: a refused platform (lineage conflict) keeps its hooks installed but
+	// must not act on the engine.
+	if (!venture::IsStarted())
+		return 0;
+
 	EnsureEngineServices();
 	venture::SaveTrailer::FinishLoad();
 
@@ -183,6 +223,11 @@ DEFINE_HOOK(0x67E685, Venture_LoadGame_PostSwizzle, 0x5)
 // idempotent second close (A-07).
 DEFINE_HOOK(0x67E68A, Venture_LoadGame_End, 0x5)
 {
+	// C-06: a refused platform (lineage conflict) keeps its hooks installed but
+	// must not act on the engine.
+	if (!venture::IsStarted())
+		return 0;
+
 	venture::SaveTrailer::ExitLoadWindow();
 	return 0;
 }

@@ -5,6 +5,7 @@
 #include "Core/Ini.h"
 #include "Core/IniTakeover.h"
 #include "Core/Log.h"
+#include "Core/Platform.h"
 #include "Core/PlatformConfig.h"
 #include "Engine/EngineCompat.h"
 
@@ -193,6 +194,11 @@ void ResolveTakeoverSwitch()
 // return address at ESP and the INI pointer at ESP+4.
 DEFINE_HOOK(0x6686C0, Venture_RulesClass_Init, 0x6)
 {
+	// C-06: a refused platform (lineage conflict) keeps its hooks installed but
+	// must not act on the engine.
+	if (!venture::IsStarted())
+		return 0;
+
 	GET_STACK(CCINIClass*, pINI, 0x4);
 	if (!pINI)
 		return 0;

@@ -1,5 +1,7 @@
 #include "Event/EventChannel.h"
 
+#include "Core/PlatformGate.h"
+
 #include <cstring>
 
 // ---------------------------------------------------------------------------
@@ -52,6 +54,10 @@ EventChannel::RegisterResult EventChannel::Register(
 	const std::uint32_t payloadSize,
 	const Responder responder)
 {
+	// A refused platform keeps no registration path to the engine (C-06).
+	if (PlatformGate::IsRefused())
+		return RegisterResult::PlatformRefused;
+
 	if (!IsValidEventType(type))
 		return RegisterResult::InvalidType;
 	if (!name || !*name)

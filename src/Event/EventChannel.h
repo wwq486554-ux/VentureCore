@@ -99,6 +99,7 @@ public:
 	enum class RegisterResult : std::uint8_t
 	{
 		Ok = 0,
+		PlatformRefused,   // the platform refused to start (lineage conflict) - the registry is closed
 		InvalidType,       // outside 0x70-0x7F
 		InvalidName,       // null or empty
 		InvalidPayloadSize, // 0, or larger than the engine's 104-byte union
@@ -110,7 +111,10 @@ public:
 	// Registers one event type.  The type must be in the channel range, unused,
 	// the name non-empty and the payload size in 1..104 bytes.  Registration
 	// happens at load time (before the engine can raise or dispatch an event),
-	// so Dispatch() can be lock-free.
+	// so Dispatch() can be lock-free.  Once the platform has refused to start
+	// (PlatformGate::IsRefused()) the registry is closed and every call returns
+	// PlatformRefused: the engine-facing hooks also stay inert, so a refused DLL
+	// neither claims an event number nor answers for it (C-06).
 	static RegisterResult Register(
 		Type type,
 		const char* name,

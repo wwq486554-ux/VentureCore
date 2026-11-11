@@ -2,6 +2,7 @@
 #include <Helpers/Macro.h>
 
 #include "Core/Log.h"
+#include "Core/Platform.h"
 #include "Event/EventChannel.h"
 
 #include <cstddef>
@@ -137,6 +138,11 @@ void LogEventChannelStartup()
 // and the original instructions still have to execute afterwards (return 0).
 DEFINE_HOOK(0x4C6CC8, Venture_Event_Dispatch, 0x5)
 {
+	// C-06: a refused platform (lineage conflict) keeps its hooks installed but
+	// must not act on the engine.
+	if (!venture::IsStarted())
+		return 0;
+
 	GET(EventClass*, pEvent, ESI);
 
 	if (pEvent)
@@ -178,6 +184,11 @@ DEFINE_HOOK(0x4C6CC8, Venture_Event_Dispatch, 0x5)
 // engine's out-of-bounds table read can never run for an unregistered type.
 DEFINE_HOOK(0x64B6FE, Venture_Event_GetSize1, 0x6)
 {
+	// C-06: a refused platform (lineage conflict) keeps its hooks installed but
+	// must not act on the engine.
+	if (!venture::IsStarted())
+		return 0;
+
 	const std::uint8_t type = static_cast<std::uint8_t>(R->EDI() & 0xFFu);
 	const venture::EventChannel::WireSize wire = venture::EventChannel::GetWireSize(type);
 
@@ -194,6 +205,11 @@ DEFINE_HOOK(0x64B6FE, Venture_Event_GetSize1, 0x6)
 // well, exactly like the reference implementation does.
 DEFINE_HOOK(0x64BE7D, Venture_Event_GetSize2, 0x6)
 {
+	// C-06: a refused platform (lineage conflict) keeps its hooks installed but
+	// must not act on the engine.
+	if (!venture::IsStarted())
+		return 0;
+
 	const std::uint8_t type = static_cast<std::uint8_t>(R->EDI() & 0xFFu);
 	const venture::EventChannel::WireSize wire = venture::EventChannel::GetWireSize(type);
 
@@ -210,6 +226,11 @@ DEFINE_HOOK(0x64BE7D, Venture_Event_GetSize2, 0x6)
 // GetEventSize site 3 (ESI = event type).
 DEFINE_HOOK(0x64C30E, Venture_Event_GetSize3, 0x6)
 {
+	// C-06: a refused platform (lineage conflict) keeps its hooks installed but
+	// must not act on the engine.
+	if (!venture::IsStarted())
+		return 0;
+
 	const std::uint8_t type = static_cast<std::uint8_t>(R->ESI() & 0xFFu);
 	const venture::EventChannel::WireSize wire = venture::EventChannel::GetWireSize(type);
 

@@ -6,6 +6,7 @@
 #include "Core/Lineage.h"
 #include "Core/Log.h"
 #include "Core/PlatformConfig.h"
+#include "Core/PlatformGate.h"
 #include "Core/PlatformVersion.h"
 #include "Ext/ExtensionIndex.h"
 
@@ -20,7 +21,8 @@ namespace
 {
 unsigned g_hostMask = 0;
 venture::Tier g_tier = venture::Tier::T0;
-bool g_started = false;
+// Whether the platform may act lives in the pure, header-only PlatformGate
+// (Pending / Running / Refused), so engine-free registries can check it too.
 
 // Adapts the variadic FeatureContext logging callback to the platform logger.
 void FeatureLog(const char* const format, ...)
@@ -72,8 +74,13 @@ namespace venture
 {
 bool Startup()
 {
-	if (g_started)
+	// The gate is tri-state: a second ExeRun after a successful start is a no-op,
+	// and a refusal is final for the process (do not retry the scan and write a
+	// second startup block to the log).
+	if (PlatformGate::IsRunning())
 		return true;
+	if (PlatformGate::IsRefused())
+		return false;
 
 	RequireSyringeEx();
 
@@ -128,7 +135,6 @@ bool Startup()
 	char hostNames[256] = {};
 	HostMaskToString(g_hostMask, hostNames, static_cast<DWORD>(sizeof(hostNames)));
 	Log::Info("hosts   : %s (tier %s)", hostNames, TierName(g_tier));
-	void LogEventChannelStartup(); LogEventChannelStartup();
 
 	// Lineage mutual exclusion: only one DLL of the VentureCore lineage may run
 	// in this process (two would each build their own extension table and
@@ -152,15 +158,23 @@ bool Startup()
 	}
 	else
 	{
-		// No message box: the game keeps running without our features, and every
-		// lifecycle entry point stays a no-op because g_started is never set.
+		// No message box: the game keeps running without our features.  The gate is
+		// marked Refused, so every engine-facing handler returns immediately, the
+		// command/event registries accept no new entries, and the platform leaves
+		// the engine's command list, event stream, rules INI and save stream alone
+		// (C-06).
 		Log::Error(
 			"lineage : conflicting %s-lineage DLL loaded: %s (LineagePolicy=refuse - platform stays disabled)",
 			VC_PLATFORM_NAME,
 			lineage.details.c_str());
 		Log::Close();
+		PlatformGate::MarkRefused();
 		return false;
 	}
+
+	// Only an allowed platform announces its event channel (a refused DLL logs
+	// nothing beyond the line above).
+	void LogEventChannelStartup(); LogEventChannelStartup();
 
 	// Extension types register themselves lazily (feature store construction or
 	// first Fetch); route their validation problems to the logger before any
@@ -191,24 +205,24 @@ bool Startup()
 	Log::Info("%s startup complete - %d feature(s) registered", VC_PLATFORM_NAME, FeatureCount());
 	Log::Info("================================================================");
 
-	g_started = true;
+	PlatformGate::MarkRunning();
 	return true;
 }
 
 void Shutdown()
 {
-	if (!g_started)
+	if (!IsStarted())
 		return;
 
 	Log::Info("%s shutting down", VC_PLATFORM_NAME);
 	ExtensionIndex::Instance().ClearAll();
 	Log::Close();
-	g_started = false;
+	PlatformGate::MarkPending();
 }
 
 void OnScenarioClear()
 {
-	if (!g_started)
+	if (!IsStarted())
 		return;
 
 	// A failed savegame load returns from the engine's LoadGame before its normal
@@ -234,10 +248,15 @@ void OnScenarioClear()
 
 void OnInvalidatePointer(AbstractClass* const pInvalid, const bool removed)
 {
-	if (!g_started)
+	if (!IsStarted())
 		return;
 
 	ExtensionIndex::Instance().NotifyInvalidPointer(pInvalid, removed);
+}
+
+bool IsStarted()
+{
+	return PlatformGate::IsRunning();
 }
 
 unsigned HostMask()

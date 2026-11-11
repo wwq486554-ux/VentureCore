@@ -1,5 +1,7 @@
 #include "Command/Commands.h"
 
+#include "Core/PlatformGate.h"
+
 #include <cstring>
 #include <vector>
 
@@ -37,6 +39,10 @@ namespace venture
 {
 Commands::RegisterResult Commands::Register(const Command& command)
 {
+	// A refused platform keeps no registration path to the engine (C-06).
+	if (PlatformGate::IsRefused())
+		return RegisterResult::PlatformRefused;
+
 	if (!command.name || !*command.name
 		|| !command.uiName
 		|| !command.uiCategory
