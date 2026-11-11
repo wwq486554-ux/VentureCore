@@ -39,7 +39,7 @@ struct VentureLineageInfo
     unsigned magic;       // VENTURE_LINEAGE_MAGIC = 0x564C4E31 ("VLN1")
     unsigned abiVersion;  // VENTURE_LINEAGE_ABI_VERSION = 1
     const char* name;     // VC_PLATFORM_NAME, e.g. "VentureCore"
-    const char* version;  // VC_VERSION_DISPLAY, e.g. "v0.4.0.0-experimental"
+    const char* version;  // VC_VERSION_DISPLAY, e.g. "v1.0.0.0"
     unsigned savegameId;  // VC_SAVEGAME_ID, e.g. 0x56433031
 };
 
@@ -128,11 +128,11 @@ lineage : no other VentureCore-lineage DLL loaded
 ```
 
 ```text
-lineage : conflicting VentureCore-lineage DLL loaded: OtherPlatform.dll (VentureCore v0.4.0.0-experimental, abi 1, savegame 0x56433031) (LineagePolicy=warn - continuing)
+lineage : conflicting VentureCore-lineage DLL loaded: OtherPlatform.dll (VentureCore v1.0.0.0, abi 1, savegame 0x56433031) (LineagePolicy=warn - continuing)
 ```
 
 ```text
-lineage : conflicting VentureCore-lineage DLL loaded: OtherPlatform.dll (VentureCore v0.4.0.0-experimental, abi 1, savegame 0x56433031) (LineagePolicy=refuse - platform stays disabled)
+lineage : conflicting VentureCore-lineage DLL loaded: OtherPlatform.dll (VentureCore v1.0.0.0, abi 1, savegame 0x56433031) (LineagePolicy=refuse - platform stays disabled)
 ```
 
 When a conflicting module reports a **different** `savegameId`, the details

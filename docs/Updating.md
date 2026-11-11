@@ -95,10 +95,11 @@ Version metadata lives in `src/Core/PlatformVersion.h`:
 
 * `VC_VERSION_MAJOR`, `VC_VERSION_MINOR`, `VC_VERSION_REVISION`,
   `VC_VERSION_PATCH`,
-* `VC_PRERELEASE_SUFFIX` - `"experimental"` for sample builds; comment it out for a
-  stable release (the version resource then drops the `VS_FF_PRERELEASE` flag).
+* `VC_PRERELEASE_SUFFIX` - a non-stable suffix (`"experimental"`, `"alpha"`, ...);
+  **commented out for a stable release** (as in 1.0.0: the display has no suffix and
+  the version resource does not set `VS_FF_PRERELEASE`).
 
-Everything else is derived: the log banner (`v0.4.0.0-experimental`), the version
+Everything else is derived: the log banner (`v1.0.0.0`), the version
 resource strings, the build-type string (`LOCAL` / `NIGHTLY` / `RELEASE`, set by
 `--build-type`).  Do not edit the generated strings by hand.
 
@@ -108,7 +109,7 @@ Checklist for a version bump:
 2. Add a `CHANGELOG.md` section for the new version, dated.
 3. Rebuild with `--build-type RELEASE` for a release artefact and run
    `python3 scripts/verify_build.py` (it expects the `VERSION_STRINGS` at the top
-   of that file - currently `0.4.0.0` / `0.4.0-experimental`; update them in the
+   of that file - currently `1.0.0.0` / `1.0.0`; update them in the
    same change as the version bump).
 4. Run `scripts/linux/load_probe.sh`.
 5. Verify the version resource of the produced DLL, e.g.
@@ -156,14 +157,14 @@ When an optional host changes its module name, or a new host is added:
 
 ## 7. Planned increments (roadmap)
 
-The implemented base layers as of `v0.4.0-experimental` are: savegame persistence
+The implemented base layers as of `v1.0.0` are: savegame persistence
 (header-first sequential frame, payload v2), event channel (fail-closed sizing),
 command registration, lineage detection and logging control - each with its own
 document in `docs/`.  Every layer has automated checks on this machine (named in
 `README.md` and the per-layer document), but those checks load the DLL or drive
 engine-free code; they do not replace an in-game run.  The remaining increments are
 **T1-T3 host-specific features**, **Phobos interop** and **AE**; none of these
-exist in `v0.4.0-experimental`.  When one lands, this document gains the sections
+exist in `v1.0.0`.  When one lands, this document gains the sections
 it needs (host-specific hook selection and AE handling in particular must be
 written down before the first release that ships them).
 

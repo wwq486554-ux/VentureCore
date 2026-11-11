@@ -3,17 +3,18 @@
 // ---------------------------------------------------------------------------
 // Platform version metadata, shared by the C++ code and src/version.rc.
 //
-// Bump these when publishing. Keep VC_PRERELEASE_SUFFIX defined for experimental
-// builds and comment it out for a stable release.
+// Bump these when publishing.  The base is stable as of 1.0.0; VC_PRERELEASE_SUFFIX
+// is commented out for a stable release (define it - e.g. "experimental" - for a
+// non-stable build; the version resource then sets VS_FF_PRERELEASE).
 // ---------------------------------------------------------------------------
 
 #include "EnginePin.h"
 
-#define VC_VERSION_MAJOR    0
-#define VC_VERSION_MINOR    4
+#define VC_VERSION_MAJOR    1
+#define VC_VERSION_MINOR    0
 #define VC_VERSION_REVISION 0
 #define VC_VERSION_PATCH    0
-#define VC_PRERELEASE_SUFFIX "experimental"
+// #define VC_PRERELEASE_SUFFIX "experimental"
 
 #define VC_STR_INNER(x) #x
 #define VC_STR(x) VC_STR_INNER(x)

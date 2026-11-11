@@ -68,7 +68,7 @@ control (`docs/Logging.md`).  A savegame payload carries a signature of the
 platform's saveable store set, so adding, removing, reordering or re-versioning a
 saveable store makes older saves incompatible: their extension state is dropped
 (the game's own state still loads, there is no migration).  Do **not** plan around
-the systems the base does not have yet in v0.4.0: T1-T3 host-specific features,
+the systems the base does not have yet in v1.0.0: T1-T3 host-specific features,
 Phobos interop and AE are roadmap-only.
 
 ## 4. Add a feature module

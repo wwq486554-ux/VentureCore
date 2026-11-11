@@ -1,7 +1,7 @@
 # Logging
 
 The platform writes one append-only log file next to `rules.ini`:
-`<Platform>.log` (`VentureCore.log` for the sample build).  This document covers
+`<Platform>.log` (`VentureCore.log` for this base).  This document covers
 the format, the configuration keys, the cost model behind the level filter and
 sampling, and the automated source assertion that keeps a RELEASE build from
 talking to a debugger.
@@ -34,7 +34,7 @@ Every successful open writes one header line first, before any of the historic
 startup lines:
 
 ```text
-=== VentureCore v0.4.0.0-experimental (RELEASE) process 1234 started 2026-11-09 23:59:59 ===
+=== VentureCore v1.0.0.0 (RELEASE) process 1234 started 2026-11-09 23:59:59 ===
 ```
 
 It carries the platform name, the full version display string, the build type

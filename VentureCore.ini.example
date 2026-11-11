@@ -11,7 +11,7 @@
 ; yes/no, true/false, on/off and 1/0.  An unreadable value falls back to the
 ; default.
 ;
-; The platform is a starter base: this sample contains no gameplay features, so
+; The platform is a starter base: this base contains no gameplay features, so
 ; turning switches on or off does not change the game yet.  The [Features]
 ; section exists so derived platforms have a stable place to add their switches.
 ;

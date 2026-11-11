@@ -11,14 +11,18 @@ scripts).
 
 It is a template, not a mod: it deliberately contains **no gameplay features**.
 
-> **Status: v0.4.0-experimental** - an empty base plus two Example modules.  The
-> base machinery (startup, logging, config, extension storage with savegame
-> persistence, event channel, command registration, lineage detection, host
-> detection) is implemented; the automated checks for each layer are named in
-> this README and in `docs/` and do not replace the in-game check.  Host-specific
-> (T1-T3) features, Phobos interop and AE are roadmap items, listed below.
+> **Status: v1.0.0 (stable, 2026-11-11)** - a feature-complete starter base plus two
+> Example modules.  The base machinery (startup, logging, config, extension
+> storage with savegame persistence, event channel, command registration, lineage
+> detection, host detection, the YRpp binding gate and the verification tooling)
+> is implemented, in-game verified with Ares (one match plus a save/load round
+> trip), and was hardened by an independent blind review before this release:
+> every blocking and recommended finding was fixed (`CHANGELOG.md`).  The
+> automated checks for each layer are named in this README and in `docs/` and do
+> not replace the in-game check.  Host-specific (T1-T3) features, Phobos interop
+> and AE are **additive roadmap items**, not part of 1.0 - see below.
 
-## What this sample provides
+## What this base provides
 
 Everything below is implemented; the automated checks that cover a layer are
 named with it (an in-game run is still the only end-to-end check - see
@@ -45,12 +49,14 @@ named with it (an in-game run is still the only end-to-end check - see
   (see `docs/Ini.md`).
 * **Host detection matrix** - optional hosts (Ares, Phobos, Kratos,
   Kaleidoscope) are detected by loaded module, logged, and mapped to support
-  tiers T0-T3.  No functional dependency on any of them in this sample.
+  tiers T0-T3.  No functional dependency on any of them in this base.
 * **Lineage mutual exclusion** - the DLL exports a lineage marker; a second DLL of
   the same lineage is detected at startup, named in the log and (by default)
   refused, so the second copy never initializes features and there is no second
-  extension table or trailer writer.  Its static registrations (commands, event
-  types) still happen - see `docs/Lineage.md` for the exact split.
+  extension table or trailer writer.  A refused copy is **inert**: its command is
+  not added to the engine command list, its event types are neither sized nor
+  dispatched, the rules-INI takeover purges nothing and the savegame hooks do not
+  touch the stream (see `docs/Lineage.md`).
 * **Compile-time feature registry** - `FeatureDescriptor`, `FeatureContext`,
   `FeatureRegistrar`, `VENTURE_REGISTER_FEATURE` (`include/platform/Feature.h`);
   one `[Features]` switch per feature (`iniKey`, default on) plus `minTier`
@@ -98,14 +104,35 @@ named with it (an in-game run is still the only end-to-end check - see
 * **Build system** - Windows `VentureCore.sln` (VS2022, v143) and Linux scripts
   that drive the real MSVC toolchain under Wine.
 
-## Not in this sample (roadmap)
+## Not in this base (roadmap)
 
-These are **planned, not implemented**; do not expect them from a v0.4.0 DLL:
+These are **planned additive increments** for later 1.x releases; a v1.0.0 DLL
+does not contain them:
 
 1. **T1-T3 host-specific features** - behaviour that only runs when Ares /
    Phobos / Kratos / Kaleidoscope are present.
 2. **Phobos interop** - deliberately calling into Phobos extensions.
 3. **AE** (Ares extensions) - not handled.
+
+## Stability and versioning
+
+`v1.0.0` is the first stable release of the base.  Within 1.x the following are
+**stable contracts** (changing one requires a major release or a documented
+migration):
+
+* the source-level feature API in `include/platform/` (`FeatureDescriptor`,
+  `FeatureContext`, `VENTURE_REGISTER_FEATURE`, and the lineage marker ABI);
+* the savegame frame layout `[magic][formatVersion=2][size][crc32][payload]` and
+  the payload's store-set signature (bumping one store's `dataVersion` is a
+  *store* change, not a base change);
+* the event type range `0x70-0x7F` and the event record layout (this is a
+  same-build contract - every peer must run a build that agrees with it);
+* the hook table in `docs/HookCatalogue.md` for the supported `gamemd.exe` build;
+* the `<Platform>.ini` keys documented below.
+
+The base is feature-complete for its purpose.  New base layers and the roadmap
+items above are **additive 1.x increments**; bug fixes ship as 1.0.x.  The
+roadmap items are explicitly **not** promised by 1.0.
 
 ## Requirements
 
@@ -168,19 +195,25 @@ described above.
 
 ## Verifying a build
 
-Three checks work on this machine; the in-game check is a human step:
+Five automatic checks cover this machine; the in-game run is a human step:
 
 ```bash
-# static: parses docs/HookCatalogue.md and verifies the built PE image (7 checks)
-python3 scripts/verify_build.py                 # defaults to Release/VentureCore.dll
-
-# dynamic: loads the DLL into a tiny Win32 host under Wine, resolves the exports,
-# checks the lineage marker and proves the two-copy lineage conflict
-scripts/linux/load_probe.sh
-
-# unit tests: engine-free test programs, compiled with the same toolchain
-scripts/linux/run_tests.sh
+python3 scripts/verify_build.py         # static: PE image, hook table, exports,
+                                        # version strings, feature id, log policy (7 checks)
+scripts/linux/load_probe.sh             # dynamic: LoadLibrary, exports, lineage conflict
+scripts/linux/run_tests.sh              # engine-free unit tests, same toolchain
+python3 scripts/linux/check_eol.py      # line endings vs .gitattributes
+scripts/linux/abi_probe.sh              # optional: engine ABI sizes pinned by EngineCompat.h
 ```
+
+Reference result of the v1.0.0 source (`--clean`, MSVC 14.44 under Wine,
+2026-11-11): **23 translation units, 0 warnings; `verify_build.py` 7/7;
+`load_probe.sh` PASS (exports 7/7); `run_tests.sh` 10/10; `check_eol.py` 17
+rules / 0 mismatch; `abi_probe.sh` 20 types, every `sizeof` assertion matches.**
+`scripts/linux/bench_store.sh` runs the extension-store microbenchmark and
+`scripts/linux/test_fetch_yrpp.sh` / `scripts/linux/verify_incremental.sh` cover
+the tooling.  A rebuilt DLL is not byte-identical to a released one (embedded
+timestamp / debug path), so the checks - not a file hash - are the provenance.
 
 `verify_build.py` checks the PE format (PE32/i386), the `.syhks00` hook records
 against the catalogue, the distinct hook handler exports, the version strings
@@ -211,6 +244,11 @@ must be done by a human.  See `docs/HookCatalogue.md` for what each hook does an
    startup sequence: process header, platform/version, git revision, YRpp pin, INI
    status, log level, hosts and tier, lineage, feature switches, registered
    commands and event types, then `startup complete`.
+
+Upgrading from `0.4.0-experimental` is a drop-in replacement: 1.0.0 contains no
+hook, savegame, event, command or INI changes (only the version string and the
+documentation were finalised).  Saves written by 0.3.0+ keep their extension
+state.
 
 The base has no unload hook; every line is written immediately with a synchronous
 `WriteFile` (no user-mode buffering), so a normal process exit does not lose
@@ -248,7 +286,7 @@ Booleans accept `yes/no`, `true/false`, `on/off` and `1/0`.  See
 | `src/Ext/` | extension storage (`AbstractExt`, `ExtHierarchy`, `ExtensionStore`, `ExtensionIndex`, savegame streams) |
 | `src/Event/` | the platform event channel |
 | `src/Command/` | player-command registry |
-| `src/Features/Example/` | the two sample feature modules |
+| `src/Features/Example/` | the two Example feature modules |
 | `src/version.rc` | VERSIONINFO resource |
 | `tests/` | engine-free unit tests and the store microbenchmark |
 | `docs/` | the documentation set (see below) |
@@ -293,19 +331,21 @@ VentureCore 是一个 MIT 授权的“起始基座/模板”：复制仓库 → 
 编译成你自己的单一平台 DLL，不需要改 Ares / Phobos / Kratos，也不用重复造
 启动、日志、INI、宿主检测、功能开关、扩展存储、存档、事件、命令这些基础设施。
 
-当前版本 `v0.4.0-experimental` 是**空基座 + 两个示例模块**：示例只统计 UnitClass
-的创建/销毁、读取一个 rules 键，没有任何玩法功能。基座各层均已实现，每层对应的
-自动化检查写在本 README 与 `docs/` 里；这些检查不能替代一次实机运行：
+当前版本 **`v1.0.0`（首个正式版，2026-11-11）** 是**空基座 + 两个示例模块**：示例只统计
+UnitClass 的创建/销毁、读取一个 rules 键，没有任何玩法功能。基座各层均已实现，并经独立盲审
+（全部阻塞/建议项已修）与实机验证（Ares，一局 + 存读档）；每层对应的自动化检查写在本 README
+与 `docs/` 里，这些检查不能替代一次实机运行：
 日志分级、`<Platform>.ini`、rules/art INI 读取与同名键接管、宿主矩阵、血统互斥、
 扩展存储（继承链 + 存档持久化，顺序帧 + store 集签名）、事件通道 `0x70–0x7F`、
 玩家命令注册。指针失效通知目前只有计数/清理，没有订阅 API。
-T1–T3 宿主专属功能、Phobos Interop、AE 仍是 roadmap（见上方 "Not in this sample"）。
+T1–T3 宿主专属功能、Phobos Interop、AE 仍是 roadmap（后续 1.x 增量，见上方 "Not in this base"）。
 硬依赖只有 `gamemd.exe` + SyringeEx；Ares / Phobos / Kratos / Kaleidoscope 只做检测和日志。
 构建与自检：
 
 ```bash
 scripts/linux/build_linux.sh Release --build-type RELEASE   # Wine 里的真 MSVC
 python3 scripts/verify_build.py                            # 静态自检，7 项全 PASS
+python3 scripts/linux/check_eol.py                         # 行尾检查（17 条规则）
 scripts/linux/load_probe.sh                                # Wine 下 LoadLibrary 探针
 scripts/linux/run_tests.sh                                 # 单元测试（引擎无关）
 scripts/linux/bench_store.sh                               # 扩展存储微基准

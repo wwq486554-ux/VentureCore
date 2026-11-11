@@ -3,9 +3,30 @@
 All notable changes to VentureCore are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
-The project uses a pre-1.0 version scheme: `0.<MINOR>.<PATCH>-<suffix>`, where the
-suffix (`experimental`, `alpha`, ...) marks a non-stable sample and is carried in
-the DLL version resource (`v0.4.0.0-experimental`).
+The project uses semantic versioning.  The pre-1.0 samples carried an
+`-experimental` suffix in the DLL version resource; **`1.0.0` (2026-11-11) is the
+first stable release** and the stable contracts are listed in `README.md`.
+
+## [1.0.0] - 2026-11-11
+
+**First stable release of the base.**  No functional change from
+`0.4.0-experimental`: the same hooks, savegame format, event protocol, command
+registry and INI contracts.  This release marks the base as stable, finalises the
+version scheme (no `-experimental` suffix; the version resource no longer sets
+`VS_FF_PRERELEASE`) and gives `README.md` a release-quality description
+(stability contract, verification baseline, roadmap wording).
+
+Stable contracts as of 1.0.0: the `include/platform/` feature API, the savegame
+frame and payload signature, the `0x70-0x7F` event range/record layout, the hook
+table for the supported `gamemd.exe` build, and the `<Platform>.ini` keys.  The
+roadmap items (T1-T3 host-specific features, Phobos interop, AE) are additive
+1.x increments and are not part of 1.0.
+
+Reference verification (2026-11-11, `--clean`, MSVC 14.44 under Wine): 23
+translation units, 0 warnings; `verify_build.py` 7/7; `load_probe.sh` PASS
+(exports 7/7); `run_tests.sh` 10/10; `check_eol.py` 17 rules / 0 mismatch;
+`abi_probe.sh` 20 types, every `sizeof` assertion matches; real game (YR + Ares)
+normal path and lineage-refuse scenario both pass.
 
 ## [0.4.0-experimental] - 2026-11-11
 

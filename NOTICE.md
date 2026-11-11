@@ -54,7 +54,7 @@ section layout is used as a documented interface fact:
 
 These are optional host platforms.  VentureCore detects whether their modules
 are loaded in the game process and logs the result, and then resolves a support
-tier from that (see `docs/HostMatrix.md`).  In v0.2.0-experimental there is:
+tier from that (see `docs/HostMatrix.md`).  In v1.0.0 there is:
 
 * no code copied or vendored from any of them;
 * no link dependency on any of them;
@@ -64,12 +64,12 @@ tier from that (see `docs/HostMatrix.md`).  In v0.2.0-experimental there is:
 The extension-storage layer deliberately does **not** use the engine's unused
 `AbstractClass` extension slot, because DLLs in the Phobos lineage own that slot.
 Features that later interoperate with a host platform must be opt-in and are
-planned, not part of this sample (see `README.md` roadmap).
+planned, not part of the base (see `README.md` roadmap).
 
 ## No Phobos code
 
-All source code in this repository was written for VentureCore.  v0.2.0-experimental
-contains no Phobos source code and does not call Phobos extensions.
+All source code in this repository was written for VentureCore.  v1.0.0 contains
+no Phobos source code and does not call Phobos extensions.
 
 ## Game and trademarks
 
