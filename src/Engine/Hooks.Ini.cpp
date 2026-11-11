@@ -181,10 +181,11 @@ void ResolveTakeoverSwitch()
 	const bool enabled = venture::Ini::GetBool(VC_SECTION_PLATFORM, "IniTakeover", true);
 	venture::IniTakeover::SetEnabled(enabled);
 	venture::Log::Info(
-		"[IniTakeover] [%s] IniTakeover=%s (%zu owned key(s) registered)",
+		"[IniTakeover] [%s] IniTakeover=%s (%zu owned key(s) registered, %zu refused by the deny-list)",
 		VC_SECTION_PLATFORM,
 		enabled ? "yes" : "no",
-		venture::IniTakeover::OwnedKeyCount());
+		venture::IniTakeover::OwnedKeyCount(),
+		venture::IniTakeover::RefusedKeyCount());
 }
 }
 

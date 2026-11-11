@@ -1,5 +1,7 @@
 #include "Core/IniTakeover.h"
 
+#include <cstddef>
+#include <cstdio>
 #include <cstring>
 #include <string>
 #include <vector>
@@ -27,6 +29,40 @@ std::vector<venture::IniTakeover::RulesIniObserver>& Observers()
 }
 
 bool g_enabled = true;
+std::size_t g_refusedKeys = 0;
+venture::IniTakeover::WarnSink g_warnSink = nullptr;
+
+void Warn(const char* const message)
+{
+	const venture::IniTakeover::WarnSink sink = g_warnSink;
+	if (sink)
+		sink(message);
+}
+
+// Sections the engine parses and reads itself (rules(md).ini).  Owning a key in
+// one of them would silently remove it before the engine reads it, so the
+// takeover refuses these (C-09).  Case-insensitive; keep the list to sections
+// the engine/host platforms are known to consume.
+const char* const kReservedEngineSections[] = {
+	"General",
+	"Basic",
+	"AudioVisual",
+	"MultiPlayer",
+	"Maximums",
+	"AI",
+	"Colors",
+	"Countries",
+	"Sides",
+	"CrateRules",
+	"CombatDamage",
+	"Radiation",
+	"ElevationModel",
+	"WallModel",
+	"SpecialFlags",
+	"Powerups",
+	"LandCharacteristics",
+	"MouseCursors",
+};
 
 // ASCII-only case folding. The engine's INI names are ASCII, and a local
 // implementation keeps this translation unit free of <cctype>/locale behaviour.
@@ -60,6 +96,31 @@ bool IsEmpty(const std::string& text)
 
 namespace venture
 {
+void IniTakeover::SetWarnSink(const WarnSink sink)
+{
+	g_warnSink = sink;
+}
+
+bool IniTakeover::IsReservedEngineSection(const char* const section)
+{
+	const std::string foldedSection = Folded(section);
+	if (IsEmpty(foldedSection))
+		return false;
+
+	for (const char* const reserved : kReservedEngineSections)
+	{
+		if (foldedSection == Folded(reserved))
+			return true;
+	}
+
+	return false;
+}
+
+std::size_t IniTakeover::RefusedKeyCount()
+{
+	return g_refusedKeys;
+}
+
 void IniTakeover::RegisterOwnedKey(const char* const section, const char* const key)
 {
 	const std::string foldedSection = Folded(section);
@@ -68,6 +129,25 @@ void IniTakeover::RegisterOwnedKey(const char* const section, const char* const 
 	// Both parts are mandatory: a half-empty pair can never be removed reliably.
 	if (IsEmpty(foldedSection) || IsEmpty(foldedKey))
 		return;
+
+	// A platform-owned key in an engine core section would be deleted before the
+	// engine reads it - refuse and report instead of silently breaking the game
+	// or a host platform (C-09).
+	if (IsReservedEngineSection(section))
+	{
+		++g_refusedKeys;
+		char message[320] = {};
+		std::snprintf(
+			message,
+			sizeof(message),
+			"INI takeover: [%s] %s refused as platform-owned - '%s' is an engine core section; "
+			"put platform keys in a platform-namespaced section (see docs/Ini.md)",
+			section,
+			key,
+			section);
+		Warn(message);
+		return;
+	}
 
 	for (const OwnedKey& existing : OwnedKeys())
 	{

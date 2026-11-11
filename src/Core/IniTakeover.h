@@ -82,6 +82,12 @@ public:
 	// Called once per rules-INI load, before the purge, with the real parsed INI.
 	using RulesIniObserver = void (*)(IReader& ini);
 
+	// Reported when a registration is refused by the deny-list.  The core is
+	// logger-free, so the platform points this at Log::Warn at startup; the
+	// message pointer is only valid for the duration of the call.
+	using WarnSink = void (*)(const char* message);
+	static void SetWarnSink(WarnSink sink);
+
 	struct ApplyResult
 	{
 		std::size_t observed;   // rules-INI observers notified
@@ -89,10 +95,23 @@ public:
 		std::size_t registered; // keys in the platform registry
 	};
 
+	// Sections the engine itself owns ([General], [Basic], [AudioVisual], ...).
+	// A feature that registers one of these as platform-owned would delete an
+	// engine key from the parsed rules INI before the engine reads it - the exact
+	// hazard the takeover exists to prevent (C-09).  Case-insensitive.
+	static bool IsReservedEngineSection(const char* section);
+
 	// Registers a (section, key) pair the platform owns. Case-insensitive and
 	// de-duplicating; call it from the owning feature's Initialize() while the
-	// feature switch is on. Empty or null arguments are ignored.
+	// feature switch is on. Empty or null arguments are ignored, and a reserved
+	// engine section (IsReservedEngineSection) is refused and reported through
+	// the warn sink instead of being registered.  Own keys live in a
+	// platform-namespaced section (e.g. [VentureCore] / [Examples]), never in an
+	// engine core section.
 	static void RegisterOwnedKey(const char* section, const char* key);
+
+	// Number of registrations the deny-list refused (diagnostics).
+	static std::size_t RefusedKeyCount();
 
 	// Number of distinct owned keys in the registry.
 	static std::size_t OwnedKeyCount();

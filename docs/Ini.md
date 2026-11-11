@@ -110,6 +110,20 @@ rules INI before any other consumer reads it.
   case-insensitive and duplicate registrations are collapsed. When a feature is
   switched off it registers nothing, so its keys stay visible to hosts (that is
   what switching the feature off means).
+* **Namespace guard (C-09)** - platform-owned keys live in a
+  **platform-namespaced section** (`[VentureCore]`, or a feature namespace such as
+  `[Examples]`), never in one of the engine's own rule sections. Registering a key
+  in a reserved engine section is **refused**: the key is not registered, nothing
+  is purged for it, a `Log::Warn` line is written and the refusal is counted in
+  the takeover startup line. The reserved list is the engine's core rules
+  sections: `[General]`, `[Basic]`, `[AudioVisual]`, `[MultiPlayer]`,
+  `[Maximums]`, `[AI]`, `[Colors]`, `[Countries]`, `[Sides]`, `[CrateRules]`,
+  `[CombatDamage]`, `[Radiation]`, `[ElevationModel]`, `[WallModel]`,
+  `[SpecialFlags]`, `[Powerups]`, `[LandCharacteristics]`, `[MouseCursors]`
+  (case-insensitive, `IniTakeover::IsReservedEngineSection`).  Without the guard
+  a mis-registered vanilla key would be silently deleted from the parsed INI
+  before the engine reads it - the takeover would break the game instead of
+  protecting it.
 * **Purge** - the engine hook removes the registered pairs from the parsed rules
   INI. Only registered pairs are touched; every other key, including an unowned
   key in the same section, is left alone. The purge is idempotent, and it runs
@@ -159,8 +173,11 @@ the INI object internally consistent.
 
 Log lines (from the takeover hook):
 
-* `[IniTakeover] [Platform] IniTakeover=yes|no (N owned key(s) registered)` -
-  info, once, at the first rules load;
+* `[IniTakeover] [Platform] IniTakeover=yes|no (N owned key(s) registered,
+  M refused by the deny-list)` - info, once, at the first rules load;
+* `[IniTakeover] ... refused as platform-owned - '<section>' is an engine core
+  section; put platform keys in a platform-namespaced section` - warn, once per
+  refused registration;
 * `[IniTakeover] rules INI purge: N owned key(s) removed (...)` - debug, only
   when something was actually removed (enable `[Platform] VerboseLogging=yes` or
   a debug log level to see it).
@@ -196,6 +213,9 @@ no clean load site exists).
 * **Only registered pairs.** A key that a feature forgets to register, or
   registers after the rules INI has been parsed, stays visible to hosts. Register
   from `Initialize()`.
+* **Engine core sections are never owned.** See the namespace guard above: a
+  platform that wants to change a vanilla rule has to read it and act on it, not
+  hide it from the engine.
 * **Concrete entries only.** The purge removes the concrete entry. If a mod
   uses an INI inheritance mechanism (a host platform's `$Inherits` read-layer
   feature) to alias the same key from a parent section, that read-layer resolution

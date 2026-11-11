@@ -3,6 +3,7 @@
 #include "Core/FeatureRegistry.h"
 #include "Core/HostDetect.h"
 #include "Core/Ini.h"
+#include "Core/IniTakeover.h"
 #include "Core/Lineage.h"
 #include "Core/Log.h"
 #include "Core/PlatformConfig.h"
@@ -42,6 +43,13 @@ void FeatureLog(const char* const format, ...)
 void ExtTypeProblemLog(const char* const message)
 {
 	venture::Log::Error("%s", message);
+}
+
+// Refused INI-takeover registrations are reported through this sink for the same
+// reason: the takeover core is logger-free (C-09).
+void IniTakeoverWarnLog(const char* const message)
+{
+	venture::Log::Warn("%s", message);
 }
 
 // The platform is only supported under SyringeEx: the injected trampolines rely
@@ -178,8 +186,11 @@ bool Startup()
 
 	// Extension types register themselves lazily (feature store construction or
 	// first Fetch); route their validation problems to the logger before any
-	// feature is initialized (D-22).
+	// feature is initialized (D-22).  The rules-INI takeover registrations happen
+	// in the same feature initialization, so route their deny-list warnings too
+	// (C-09).
 	SetExtTypeProblemSink(&ExtTypeProblemLog);
+	IniTakeover::SetWarnSink(&IniTakeoverWarnLog);
 
 	FeatureContext context{};
 	context.platformName = VC_PLATFORM_NAME;

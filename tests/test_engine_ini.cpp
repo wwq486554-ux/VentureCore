@@ -21,6 +21,13 @@
 namespace
 {
 int g_failures = 0;
+int g_warnings = 0;
+
+void CaptureWarning(const char* const message)
+{
+	if (message && *message)
+		++g_warnings;
+}
 
 void Check(const bool ok, const char* const what)
 {
@@ -267,7 +274,27 @@ int __cdecl main()
 	IniTakeover::RegisterOwnedKey("Examples", "");
 	Check(IniTakeover::OwnedKeyCount() == 1, "null or empty registrations are ignored");
 
-	IniTakeover::RegisterRulesIniObserver(&ObserveRulesIni);
+	// -- 3b. deny-list: engine core sections are refused (C-09) --------------
+	Check(IniTakeover::IsReservedEngineSection("General"), "General is a reserved engine section");
+	Check(IniTakeover::IsReservedEngineSection("general"), "the deny-list is case-insensitive");
+	Check(IniTakeover::IsReservedEngineSection("MultiPlayer"), "MultiPlayer is a reserved engine section");
+	Check(IniTakeover::IsReservedEngineSection("AudioVisual"), "AudioVisual is a reserved engine section");
+	Check(!IniTakeover::IsReservedEngineSection("Examples"), "a feature section is not reserved");
+	Check(!IniTakeover::IsReservedEngineSection("VentureCore"), "a platform namespace is not reserved");
+	Check(!IniTakeover::IsReservedEngineSection("MyMod"), "an unknown section is not reserved");
+	Check(!IniTakeover::IsReservedEngineSection(nullptr), "null is not reserved");
+	Check(!IniTakeover::IsReservedEngineSection(""), "empty is not reserved");
+
+	IniTakeover::SetWarnSink(&CaptureWarning);
+	const std::size_t keysBeforeDenyList = IniTakeover::OwnedKeyCount();
+	IniTakeover::RegisterOwnedKey("General", "BuildSpeed");
+	IniTakeover::RegisterOwnedKey("audioVISUAL", "DetailLevel");
+	Check(IniTakeover::OwnedKeyCount() == keysBeforeDenyList,
+		"an owned key in an engine core section is not registered");
+	Check(IniTakeover::RefusedKeyCount() == 2, "both reserved-section registrations are counted as refused");
+	Check(g_warnings == 2, "both refusals are reported through the warn sink");
+	IniTakeover::SetWarnSink(nullptr);
+
 	IniTakeover::RegisterRulesIniObserver(&ObserveRulesIni);
 	IniTakeover::RegisterRulesIniObserver(nullptr);
 
@@ -290,6 +317,14 @@ int __cdecl main()
 	// -- 6. (c) only owned keys are removed ----------------------------------
 	Check(ini.Has("Examples", "UnitCounterCap"), "an unowned key in the same section survives the purge");
 	Check(ini.Has("General", "UnitCounterLog"), "the same key name in another section survives the purge");
+
+	// -- 6b. a reserved engine key survives the purge (the refusal holds) ----
+	FakeIni reservedIni;
+	reservedIni.Set("General", "BuildSpeed", "keep-me");
+	IniTakeover::RegisterOwnedKey("General", "BuildSpeed");
+	const IniTakeover::ApplyResult reservedResult = IniTakeover::Apply(nullptr, reservedIni);
+	Check(reservedResult.purged == 0, "nothing is purged for a refused engine-section key");
+	Check(reservedIni.Has("General", "BuildSpeed"), "the engine's own key survives the purge");
 
 	// -- 7. (f) purge is idempotent ------------------------------------------
 	const IniTakeover::ApplyResult second = IniTakeover::Apply(&ini, ini);
