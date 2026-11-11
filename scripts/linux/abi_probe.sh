@@ -7,6 +7,9 @@
 #
 # Requires the same Wine/MSVC environment as the normal build; the probe is
 # compiled into Release/IntDir/linux/abi-probe/ (build output, not committed).
+# Like the build, the test runner and the other probes it takes the shared
+# toolchain lock (D-16): two concurrent cl.exe runs in one Wine prefix compete
+# for MSVC's temp files and can produce a bogus compile failure.
 
 set -euo pipefail
 
@@ -17,6 +20,7 @@ source "$VCS_LINUX_DIR/common.sh"
 command -v wine >/dev/null 2>&1 || vcs_die "wine is not installed"
 
 vcs_locate_toolchain
+vcs_lock_toolchain
 vcs_wine_env
 
 work_dir="$VCS_ROOT/Release/IntDir/linux/abi-probe"
@@ -28,6 +32,7 @@ probe_exe="$work_dir/abi_probe.exe"
 cat > "$probe_src" <<'EOF'
 #include <windows.h>
 #include <YRPP.h>
+#include <EventClass.h>
 #include <cstdio>
 
 #define SHOW(type) printf("sizeof(%s) = 0x%X\n", #type, static_cast<unsigned>(sizeof(type)))
@@ -49,6 +54,13 @@ int __cdecl main()
 	SHOW(RulesClass);
 	SHOW(ScenarioClass);
 	SHOW(CCINIClass);
+
+	// Every type src/Engine/EngineCompat.h asserts (D-16: these four used to be
+	// missing from the probe even though the header pins them).
+	SHOW(INIClass);
+	SHOW(INIClass::INIEntry);
+	SHOW(INIClass::INISection);
+	SHOW(EventClass);
 
 	SHOW(REGISTERS);
 	return 0;

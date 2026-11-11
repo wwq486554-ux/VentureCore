@@ -120,14 +120,13 @@ Rule: whenever a new engine type or field is used, add its assertion here as
 well.  A YRpp update that silently moves a field must fail the build, not corrupt
 a savegame at run time.
 
-`scripts/linux/abi_probe.sh` prints the sizes of the engine classes it includes
-(`AbstractClass`, `ObjectClass`, `FootClass`, `TechnoClass`, `UnitClass`,
-`BulletClass`, `UnitTypeClass`, `WeaponTypeClass`, `WarheadTypeClass`,
-`CCINIClass`, `REGISTERS` and a few more) so a YRpp update can be re-checked
-against the assertions; it does **not** print `INIClass`, `INIClass::INIEntry`,
-`INIClass::INISection` or `EventClass` - those four assertions are taken from the
-pinned YRpp layout and are enforced by the build, not re-measured by the probe
-yet (adding them to the probe is a tracked follow-up).
+`scripts/linux/abi_probe.sh` prints the size of every type
+`src/Engine/EngineCompat.h` pins: the engine class hierarchy, the INI container
+types (`INIClass`, `CCINIClass`, `INIClass::INIEntry`, `INIClass::INISection`),
+`EventClass` and the Syringe `REGISTERS` frame (plus a few extra types for
+context).  A YRpp update can therefore be re-checked against every assertion.
+The probe is compiled with the same MSVC toolset under Wine and takes the shared
+toolchain lock like the build and the other probes.
 
 ## Rules / art INI binding
 

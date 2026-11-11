@@ -156,11 +156,9 @@ directory), `--fix-eol` (normalise line endings first).  `--build-type` selects
 the `RELEASE` / `NIGHTLY` preprocessor define; a build without it is a local
 build and is labelled `LOCAL` in the log and version resource.
 
-The build, the unit tests, the benchmark and the load probe share one Wine
-toolchain, so they take an flock in the prefix and serialise against each other
-(including across git worktrees that share the prefix).  The ABI probe
-(`scripts/linux/abi_probe.sh`) compiles a tiny probe with `cl.exe` directly and
-does not take that lock, so do not run it while a build is in progress.
+The build, the unit tests, the benchmark, the ABI probe and the load probe share
+one Wine toolchain, so they take an flock in the prefix and serialise against
+each other (including across git worktrees that share the prefix).
 
 ### Windows
 
