@@ -19,6 +19,12 @@
 
 namespace venture
 {
+// Case-insensitive ASCII comparison of two engine command names.  Command names
+// are a single flat namespace shared by the engine and every injected DLL, so a
+// second name that differs only in case would be ambiguous in the keyboard
+// configuration (C-08).  Null pointers compare equal only to each other.
+bool CommandNameEquals(const char* left, const char* right);
+
 struct Command
 {
 	const char* name;             // unique name (CommandClass::GetName); the keyboard config keys on it
@@ -41,8 +47,11 @@ public:
 	};
 
 	// Registers one command descriptor (copied into the registry).  Names are
-	// unique and compared exactly; registration happens at load time, before
-	// the engine asks for the command list.  Once the platform has refused to
+	// unique and compared case-insensitively (the engine and every injected DLL
+	// share one flat command namespace); registration happens at load time,
+	// before the engine asks for the command list.  Name every platform command
+	// with the platform prefix (e.g. "Venture Test Command") - see
+	// docs/Commands.md.  Once the platform has refused to
 	// start (PlatformGate::IsRefused()) the registry is closed and every call
 	// returns PlatformRefused: a refused DLL must not reach the engine's command
 	// list (C-06).
@@ -53,7 +62,8 @@ public:
 	// Iteration in registration order; nullptr for an index >= Count().
 	static const Command* At(std::size_t index);
 
-	// Lookup by engine name; nullptr when the name is not registered.
+	// Lookup by engine name, case-insensitively; nullptr when the name is not
+	// registered.
 	static const Command* Find(const char* name);
 
 	// Runtime switch for a registered command (the same flag the engine

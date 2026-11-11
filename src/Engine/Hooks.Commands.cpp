@@ -170,6 +170,30 @@ struct Registrar
 const Registrar g_registrar;
 }
 
+// Name of an engine command already in the engine's list whose name equals
+// `name` case-insensitively, or nullptr.  Our hook appends at 0x533066, which is
+// *mid-way* through the engine's own registration: an entry found here was
+// registered before us, so the engine's first-match lookup and hotkey path see
+// it first and our command is the one that silently loses (C-08).
+const char* FindEngineCommandConflict(const char* const name)
+{
+	if (!name || !*name)
+		return nullptr;
+
+	for (int index = 0; index < CommandClass::Array.Count; ++index)
+	{
+		const CommandClass* const pExisting = CommandClass::Array[index];
+		if (!pExisting)
+			continue;
+
+		const char* const existingName = pExisting->GetName();
+		if (existingName && venture::CommandNameEquals(existingName, name))
+			return existingName;
+	}
+
+	return nullptr;
+}
+
 // --- hook ------------------------------------------------------------------
 // Engine's command-registration callback: create one engine command object per
 // enabled descriptor and append it to the engine's command array.  The hook
@@ -183,6 +207,7 @@ DEFINE_HOOK(0x533066, Venture_Commands_Register, 0x6)
 		return 0;
 
 	Log::Info("commands: %zu command(s) in the platform registry", venture::Commands::Count());
+	int appended = 0;
 
 	for (std::size_t index = 0; index < venture::Commands::Count(); ++index)
 	{
@@ -197,6 +222,10 @@ DEFINE_HOOK(0x533066, Venture_Commands_Register, 0x6)
 			continue;
 		}
 
+		// The engine's command list is a flat, shared namespace; warn about a
+		// collision with a command that is already in it (C-08).
+		const char* const engineConflict = FindEngineCommandConflict(command->name);
+
 		PlatformCommandClass* const pCommand = GameCreate<PlatformCommandClass>(*command);
 		if (!pCommand)
 		{
@@ -210,9 +239,21 @@ DEFINE_HOOK(0x533066, Venture_Commands_Register, 0x6)
 			continue;
 		}
 
+		++appended;
 		Log::Info("commands:   \"%s\" (category \"%ls\", ui name \"%ls\") registered",
 			command->name, command->uiCategory, command->uiName);
+
+		if (engineConflict)
+		{
+			Log::Warn(
+				"commands:   \"%s\" collides with the engine command \"%s\" that was registered before "
+				"this hook - the engine's first match wins, so this command is shadowed; rename it "
+				"with the platform prefix (see docs/Commands.md)",
+				command->name,
+				engineConflict);
+		}
 	}
 
+	Log::Info("commands: %d command(s) appended to the engine command list", appended);
 	return 0;
 }

@@ -86,6 +86,17 @@ int __cdecl main(void)
 		"null handler rejected");
 	Check(Commands::Count() == 0, "rejected descriptors are not registered");
 
+	// --- name comparison (C-08) --------------------------------------------
+	std::printf("-- name comparison --\n");
+	Check(venture::CommandNameEquals("Venture Test Command", "venture test command"),
+		"names compare case-insensitively");
+	Check(!venture::CommandNameEquals("Venture Test Command", "Venture Test Command2"),
+		"a longer name is not equal");
+	Check(!venture::CommandNameEquals("Venture Test Command", "Venture Test Comman"),
+		"a shorter name is not equal");
+	Check(venture::CommandNameEquals(nullptr, nullptr), "two null names are equal");
+	Check(!venture::CommandNameEquals(nullptr, "name"), "a null name differs from a name");
+
 	// --- registration and fields -------------------------------------------
 	std::printf("-- registration --\n");
 	Check(Commands::Register({
@@ -123,6 +134,23 @@ int __cdecl main(void)
 			== RegisterResult::DuplicateName,
 		"duplicate engine name rejected");
 	Check(Commands::Count() == 1, "duplicate does not change the count");
+
+	Check(Commands::Register({
+			"venture test command",
+			L"Case variant",
+			L"Debug",
+			L"A name that differs only in case",
+			true,
+			&HandlerTwo})
+			== RegisterResult::DuplicateName,
+		"a name differing only in case is rejected as a duplicate");
+	Check(Commands::Count() == 1, "the case-variant duplicate does not change the count");
+	Check(Commands::Find("venture test command") == first, "lookup is case-insensitive");
+	Check(Commands::Find("VENTURE TEST COMMAND") == first, "lookup ignores all case differences");
+	Check(Commands::Find("Venture Test") == nullptr, "a partial name is not found");
+	Check(Commands::SetEnabled("vEnTuRe TeSt CoMmAnD", false), "enable matches case-insensitively");
+	Check(!Commands::IsEnabled("Venture Test Command"), "the case-insensitive enable took effect");
+	Check(Commands::SetEnabled("Venture Test Command", true), "re-enable restores the command");
 
 	Check(Commands::Register({
 			"Venture Second Command",

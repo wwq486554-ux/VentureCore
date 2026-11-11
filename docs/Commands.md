@@ -35,8 +35,12 @@ installs), `docs/EventChannel.md` (the event the example command raises),
    });
    ```
 
-   `Register` returns `Ok`, `InvalidCommand` (a required field is null/empty) or
-   `DuplicateName`. Names are unique and compared exactly. The descriptor struct
+   `Register` returns `Ok`, `InvalidCommand` (a required field is null/empty),
+   `PlatformRefused` (the platform refused to start, see `docs/Lineage.md` - the
+   registry is closed) or `DuplicateName`.  Names are unique and compared
+   **case-insensitively**: the engine and every injected DLL share one flat
+   command namespace, so `My Command` and `my command` are the same name and the
+   second registration is rejected.  The descriptor struct
    is copied into the registry, but its **pointers are borrowed, not deep-copied**:
    `name` / `uiName` / `uiCategory` / `uiDescription` must point at
    static-lifetime storage (string literals are the intended use) and `handler`
@@ -45,7 +49,7 @@ installs), `docs/EventChannel.md` (the event the example command raises),
    Never pass a temporary buffer such as `std::string::c_str()`.
    `Commands::At(index)` / `Commands::Count()` iterate it in registration order,
    `Find(name)` / `SetEnabled(name, on)` / `IsEnabled(name)` look one up by
-   engine name.
+   engine name, case-insensitively.
 
 2. The engine calls its command-registration callback once while it builds its
    own command list. The platform hooks that point (`0x533066`, size 6 -
@@ -61,7 +65,34 @@ installs), `docs/EventChannel.md` (the event the example command raises),
      reference `MakeCommand<T>()` helper uses in the Phobos-lineage ecosystem;
    * logs the command name, category and UI name.
 
-   A disabled entry is logged as skipped and never reaches the engine.
+   A disabled entry is logged as skipped and never reaches the engine.  The hook
+   finishes with a summary line (`N command(s) appended to the engine command
+   list`).
+
+### Name collisions and the platform prefix
+
+The engine's command list is one flat namespace shared by the engine and every
+injected DLL, and lookups are first-match.  The platform's hook appends at
+`0x533066`, which is **mid-way** through the engine's own registration, so:
+
+* a same-named command that was registered **before** this hook wins - the
+  platform's command is shadowed (the hook logs a `collides with the engine
+  command ...` warning for exactly this case);
+* a same-named command registered **after** this hook loses to the platform's
+  command (nothing can detect that at this point - a later engine registration
+  is not observable from the hook).
+
+There is no reliable way to win or even detect every collision, so the platform
+convention is mandatory:
+
+> **Name every platform command with the platform prefix**, for example
+> `"Venture Test Command"` (engine name) for `VentureCore`.  A derived platform
+> renames the prefix together with everything else (see `docs/Renaming.md`).
+> Never register a generic name such as `"Select All"` or a command that a
+> vanilla host may also define.
+
+The registry also rejects a second platform command whose name differs only in
+case, which keeps the two sides of the configuration unambiguous.
 
 Every hook handler returns 0, so Syringe's trampoline re-executes the
 instruction the hook overwrote (`mov DWORD PTR [eax],0x7eb89c`), and the
@@ -118,6 +149,7 @@ Expected log excerpt (startup and after the key press):
 ```
 commands: 1 command(s) in the platform registry
 commands:   "Venture Test Command" (category "VentureCore", ui name "Venture Test Command") registered
+commands: 1 command(s) appended to the engine command list
 event channel: 0x70-0x7F, 1 registered handler(s)
 event channel:   0x70 Venture_Event_Test        8 byte(s)
 ...

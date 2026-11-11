@@ -13,6 +13,13 @@
 
 namespace
 {
+char LowerAscii(const char value)
+{
+	if (value >= 'A' && value <= 'Z')
+		return static_cast<char>(value - 'A' + 'a');
+	return value;
+}
+
 // Function-local static: safe from the static initializers of any translation
 // unit, and never destroyed at unload (the game process owns the DLL).
 std::vector<venture::Command>& Registry()
@@ -28,7 +35,7 @@ venture::Command* FindMutable(const char* const name)
 
 	for (venture::Command& command : Registry())
 	{
-		if (std::strcmp(command.name, name) == 0)
+		if (venture::CommandNameEquals(command.name, name))
 			return &command;
 	}
 	return nullptr;
@@ -37,6 +44,23 @@ venture::Command* FindMutable(const char* const name)
 
 namespace venture
 {
+bool CommandNameEquals(const char* const left, const char* const right)
+{
+	if (!left || !right)
+		return left == right;
+
+	const char* a = left;
+	const char* b = right;
+	while (*a && *b)
+	{
+		if (LowerAscii(*a) != LowerAscii(*b))
+			return false;
+		++a;
+		++b;
+	}
+	return *a == '\0' && *b == '\0';
+}
+
 Commands::RegisterResult Commands::Register(const Command& command)
 {
 	// A refused platform keeps no registration path to the engine (C-06).
