@@ -77,6 +77,34 @@ inline bool EqualsIgnoreCase(const char* const left, const char* const right)
 	return *a == '\0' && *b == '\0';
 }
 
+// True when `path` is `directory` itself or sits inside it.  Case-insensitive
+// ASCII, '\\' and '/' both count as separators (D-06): a bare prefix comparison
+// would also match sibling directories whose name starts with the same text -
+// with directory "C:\Windows" it would skip "C:\WindowsApps\..." and
+// "C:\Windows.old\...".  A trailing separator in `directory` (GetWindowsDirectory
+// reports one when Windows sits on a drive root) already ends on the boundary.
+inline bool IsPathUnderDirectory(const char* const path, const char* const directory)
+{
+	if (!path || !directory || path[0] == '\0' || directory[0] == '\0')
+		return false;
+
+	std::size_t index = 0;
+	for (; directory[index] != '\0'; ++index)
+	{
+		if (path[index] == '\0')
+			return false;
+		if (LowerAscii(path[index]) != LowerAscii(directory[index]))
+			return false;
+	}
+
+	const char last = directory[index - 1];
+	if (last == '\\' || last == '/')
+		return true;
+
+	const char next = path[index];
+	return next == '\0' || next == '\\' || next == '/';
+}
+
 // 8 lower-case hex digits, so log messages and the test predicates agree.
 inline std::string Hex32(const unsigned value)
 {

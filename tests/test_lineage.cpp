@@ -135,6 +135,40 @@ int __cdecl main()
 	Check(venture::ParseLineagePolicy("bogus", LineagePolicy::Warn) == LineagePolicy::Warn,
 		"policy: explicit fallback is honoured");
 
+	// -- Windows-directory path boundary (D-06) ------------------------------
+	// The module scan skips modules inside the Windows directory; a bare prefix
+	// comparison would also skip a game installed in C:\WindowsApps or
+	// C:\Windows.old and hide a lineage conflict there.
+	using venture::lineage_detail::IsPathUnderDirectory;
+	Check(IsPathUnderDirectory("C:\\Windows\\System32\\kernel32.dll", "C:\\Windows"),
+		"path: a file below the Windows directory matches");
+	Check(IsPathUnderDirectory("C:\\Windows\\x.dll", "C:\\Windows"),
+		"path: a file directly in the Windows directory matches");
+	Check(IsPathUnderDirectory("C:\\Windows", "C:\\Windows"),
+		"path: the directory itself matches");
+	Check(IsPathUnderDirectory("c:\\windows\\system32\\x.dll", "C:\\Windows"),
+		"path: the comparison is case-insensitive");
+	Check(IsPathUnderDirectory("C:\\Windows/System32/x.dll", "C:\\Windows"),
+		"path: '/' is accepted as a separator");
+	Check(!IsPathUnderDirectory("C:\\WindowsApps\\Game\\X.dll", "C:\\Windows"),
+		"path: a sibling directory sharing the prefix does not match");
+	Check(!IsPathUnderDirectory("C:\\Windows.old\\Game\\X.dll", "C:\\Windows"),
+		"path: C:\\Windows.old is not below C:\\Windows");
+	Check(!IsPathUnderDirectory("C:\\Windows10\\X.dll", "C:\\Windows"),
+		"path: C:\\Windows10 is not below C:\\Windows");
+	Check(!IsPathUnderDirectory("C:\\Win", "C:\\Windows"),
+		"path: a shorter path is not below the directory");
+	Check(!IsPathUnderDirectory("D:\\Games\\X.dll", "C:\\Windows"),
+		"path: another drive does not match");
+	Check(IsPathUnderDirectory("C:\\Games\\X.dll", "C:\\"),
+		"path: a Windows directory on a drive root matches the whole drive");
+	Check(!IsPathUnderDirectory("D:\\Games\\X.dll", "C:\\"),
+		"path: a Windows directory on a drive root does not match another drive");
+	Check(!IsPathUnderDirectory(nullptr, "C:\\Windows"), "path: a null path does not match");
+	Check(!IsPathUnderDirectory("C:\\Windows\\x.dll", nullptr), "path: a null directory does not match");
+	Check(!IsPathUnderDirectory("", "C:\\Windows"), "path: an empty path does not match");
+	Check(!IsPathUnderDirectory("C:\\Windows\\x.dll", ""), "path: an empty directory does not match");
+
 	std::printf("\n%s (%d failure%s)\n", g_failures == 0 ? "PASS" : "FAILED",
 		g_failures, g_failures == 1 ? "" : "s");
 	return g_failures == 0 ? 0 : 1;

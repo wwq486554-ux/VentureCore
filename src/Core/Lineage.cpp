@@ -36,7 +36,9 @@ const VentureLineageInfo g_lineageInfo{
 // True when the module path is inside the Windows directory.  That covers every
 // module the process has loaded for itself (kernel32, user32, the CRT, ...)
 // without enumerating a name list, so the rest of the scan is a cheap
-// GetProcAddress filter.  A game-directory DLL never matches.
+// GetProcAddress filter.  The match is on a directory boundary (D-06): a bare
+// prefix would also skip "C:\WindowsApps\..." and "C:\Windows.old\...", i.e. a
+// game installed next to the Windows directory would hide a lineage conflict.
 bool IsUnderWindowsDirectory(const char* const path)
 {
 	if (!path || path[0] == '\0')
@@ -47,7 +49,7 @@ bool IsUnderWindowsDirectory(const char* const path)
 	if (length == 0 || length >= MAX_PATH)
 		return false;
 
-	return _strnicmp(path, windowsDirectory, length) == 0;
+	return venture::lineage_detail::IsPathUnderDirectory(path, windowsDirectory);
 }
 }
 

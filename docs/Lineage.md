@@ -81,7 +81,11 @@ in the same file as the rest of the startup picture).
    * skip modules whose path is inside the Windows directory - that cheaply
      removes kernel32, user32, the CRT and the rest of the system DLLs; the
      `GetProcAddress` step below filters everything else (the probe does not
-     need a name list);
+     need a name list).  The path is matched on a **directory boundary**:
+     `C:\Windows\System32\...` is skipped, but `C:\WindowsApps\...`,
+     `C:\Windows.old\...` and `C:\Windows10\...` are not - a game installed in
+     such a directory must not hide a lineage conflict; the match is
+     case-insensitive and accepts both `\` and `/`;
    * call `GetProcAddress(module, "VentureLineage_GetInfo")`;
    * when it resolves, call it and compare the returned `magic` with
      `VENTURE_LINEAGE_MAGIC`.  A module that exports a function under that name
@@ -175,8 +179,11 @@ Wine and additionally:
    back to zero.
 
 The synthetic-module decision branches (no conflict, warn, refuse, several
-conflicts, magic mismatch, savegame id mismatch, policy parsing) are covered by
-`tests/test_lineage.cpp`; run it with `scripts/linux/run_tests.sh lineage`.
+conflicts, magic mismatch, savegame id mismatch, policy parsing) and the
+Windows-directory path boundary (`C:\Windows` vs `C:\WindowsApps`,
+`C:\Windows.old`, drive-root Windows directories, case and separator variants)
+are covered by `tests/test_lineage.cpp`; run it with
+`scripts/linux/run_tests.sh lineage`.
 
 ## Limits and residual risks
 
