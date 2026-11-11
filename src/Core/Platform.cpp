@@ -13,6 +13,7 @@
 #include <windows.h>
 
 #include <cstdarg>
+#include <cstddef>
 #include <cstdio>
 
 namespace
@@ -30,6 +31,15 @@ void FeatureLog(const char* const format, ...)
 	_vsnprintf_s(message, sizeof(message), _TRUNCATE, format, args);
 	va_end(args);
 	venture::Log::Info("%s", message);
+}
+
+// Rejected extension-type registrations are reported through this sink: the Ext
+// layer is engine- and logger-free, so it asks the platform to log the problem
+// (D-22).  A rejected type id is poisoned and can no longer be fetched, which
+// turns a broken composition into a loud, safe failure instead of a wrong cast.
+void ExtTypeProblemLog(const char* const message)
+{
+	venture::Log::Error("%s", message);
 }
 
 // The platform is only supported under SyringeEx: the injected trampolines rely
@@ -152,6 +162,11 @@ bool Startup()
 		return false;
 	}
 
+	// Extension types register themselves lazily (feature store construction or
+	// first Fetch); route their validation problems to the logger before any
+	// feature is initialized (D-22).
+	SetExtTypeProblemSink(&ExtTypeProblemLog);
+
 	FeatureContext context{};
 	context.platformName = VC_PLATFORM_NAME;
 	context.iniPath = Ini::Path();
@@ -163,6 +178,15 @@ bool Startup()
 	context.Log = &FeatureLog;
 
 	InitializeFeatures(context);
+
+	const std::size_t extTypeProblems = ExtTypeProblemCount();
+	if (extTypeProblems != 0)
+	{
+		Log::Error(
+			"ext types: %zu registration problem(s) - the types logged above cannot be fetched "
+			"(a wrong TypeId/BaseTypeId pair in an extension class is a composition error)",
+			extTypeProblems);
+	}
 
 	Log::Info("%s startup complete - %d feature(s) registered", VC_PLATFORM_NAME, FeatureCount());
 	Log::Info("================================================================");

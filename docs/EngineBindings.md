@@ -206,7 +206,14 @@ derived platform drop a module without touching engine class layouts.
   built with `/GR-`, so there is no RTTI and no `dynamic_cast`.  The pairs are
   registered with `RegisterExtType` - the built-in hierarchy is seeded in
   `src/Ext/AbstractExt.cpp`, a feature class registers itself from its store or
-  its first `Fetch`.
+  its first `Fetch`.  `RegisterExtType` validates the pair: a feature type id
+  must be >= `FirstUserTypeId`, a type cannot be its own base, and a type id
+  that was already registered with a different base is rejected (the typical
+  symptom of a copy-pasted `TypeId`).  A rejected id is **poisoned**:
+  `IsExtTypeDerivedFrom` reports false for it, so `FetchExtAs` returns `nullptr`
+  instead of risking a wrong `static_cast`; each problem is logged through the
+  platform logger when it happens.  A broken composition therefore fails loudly
+  and safely instead of corrupting memory later.
 * **Global index** (`src/Ext/ExtensionIndex.h`): `unordered_map<owner,
   AbstractExt*>` for polymorphic attach/fetch/detach, plus the registry of
   stores.  A store registers a type-erased `ExtStoreDesc` on first use (type id,

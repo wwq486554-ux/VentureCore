@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 
 class AbstractClass;
@@ -84,13 +85,31 @@ private:
 	AbstractExt* m_storePrev = nullptr;
 };
 
-// Registers one (type, base) pair of the extension hierarchy.  Idempotent; the
-// first registration wins.  A feature extension class only has to call this once
+// Registers one (type, base) pair of the extension hierarchy.  Idempotent for a
+// repeated identical pair.  A feature extension class only has to call this once
 // - EnsureExtTypeRegistered<> below does it from Fetch/store use.
-void RegisterExtType(std::uint32_t typeId, std::uint32_t baseTypeId);
+//
+// The registration is validated (D-22): the type id must be >=
+// FirstUserTypeId, the type cannot be its own base, and a type id that was
+// already registered with a different base is rejected.  A rejected type id is
+// poisoned - IsExtTypeDerivedFrom() reports false for it, so a broken
+// composition fails at the lookup (FetchExtAs returns nullptr) instead of
+// producing a wrong static_cast.  The problem is reported through the sink
+// (SetExtTypeProblemSink), which Platform::Startup() points at the logger.
+// Returns true when the pair is registered (or was already).
+bool RegisterExtType(std::uint32_t typeId, std::uint32_t baseTypeId);
+
+// Where a rejected registration is reported; null disables the message.  The
+// message pointer is only valid for the duration of the call.
+using ExtTypeProblemSink = void (*)(const char* message);
+void SetExtTypeProblemSink(ExtTypeProblemSink sink);
+
+// Number of rejected registrations so far (diagnostics/tests).
+std::size_t ExtTypeProblemCount();
 
 // True when actualTypeId is wantedTypeId or derives from it.  wantedTypeId == 0
-// matches every extension.
+// matches every extension.  A poisoned type id never matches (see
+// RegisterExtType).
 bool IsExtTypeDerivedFrom(std::uint32_t actualTypeId, std::uint32_t wantedTypeId);
 
 // Function-local static: registers the pair on first use from any call site.

@@ -83,6 +83,16 @@ public:
 };
 
 using BuildingStore = venture::ExtensionStore<BuildingClass, BuildingExt>;
+
+// D-22: capture what RegisterExtType reports through the problem sink.  A plain
+// function (not a lambda) because the sink is a function pointer.
+int g_problemMessages = 0;
+
+void CaptureExtTypeProblem(const char* const message)
+{
+	if (message && *message)
+		++g_problemMessages;
+}
 }
 
 int __cdecl main()
@@ -129,6 +139,41 @@ int __cdecl main()
 	Check(venture::IsExtTypeDerivedFrom(TestUnitExt::TypeId, AbstractExt::TypeId), "type chain: user -> AbstractExt");
 	Check(!venture::IsExtTypeDerivedFrom(TestUnitExt::TypeId, otherStore.Descriptor().typeId),
 		"type chain: sibling extension class is not a base of the instance");
+
+	// -- registration validation (D-22) --------------------------------------
+	// A rejected pair must poison the type id: the chain cannot be trusted any
+	// more, so every base view returns nullptr instead of risking a wrong
+	// static_cast (there is no RTTI in this build).
+	venture::SetExtTypeProblemSink(&CaptureExtTypeProblem);
+
+	const std::size_t firstProblemCount = venture::ExtTypeProblemCount();
+	Check(!venture::RegisterExtType(0u, venture::AbstractExt::TypeId),
+		"registration rejects type id 0 (root sentinel)");
+	Check(!venture::RegisterExtType(0x0099u, venture::UnitExt::TypeId),
+		"registration rejects a type id below FirstUserTypeId");
+	Check(!venture::RegisterExtType(0x1F1u, 0x1F1u), "registration rejects a self-referencing pair");
+
+	Check(venture::RegisterExtType(0x1F2u, venture::UnitExt::TypeId), "a well-formed pair registers");
+	Check(venture::RegisterExtType(0x1F2u, venture::UnitExt::TypeId),
+		"the identical pair is idempotent");
+	Check(!venture::RegisterExtType(0x1F2u, venture::TechnoExt::TypeId),
+		"the same type id with a different base is rejected");
+	Check(!venture::IsExtTypeDerivedFrom(0x1F2u, venture::UnitExt::TypeId),
+		"the poisoned type id no longer reports a base view");
+	Check(!venture::IsExtTypeDerivedFrom(0x1F2u, 0u),
+		"the poisoned type id does not even match the 'any extension' query");
+
+	Check(venture::RegisterExtType(0x1F3u, 0x1F4u),
+		"a forward reference to a not-yet-registered base is accepted");
+	Check(!venture::RegisterExtType(0x1F4u, 0x1F3u),
+		"registering the reverse pair makes the chain cyclic and is rejected");
+	Check(!venture::IsExtTypeDerivedFrom(0x1F3u, venture::AbstractExt::TypeId),
+		"the cyclic pair reports no base view");
+
+	Check(venture::ExtTypeProblemCount() == firstProblemCount + 5,
+		"every rejected registration is counted once");
+	Check(g_problemMessages == 5, "every rejected registration is reported through the problem sink");
+	venture::SetExtTypeProblemSink(nullptr);
 
 	BuildingExt* const buildingExt = buildingStore.Allocate(&building);
 	Check(buildingExt != nullptr, "a second owner class has its own store");
