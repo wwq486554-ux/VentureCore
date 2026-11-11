@@ -258,22 +258,28 @@ Consequences for feature authors:
 
 The store container was chosen against a microbenchmark
 (`tests/bench_store.cpp`, `scripts/linux/bench_store.sh`; Wine + MSVC 14.44 with
-the **benchmark's own** compile flags - `/W4 /MT /EHsc- /Gz`, no `/O2` or `/Oy`,
-so the numbers are *not* comparable to the optimised release DLL - live instance
-counts 1k / 5k / 20k).  "Before" is the flat `vector<unique_ptr>` + linear removal
-the base started with; those numbers were recorded during the container rework
-and cannot be re-measured from this tree (the old container is gone).  "After" is
-the intrusive allocation-order list + `Fetch` cache + `Reserve` hint, measured
-twice on this machine on 2026-11-11; the ranges span both runs because Wine
-timing is noisy (the 1k-live case in particular):
+the release DLL's optimisation flags `/O2 /Oy` - the full flag list is in the
+script; live instance counts 1k / 5k / 20k).  "Before" is the flat
+`vector<unique_ptr>` + linear removal the base started with; those numbers were
+recorded during the container rework with the benchmark as it was then (before
+the `/O2 /Oy` alignment), and they cannot be re-measured from this tree because
+the old container is gone - so compare them directionally, not as an
+apples-to-apples flag test.  "After" is the intrusive allocation-order list +
+`Fetch` cache + `Reserve` hint, measured with `/O2 /Oy` in three runs on this
+machine on 2026-11-11; the ranges span the runs because Wine timing is noisy:
 
-| Operation | Before (historical) | After (measured) |
+| Operation | Before (historical) | After (measured, `/O2 /Oy`) |
 | --- | --- | --- |
-| `Allocate` (per instance) | 512-538 ns | 426-988 ns (noisy) |
-| `Fetch`, changing owners (hash path) | 41-45 ns | 38-91 ns (noisy, unchanged within noise) |
-| `Fetch`, same owner repeatedly (cache) | 34-52 ns | **1.7-2.8 ns** |
-| `Remove` (random order, per instance) | 4.3-4.7 / 21 / 83-84 µs @ 1k/5k/20k | **0.20-0.29 µs @ every size** |
-| `Clear` (per instance) | 107-118 ns | 107-166 ns (unchanged) |
+| `Allocate` (per instance) | 512-538 ns | **161-182 ns** |
+| `Fetch`, changing owners (hash path) | 41-45 ns | **3.5-4.0 ns** |
+| `Fetch`, same owner repeatedly (cache) | 34-52 ns | **0.6-0.7 ns** |
+| `Remove` (random order, per instance) | 4.3-4.7 / 21 / 83-84 µs @ 1k/5k/20k | **0.071-0.074 / 0.080-0.082 / 0.100-0.102 µs** |
+| `Clear` (per instance) | 107-118 ns | **51-56 ns** |
+
+The benchmark binary is rebuilt whenever `tests/bench_store.cpp`, a source from
+its `TEST_DEPS` line, any header under `src/`/`include/` or the generated git
+stamp header is newer than the binary, so the numbers cannot silently come from
+a stale build.
 
 Memory: the intrusive links cost two pointers (8 bytes) per extension instance
 but remove the former container node (~24 bytes) and the vector's growth slack,
