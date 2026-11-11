@@ -15,12 +15,10 @@ It is a template, not a mod: it deliberately contains **no gameplay features**.
 > Example modules.  The base machinery (startup, logging, config, extension
 > storage with savegame persistence, event channel, command registration, lineage
 > detection, host detection, the YRpp binding gate and the verification tooling)
-> is implemented, in-game verified with Ares (one match plus a save/load round
-> trip), and was hardened by an independent blind review before this release:
-> every blocking and recommended finding was fixed (`CHANGELOG.md`).  The
-> automated checks for each layer are named in this README and in `docs/` and do
-> not replace the in-game check.  Host-specific (T1-T3) features, Phobos interop
-> and AE are **additive roadmap items**, not part of 1.0 - see below.
+> is implemented, in-game verified, and was hardened by an independent blind
+> review before this release: every blocking and recommended finding was fixed
+> (`CHANGELOG.md`).  The automated checks for each layer are named in this README
+> and in `docs/`; they do not replace an in-game check.
 
 ## What this base provides
 
@@ -104,16 +102,6 @@ named with it (an in-game run is still the only end-to-end check - see
 * **Build system** - Windows `VentureCore.sln` (VS2022, v143) and Linux scripts
   that drive the real MSVC toolchain under Wine.
 
-## Not in this base (roadmap)
-
-These are **planned additive increments** for later 1.x releases; a v1.0.0 DLL
-does not contain them:
-
-1. **T1-T3 host-specific features** - behaviour that only runs when Ares /
-   Phobos / Kratos / Kaleidoscope are present.
-2. **Phobos interop** - deliberately calling into Phobos extensions.
-3. **AE** (Ares extensions) - not handled.
-
 ## Stability and versioning
 
 `v1.0.0` is the first stable release of the base.  Within 1.x the following are
@@ -130,9 +118,7 @@ migration):
 * the hook table in `docs/HookCatalogue.md` for the supported `gamemd.exe` build;
 * the `<Platform>.ini` keys documented below.
 
-The base is feature-complete for its purpose.  New base layers and the roadmap
-items above are **additive 1.x increments**; bug fixes ship as 1.0.x.  The
-roadmap items are explicitly **not** promised by 1.0.
+Changing a contract above requires a major release or a documented migration.
 
 ## Requirements
 
@@ -195,25 +181,22 @@ described above.
 
 ## Verifying a build
 
-Five automatic checks cover this machine; the in-game run is a human step:
+These automatic checks cover this machine; the in-game run is a human step:
 
 ```bash
 python3 scripts/verify_build.py         # static: PE image, hook table, exports,
-                                        # version strings, feature id, log policy (7 checks)
+                                        # version strings, feature id, log policy
 scripts/linux/load_probe.sh             # dynamic: LoadLibrary, exports, lineage conflict
 scripts/linux/run_tests.sh              # engine-free unit tests, same toolchain
 python3 scripts/linux/check_eol.py      # line endings vs .gitattributes
 scripts/linux/abi_probe.sh              # optional: engine ABI sizes pinned by EngineCompat.h
 ```
 
-Reference result of the v1.0.0 source (`--clean`, MSVC 14.44 under Wine,
-2026-11-11): **23 translation units, 0 warnings; `verify_build.py` 7/7;
-`load_probe.sh` PASS (exports 7/7); `run_tests.sh` 10/10; `check_eol.py` 17
-rules / 0 mismatch; `abi_probe.sh` 20 types, every `sizeof` assertion matches.**
-`scripts/linux/bench_store.sh` runs the extension-store microbenchmark and
-`scripts/linux/test_fetch_yrpp.sh` / `scripts/linux/verify_incremental.sh` cover
-the tooling.  A rebuilt DLL is not byte-identical to a released one (embedded
-timestamp / debug path), so the checks - not a file hash - are the provenance.
+The v1.0.0 source passes these checks.  `scripts/linux/bench_store.sh` runs the
+extension-store microbenchmark and `scripts/linux/test_fetch_yrpp.sh` /
+`scripts/linux/verify_incremental.sh` cover the tooling.  A rebuilt DLL is not
+byte-identical to a released one (embedded timestamp / debug path), so the
+checks - not a file hash - are the provenance.
 
 `verify_build.py` checks the PE format (PE32/i386), the `.syhks00` hook records
 against the catalogue, the distinct hook handler exports, the version strings
@@ -223,16 +206,15 @@ feature id and the log-policy source hygiene.  It exits 0 only when every check
 passes.
 
 `load_probe.sh` performs `LoadLibrary` -> `GetProcAddress` for the base hook
-handlers and the lineage markers, validates the marker payload and prints
-`resolved exports: 7/7`, then loads a second copy of the DLL under another file
-name and expects the conflict counter to go from 0 to 1.  It loads the DLL (its
+handlers and the lineage markers, validates the marker payload and prints the resolved export count, then loads
+a second copy of the DLL under another file
+name and expects the conflict counter to become non-zero.  It loads the DLL (its
 imports and CRT constructors run) but does **not** run `Startup`, so the engine
 hooks, logging, INI and savegame code paths are not exercised by it; an in-game
 run is still required for those.
 
-The real test - launching the game with SyringeEx and the DLL in a writable game
-directory, then entering and leaving a skirmish (plus one save/load round trip) -
-must be done by a human.  See `docs/HookCatalogue.md` for what each hook does and
+The real test - launching the game with SyringeEx and the DLL installed - must be
+done by a human.  See `docs/HookCatalogue.md` for what each hook does and
 `docs/HostMatrix.md` for the host combinations.
 
 ## Installing
@@ -319,9 +301,9 @@ Booleans accept `yes/no`, `true/false`, `on/off` and `1/0`.  See
 
 The base is **MIT** (`LICENSE.md`, `NOTICE.md`).  YRpp is not distributed and has
 no license declaration; SyringeEx and the optional host platforms are not
-distributed either.  Feature packs published later under the Venture umbrella are
-planned to be **GPL-3.0**; a derived platform may pick its own license, but
-copying GPL-3.0 modules into it makes the combined work GPL-3.0.  Details:
+distributed either.  Feature packs under the Venture umbrella are **GPL-3.0**; a
+derived platform may pick its own license, but copying GPL-3.0 modules into it
+makes the combined work GPL-3.0.  Details:
 `docs/Licensing.md`.
 
 ## 中文简介
@@ -333,19 +315,18 @@ VentureCore 是一个 MIT 授权的“起始基座/模板”：复制仓库 → 
 
 当前版本 **`v1.0.0`（首个正式版，2026-11-11）** 是**空基座 + 两个示例模块**：示例只统计
 UnitClass 的创建/销毁、读取一个 rules 键，没有任何玩法功能。基座各层均已实现，并经独立盲审
-（全部阻塞/建议项已修）与实机验证（Ares，一局 + 存读档）；每层对应的自动化检查写在本 README
-与 `docs/` 里，这些检查不能替代一次实机运行：
+（全部阻塞/建议项已修）与实机验证；每层对应的自动化检查写在本 README 与 `docs/` 里，
+这些检查不能替代一次实机运行：
 日志分级、`<Platform>.ini`、rules/art INI 读取与同名键接管、宿主矩阵、血统互斥、
 扩展存储（继承链 + 存档持久化，顺序帧 + store 集签名）、事件通道 `0x70–0x7F`、
 玩家命令注册。指针失效通知目前只有计数/清理，没有订阅 API。
-T1–T3 宿主专属功能、Phobos Interop、AE 仍是 roadmap（后续 1.x 增量，见上方 "Not in this base"）。
 硬依赖只有 `gamemd.exe` + SyringeEx；Ares / Phobos / Kratos / Kaleidoscope 只做检测和日志。
 构建与自检：
 
 ```bash
 scripts/linux/build_linux.sh Release --build-type RELEASE   # Wine 里的真 MSVC
-python3 scripts/verify_build.py                            # 静态自检，7 项全 PASS
-python3 scripts/linux/check_eol.py                         # 行尾检查（17 条规则）
+python3 scripts/verify_build.py                            # 静态自检
+python3 scripts/linux/check_eol.py                         # 行尾检查
 scripts/linux/load_probe.sh                                # Wine 下 LoadLibrary 探针
 scripts/linux/run_tests.sh                                 # 单元测试（引擎无关）
 scripts/linux/bench_store.sh                               # 扩展存储微基准
