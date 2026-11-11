@@ -14,7 +14,7 @@ namespace venture
 // terminates the game (see Platform.cpp); a lineage conflict under
 // [Platform] LineagePolicy=refuse only leaves the platform disabled - the game
 // keeps running without the platform's features, and every lifecycle entry point
-// below stays a no-op (g_started is never set).
+// below stays a no-op (the startup gate stays Refused, see Core/PlatformGate.h).
 bool Startup();
 
 void Shutdown();
