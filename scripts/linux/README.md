@@ -66,5 +66,8 @@ this machine.
   or read-only mounts fail deep inside `cl.exe` with `error D8037` / `D8050`.
 * Build output goes to `Release/` (gitignored). The Linux-side build state lives
   in `Release/IntDir/linux/` and can be dropped with `--clean`.
+* The project file is the single source of truth for what is compiled: a
+  `src/**/*.cpp` that is missing from `VentureCore.vcxproj` is not compiled, and
+  `build_linux.sh` warns about every such file instead of silently skipping it.
 * The game directory is not deployed to by default; `--deploy DIR` exists for a
   writable installation. A read-only game directory makes that step fail.

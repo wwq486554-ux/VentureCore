@@ -286,6 +286,23 @@ for s in "${sources[@]}"; do
 done
 (( missing == 0 )) || vcs_die "the project references files that do not exist (was a file deleted without updating VentureCore.vcxproj?)"
 
+# The project file is the single source of truth for what is compiled (MSBuild
+# behaves the same).  The reverse direction has no such error path: a new
+# src/**/*.cpp that was never added to VentureCore.vcxproj is silently not
+# compiled - a copied-in feature module would just do nothing.  Warn once per
+# file so that cannot happen without a message (D-12).
+unlisted=0
+while IFS= read -r disk_source; do
+  [[ -n $disk_source ]] || continue
+  if ! printf '%s\n' "${sources[@]}" | grep -Fxq "$disk_source"; then
+    vcs_warn "source file exists but is not in VentureCore.vcxproj, so it is NOT compiled: $disk_source"
+    unlisted=1
+  fi
+done < <(find "$VCS_ROOT/src" -type f -name '*.cpp' -printf 'src/%P\n' 2>/dev/null | sort)
+if (( unlisted )); then
+  vcs_warn "add the file(s) above to the <ClCompile> list in VentureCore.vcxproj, or delete them"
+fi
+
 cl_flags_str="$(vcs_cl_flags "$cfg" "$build_type" | tr '\n' ' ')"
 # The toolset identity is part of the hash: switching MSVC/SDK versions must
 # invalidate every object file.
