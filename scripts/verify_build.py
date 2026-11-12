@@ -89,6 +89,13 @@ What is checked
        docs, examples, project files.  ``CHANGELOG.md`` is exempt because it
        records the 1.x history verbatim.
 
+9. Removed closed-source host name absent (source)
+       ``2.0`` dropped the fifth, closed-source ecosystem host from the public
+       surface (module probe, host bit and every mention).  Its name may not
+       appear anywhere in the repository any more - code, docs, historical
+       CHANGELOG included.  This verifier is exempt because it defines the
+       token.
+
 Exit status is 0 when every check passes and 1 otherwise.  The expected strings
 and ids live in the constants below; when the platform is renamed (see
 docs/Renaming.md) update them together with the rest of the rename.
@@ -137,6 +144,14 @@ TIER_SCAN_SKIP_DIRS = {".git", "external", "Release", "Debug"}
 TIER_SCAN_SKIP_FILES = {"CHANGELOG.md", "scripts/verify_build.py"}
 TIER_SCAN_EXTENSIONS = (
     ".cpp", ".h", ".md", ".py", ".sh", ".example", ".rc", ".vcxproj", ".props", ".sln")
+
+# The closed-source ecosystem host removed from the public surface in 2.0.  The
+# name must not appear anywhere in the repository, historical CHANGELOG
+# included; this verifier is exempt because it defines the token list.
+CLOSED_HOST_TOKENS_RE = re.compile(r"kaleido", re.IGNORECASE)
+CLOSED_HOST_SCAN_SKIP_DIRS = {".git", "external", "Release", "Debug"}
+CLOSED_HOST_SCAN_SKIP_FILES = {"scripts/verify_build.py"}
+CLOSED_HOST_SCAN_EXTENSIONS = TIER_SCAN_EXTENSIONS
 
 # PE / SyringeEx layout facts.
 HOOK_SECTION_NAME = ".syhks00"
@@ -869,6 +884,56 @@ def check_legacy_tier_removed() -> Check:
 
 
 # ---------------------------------------------------------------------------
+# Check 9: the removed closed-source host name (source)
+# ---------------------------------------------------------------------------
+
+
+def check_closed_source_host_removed() -> Check:
+    """The removed closed-source host must not be named anywhere any more."""
+    title = "Removed closed-source host name absent (source)"
+    hits: List[str] = []
+    scanned = 0
+
+    for dirpath, dirnames, filenames in os.walk(REPO_ROOT):
+        dirnames[:] = sorted(
+            directory for directory in dirnames
+            if directory not in CLOSED_HOST_SCAN_SKIP_DIRS)
+        for filename in sorted(filenames):
+            if not filename.endswith(CLOSED_HOST_SCAN_EXTENSIONS):
+                continue
+            path = os.path.join(dirpath, filename)
+            rel_path = os.path.relpath(path, REPO_ROOT).replace(os.sep, "/")
+            if rel_path in CLOSED_HOST_SCAN_SKIP_FILES:
+                continue
+            try:
+                with open(path, "r", encoding="utf-8", errors="replace") as handle:
+                    lines = handle.read().splitlines()
+            except OSError as exc:
+                return Check(False, title, "cannot read %s: %s" % (rel_path, exc))
+            scanned += 1
+            for line_number, line in enumerate(lines, 1):
+                if CLOSED_HOST_TOKENS_RE.search(line):
+                    hits.append("%s:%d: %s"
+                                % (rel_path, line_number, line.strip()[:140]))
+
+    if hits:
+        extra = hits[:10]
+        if len(hits) > 10:
+            extra.append("... and %d more" % (len(hits) - 10))
+        extra.append("the host was removed in 2.0 - keep the audit fact, drop the "
+                     "name (see CHANGELOG.md / docs/HostMatrix.md)")
+        return Check(
+            False, title,
+            "%d occurrence(s) of the removed host name (%d file(s) scanned)"
+            % (len(hits), scanned), extra)
+
+    return Check(
+        True, title,
+        "%d file(s) scanned; the removed closed-source host is not named anywhere"
+        % scanned)
+
+
+# ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
 
@@ -977,6 +1042,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     # -- check 8 ---------------------------------------------------------
     checks.append(check_legacy_tier_removed())
+
+    # -- check 9 ---------------------------------------------------------
+    checks.append(check_closed_source_host_removed())
 
     print_report(checks)
     return 0 if all(check.ok for check in checks) else 1

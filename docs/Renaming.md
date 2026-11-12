@@ -87,7 +87,7 @@ are starting a new platform from scratch.
 ## Warnings
 
 * Pick a platform name that does not collide with an existing platform (Ares,
-  Phobos, Kratos, Kaleidoscope, ...).  Two different DLLs with the same exported
+  Phobos, Kratos, ...).  Two different DLLs with the same exported
   hook handler names in one game directory are ambiguous for diagnostics, and
   colliding platform names make logs and version resources indistinguishable.
 * If you rename the INI section names, every existing user INI stops matching.

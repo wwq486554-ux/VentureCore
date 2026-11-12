@@ -38,9 +38,9 @@ namespace venture::SaveTrailer
 // writer, so a sequential append makes our block the last one.  At load our
 // handler at 0x67F7C8 must run after every ecosystem reader for the same reason;
 // that holds because `VentureCore.dll` sorts after the known platform DLLs
-// (Ares/Kratos/Kaleidoscope/Mix/Phobos).  A future platform whose DLL name sorts
-// after this one would gain a reader after ours and break the alignment - see
-// docs/SaveFormat.md.
+// (Ares/Kratos/Mix/Phobos, plus one closed-source ecosystem module).  A future
+// platform whose DLL name sorts after this one would gain a reader after ours and
+// break the alignment - see docs/SaveFormat.md.
 //
 // Host compatibility: a game running without this platform ignores the block
 // (nothing reads it; it stays unread at the end of the stream), and a save that

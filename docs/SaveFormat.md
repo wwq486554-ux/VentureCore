@@ -32,9 +32,10 @@ position restore:
   owns `0x67E42E` and its handler always jumps away, so a writer installed there
   never runs next to Ares.)
 * it **reads sequentially where the other readers left the stream**: the load
-  hook at `0x67F7C8` runs after every ecosystem reader (the known platform
-  modules are `Ares.dll`, `Kratos.dll`, `Kaleidoscope.dll` and `Phobos.dll`; the
-  Mix fork also ships as `Phobos.dll`, so there is no separate `Mix.dll`), so when
+  hook at `0x67F7C8` runs after every ecosystem reader (the audited ecosystem
+  modules are `Ares.dll`, `Kratos.dll` and `Phobos.dll` - the Mix fork ships as
+  `Phobos.dll`, so there is no separate `Mix.dll` - plus one closed-source
+  platform), so when
   it runs the stream is positioned exactly at the start of our frame. A save that
   was written without this platform has no frame there (the stream simply ends, or
   the next platform's block starts) - that is reported as "no extension trailer"
@@ -48,9 +49,9 @@ Known limitation: the protocol needs the same order on both sides. A platform
 whose DLL name sorts **after** `VentureCore.dll` would read at `0x67F7C8` after
 us, while its block was still written before ours (all ecosystem writers run
 inside `0x67D300`) - our sequential read would then see that platform's block
-instead of our frame and drop the extension state. The current known platform set
-(`Ares.dll`, `Kratos.dll`, `Kaleidoscope.dll`, `Phobos.dll` - the Mix fork ships
-under the Phobos name too) sorts before us, so the order holds; a
+instead of our frame and drop the extension state. The current audited platform
+set (`Ares.dll`, `Kratos.dll`, `Phobos.dll` with the Mix fork under the Phobos
+name, plus one closed-source platform) sorts before us, so the order holds; a
 platform that writes after `0x67D1B4` or reads after `0x67F7C8` is outside the
 contract. The log line reports the mismatch and extension state starts empty; it
 is a platform-ordering concern, not a savegame format break.

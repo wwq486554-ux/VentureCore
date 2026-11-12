@@ -133,7 +133,7 @@ Changing a contract above requires a major release or a documented migration.
 | SyringeEx (`Syringe.exe` in the game directory) | injects the DLL; VentureCore **refuses to run under an older Syringe** (a message box explains this and the game is terminated) |
 | YRpp checkout at the pinned commit | build dependency, not vendored; fetched into `external/YRpp/` (see below) |
 | Visual Studio 2022 (v143) / MSVC 14.44 toolset | build toolchain (on Linux, run under Wine) |
-| Ares / Phobos / Kratos / Kaleidoscope | **optional**; detected and logged only |
+| Ares / Phobos / Kratos | **optional**; detected and logged only |
 
 The DLL is discovered through its `.syhks00` section: SyringeEx scans the game
 directory for DLLs that carry that section and loads them.  No registry edits or
@@ -192,6 +192,7 @@ These automatic checks cover this machine; the in-game run is a human step:
 python3 scripts/verify_build.py         # static: PE image, hook table, exports,
                                         # version strings, feature id, log policy
 scripts/linux/load_probe.sh             # dynamic: LoadLibrary, exports, lineage conflict
+scripts/linux/probe_hosts.sh            # dynamic: custom host registration/detection gate
 scripts/linux/run_tests.sh              # engine-free unit tests, same toolchain
 python3 scripts/linux/check_eol.py      # line endings vs .gitattributes
 scripts/linux/abi_probe.sh              # optional: engine ABI sizes pinned by EngineCompat.h
@@ -207,8 +208,9 @@ checks - not a file hash - are the provenance.
 against the catalogue, the distinct hook handler exports, the version strings
 (platform name, the version - required both in the UTF-16LE version resource and
 as the compiled-in ASCII literal - and the YRpp pin), the registered Example
-feature id and the log-policy source hygiene.  It exits 0 only when every check
-passes.
+feature id, the log-policy source hygiene, the absence of the removed 2.0 host
+level API and the absence of the removed closed-source host's name.  It exits 0
+only when every check passes.
 
 `load_probe.sh` performs `LoadLibrary` -> `GetProcAddress` for the base hook
 handlers and the lineage markers, validates the marker payload and prints the resolved export count, then loads
@@ -217,6 +219,13 @@ name and expects the conflict counter to become non-zero.  It loads the DLL (its
 imports and CRT constructors run) but does **not** run `Startup`, so the engine
 hooks, logging, INI and savegame code paths are not exercised by it; an in-game
 run is still required for those.
+
+`probe_hosts.sh` covers the custom-host extension point (`Hosts.Custom.cpp`): it
+builds a stub host module plus a generated source-level registration with an
+explicit bit, and checks that detection, `HasHostName`, `(custom)` formatting and
+the `requiredHosts` gate track the module being loaded and unloaded.  The built-in
+hosts and the declaration matrix are covered by `tests/test_host_registry.cpp`
+and `tests/test_host_gate.cpp`.
 
 The real test - launching the game with SyringeEx and the DLL installed - must be
 done by a human.  See `docs/HookCatalogue.md` for what each hook does and
@@ -330,7 +339,7 @@ UnitClass 的创建/销毁、读取一个 rules 键，没有任何玩法功能�
 日志分级、`<Platform>.ini`、rules/art INI 读取与同名键接管、宿主矩阵、血统互斥、
 扩展存储（继承链 + 存档持久化，顺序帧 + store 集签名）、事件通道 `0x70–0x7F`、
 玩家命令注册。指针失效通知目前只有计数/清理，没有订阅 API。
-硬依赖只有 `gamemd.exe` + SyringeEx；Ares / Phobos / Kratos / Kaleidoscope 只做检测和日志。
+硬依赖只有 `gamemd.exe` + SyringeEx；Ares / Phobos / Kratos 只做检测和日志（派生平台可注册自己的私有宿主）。
 构建与自检：
 
 ```bash

@@ -9,6 +9,16 @@ first stable release** and the stable contracts are listed in `README.md`.
 
 ## [Unreleased]
 
+### Added
+
+- custom (private) host extension point for derived platforms:
+  `src/Core/Hosts.Custom.cpp` with
+  `VENTURE_REGISTER_HOST(uniqueId, bit, "Module.dll", "Display")`.  Custom hosts
+  use explicit bits `1u << 3` .. `1u << 31` (29 slots); a duplicate bit, module
+  name or display name is rejected at load time and reported once in the startup
+  log.  `scripts/linux/probe_hosts.sh` exercises the whole path under Wine (stub
+  host module + generated source-level registration + detection + gate log).
+
 ### Changed (breaking - 2.0 feature API)
 
 - host model: the support-level scalar is gone.  The `Tier` enum/`TierName()` and
@@ -26,6 +36,17 @@ first stable release** and the stable contracts are listed in `README.md`.
 - the startup host line is now `hosts   : Ares, Phobos (2 host(s))` or
   `hosts   : <none>` (no level suffix); the feature lines are `enabled`,
   `disabled by ... [Features] ...` or `disabled - requires host ...`.
+
+### Removed
+
+- the closed-source host platform is gone from the repository's public surface:
+  module probe and host bit (see the breaking change above), code comments,
+  `README.md`, `LICENSE.md`/`NOTICE.md`, `docs/Licensing.md`,
+  `docs/HookCatalogue.md`, `docs/SaveFormat.md`, `docs/Commands.md`,
+  `docs/Renaming.md`, `docs/MakeYourOwnPlatform.md` and the historical CHANGELOG
+  entry.  The audit fact is kept (five ecosystem platforms were audited; one of
+  them is closed-source), only the name is removed.  `scripts/verify_build.py`
+  check 9 fails the build if the name comes back.
 
 ### Documentation
 
@@ -420,9 +441,9 @@ installing the DLL does not change the game.
   enables debug lines.
 - INI reader over the game directory's `<Platform>.ini` with typed getters and
   graceful defaults; a missing INI is not an error.
-- Host detection matrix: optional hosts (Ares, Phobos, Kratos, Kaleidoscope) are
-  detected by loaded module, logged, and mapped to support tiers T0-T3.  No
-  functional dependency on any of them in this release.
+- Host detection matrix: optional hosts (Ares, Phobos, Kratos and one
+  closed-source platform) are detected by loaded module, logged, and mapped to
+  support tiers T0-T3.  No functional dependency on any of them in this release.
 - Source-level feature registry: `FeatureDescriptor`, `FeatureContext`,
   `FeatureRegistrar` and `VENTURE_REGISTER_FEATURE` (`include/platform/Feature.h`).
   One `[Features]` switch per feature `iniKey`, default on, plus `minTier` gating;

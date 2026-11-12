@@ -24,5 +24,5 @@ SOFTWARE.
 
 Scope note: this license covers the original source code distributed in this
 repository only.  It does not cover gamemd.exe, the Yuri's Revenge game assets,
-YRpp, SyringeEx, or the optional host platforms (Ares, Phobos, Kratos,
-Kaleidoscope).  See NOTICE.md for details.
+YRpp, SyringeEx, or the optional host platforms (Ares, Phobos, Kratos).  See
+NOTICE.md for details.

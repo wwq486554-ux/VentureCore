@@ -22,6 +22,7 @@ variable names are unusual for a template.
 | `verify_incremental.sh` | regression test for the incremental build: edits `include/`, `src/`, project files and linker flags in a throwaway copy and asserts the build reacts (real toolchain) |
 | `abi_probe.sh` | prints the engine ABI values pinned by `src/Engine/EngineCompat.h` |
 | `load_probe.sh` | loads the built DLL into a tiny Win32 host under Wine and resolves exports |
+| `probe_hosts.sh` | builds a stub custom host module + a generated source-level registration and verifies custom-host detection, formatting and feature gating under Wine |
 | `run_tests.sh` | compiles and runs every `tests/test_*.cpp` (a missing/empty `tests/` is a failure; each test runs with a time limit) |
 | `bench_store.sh` | builds and runs the extension-store microbenchmark (`tests/bench_store.cpp`) |
 

@@ -17,7 +17,6 @@ distributed here.
 | Ares | no | per its own project | optional host, detected at run time only |
 | Phobos | no | per its own project | optional host, detected at run time only |
 | Kratos | no | per its own project | optional host, detected at run time only |
-| Kaleidoscope | no | per its own project | optional host, detected at run time only |
 
 ## YRpp
 
@@ -50,11 +49,13 @@ section layout is used as a documented interface fact:
 * the platform refuses to start when it detects an older Syringe (the
   `SyringeFeatures` flags are false) instead of risking a corrupted process.
 
-## Ares, Phobos, Kratos, Kaleidoscope
+## Ares, Phobos, Kratos
 
 These are optional host platforms.  VentureCore detects whether their modules
 are loaded in the game process and logs the detected set (see
-`docs/HostMatrix.md`).  In v1.0.0 there is:
+`docs/HostMatrix.md`).  A derived platform can register its own private hosts
+the same way (source-level, explicit bit; no code is copied from a host).  The
+base has:
 
 * no code copied or vendored from any of them;
 * no link dependency on any of them;

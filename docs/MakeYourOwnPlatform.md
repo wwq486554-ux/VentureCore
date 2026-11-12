@@ -310,7 +310,7 @@ Before declaring a feature done:
 
 ## Don't
 
-* don't modify or vendor Ares / Phobos / Kratos / Kaleidoscope;
+* don't modify or vendor Ares / Phobos / Kratos or any other host platform;
 * don't vendor YRpp or commit `external/YRpp/`;
 * don't use the engine's `AbstractClass` extension slot (Phobos-lineage DLLs own
   it) - use the base's extension storage;

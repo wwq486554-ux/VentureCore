@@ -96,7 +96,8 @@ case, which keeps the two sides of the configuration unambiguous.
 
 Every hook handler returns 0, so Syringe's trampoline re-executes the
 instruction the hook overwrote (`mov DWORD PTR [eax],0x7eb89c`), and the
-platforms chained at the same site (Phobos, Kratos, Kaleido, Mix) keep working.
+platforms chained at the same site (Phobos, Kratos, Mix and other ecosystem
+platforms) keep working.
 
 ## Hotkeys
 

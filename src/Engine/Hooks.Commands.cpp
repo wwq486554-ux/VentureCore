@@ -21,8 +21,9 @@
 // CommandClass::Array while the engine registers its own commands:
 //
 //   0x533066 size 6 - CommandClassCallback_Register.  Same site and semantics
-//     as the reference ecosystem declares (Phobos/Kratos/Kaleido/Mix
-//     .syhks00 tables).  objdump from 0x533066: `mov DWORD PTR [eax],0x7eb89c`
+//     as the reference ecosystem declares (the audited Phobos/Kratos/Mix
+//     `.syhks00` tables and one closed-source ecosystem platform).
+//     objdump from 0x533066: `mov DWORD PTR [eax],0x7eb89c`
 //     (6 bytes), next instruction 0x53306C.  Returning 0 lets Syringe's
 //     trampoline re-execute the overwritten store, so the engine's own command
 //     object is still initialised.

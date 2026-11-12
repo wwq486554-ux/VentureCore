@@ -151,6 +151,9 @@ Host detection is a registry, not a hard-coded table:
 5. Add a run-time check to the in-game test: the startup line
    `hosts   : Ares, Phobos (2 host(s))` must list the expected hosts, and the
    per-feature `disabled - requires ...` lines must name the missing ones.
+6. Run `scripts/linux/probe_hosts.sh` after changing the registry: it builds a
+   stub custom host and verifies registration, detection, formatting and the
+   `requiredHosts` gate under Wine (no game process needed).
 
 ## 6. Repository hygiene
 

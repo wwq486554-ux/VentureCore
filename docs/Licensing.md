@@ -13,7 +13,7 @@ components are **not** covered by the MIT grant.
 | A platform you build from this base ("derived platform") | your choice, see below | your repository |
 | YRpp (engine wrapper headers) | *no license declaration* - not redistributed | no |
 | SyringeEx (`Syringe.exe`) | not covered; not redistributed | no |
-| Ares / Phobos / Kratos / Kaleidoscope | their own licenses; not redistributed | no |
+| Ares / Phobos / Kratos | their own licenses; not redistributed | no |
 | `gamemd.exe` and game assets | proprietary (EA / Westwood) | no |
 
 ## The base: MIT
@@ -69,9 +69,11 @@ See `NOTICE.md` for the full statement.
 * **SyringeEx** is used at run time and as an interface definition (the
   `.syhks00` / `.syexe00` sections).  No SyringeEx headers or source are copied;
   the hook macros come from the external YRpp `Syringe.h`.
-* **Ares / Phobos / Kratos / Kaleidoscope** are optional hosts.  v1.0.0 only
-  detects their loaded modules and logs the result; nothing is copied, linked or
-  vendored.  Their own licenses apply to them.
+* **Ares / Phobos / Kratos** are optional hosts.  The base only detects their
+  loaded modules and logs the result; nothing is copied, linked or vendored.
+  Their own licenses apply to them.  A derived platform can register its own
+  private hosts the same way (see `docs/HostMatrix.md`); that does not change the
+  licensing of the host.
 
 ## The game
 

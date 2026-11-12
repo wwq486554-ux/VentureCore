@@ -71,6 +71,11 @@ VENTURE_REGISTER_HOST(MyPlatform, 1u << 3, "MyPlatform.dll", "MyPlatform");
 * the base registers no custom host itself, and this file is separate from
   `Hosts.Builtin.cpp`, so a base sync does not overwrite a platform's entries.
 
+The whole custom-host path has an automated check: `scripts/linux/probe_hosts.sh`
+builds a stub host module plus a generated source-level registration and
+verifies detection, `HasHostName()`, the `(custom)` formatting and the
+`requiredHosts` gate while the module is loaded and after it is unloaded.
+
 A feature of that platform declares the dependency with the same bit:
 
 ```cpp
