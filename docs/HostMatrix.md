@@ -35,7 +35,7 @@ host" is expressed as an OR list, for example
 | Host | Bit | Module checked | Detection |
 | --- | --- | --- | --- |
 | `gamemd.exe` (Yuri's Revenge 1.001) | - | the process itself | **required** host executable; the hook addresses are tied to this build |
-| SyringeEx | `Syringe.exe` | the `SyringeFeatures` flags (`ESPModification`, `ZFPreservation`, `ReladdrInstructionFixup`) set at injection | **required**: if the flags are not all set, the platform shows a message box and terminates the game |
+| SyringeEx | - (not a host bit; hard requirement) | `Syringe.exe` | **required**: the `SyringeFeatures` flags (`ESPModification`, `ZFPreservation`, `ReladdrInstructionFixup`) must all be set, otherwise the platform shows a message box and terminates the game |
 | Ares | `1u << 0` (`Host::Ares`) | `Ares.dll` | loaded module (`GetModuleHandleA`) |
 | Phobos | `1u << 1` (`Host::Phobos`) | `Phobos.dll` | loaded module |
 | Kratos | `1u << 2` (`Host::Kratos`) | `Kratos.dll` | loaded module |
@@ -68,7 +68,14 @@ VENTURE_REGISTER_HOST(MyPlatform, 1u << 3, "MyPlatform.dll", "MyPlatform");
 * the first definition wins; a duplicate bit, module name or display name is
   rejected at load time and reported once in `<Platform>.log` as an error
   (`hosts   : host registration rejected: ...`);
-* `moduleName` / `displayName` must be static-lifetime strings (literals);
+* `moduleName` / `displayName` must be static-lifetime strings (literals) and are
+  limited to 63 characters - the same cap as the marker ABI; a longer name is
+  rejected at load time and reported;
+* registration is only accepted before the first detection pass: the known bit
+  set and the detected set are frozen at startup, and a host registered after
+  detection is rejected and reported as a problem (an error in the startup
+  block) instead of silently joining (or missing from) the set the features were
+  gated on;
 * the base registers no custom host itself, and this file is separate from
   `Hosts.Builtin.cpp`, so a base sync does not overwrite a platform's entries.
 
@@ -114,11 +121,17 @@ How the base handles it (all at startup, once):
   directory, the DLLs of this lineage (they are refused by the lineage check,
   see below) and our own DLL, then resolves
   `VENTURE_HOST_MARKER_EXPORT_GET_INFO` (`VentureHost_GetInfo`) on the rest;
-* calls the export inside `__try/__except`: a marker export that crashes is
-  contained, logged as a problem and skipped - it never takes the game down;
-* validates the marker: `magic` and `abiVersion` must match, `name` must be
-  NUL-terminated within 1..63 characters, `version` null or NUL-terminated within
-  63 characters.  Anything else is logged as a problem and skipped;
+* takes a temporary module reference (`GetModuleHandleEx`, not a permanent pin)
+  while it probes a module, so a concurrent unload cannot pull the module out
+  from under the scan;
+* calls the marker export and copies its `magic`/`abiVersion` and the
+  `name`/`version` strings into local fixed-size copies inside one **POD-only
+  `__try/__except` region**: the untrusted pointers are never dereferenced
+  outside it, so a marker export that raises, or returns a bad pointer, is
+  caught by the same guard, recorded as a problem and skipped;
+* validates the copied marker: `magic` and `abiVersion` must match, `name` must
+  be NUL-terminated within 1..63 characters, `version` null or NUL-terminated
+  within 63 characters.  Anything else is logged as a problem and skipped;
 * registers the platform as a **dynamic custom host**: the bit is the lowest free
   bit of the shared custom range (`1u << 3` .. `1u << 31`, 29 slots; source-level
   custom hosts and discovered hosts share it).  Candidates are sorted by module
@@ -127,7 +140,12 @@ How the base handles it (all at startup, once):
   is logged and the host is ignored;
 * copies the name/version strings immediately (the exporting module may be
   unloaded later), records the marker version and logs it at Debug level
-  (`hosts   : SelfHost -> ...SelfHostMarker.dll (marker version v1.2.3)`).
+  (`hosts   : SelfHost -> ...SelfHostMarker.dll (marker version v1.2.3)`);
+* builds the startup diagnostics (`hosts   : ...` and the per-feature
+  `disabled - requires ...` lines) with a bounded append: when the detected-host
+  list does not fit, the line is truncated (the cut ends with `...`), a warning
+  says the list was truncated, and the detected count is still printed - a long
+  or numerous host set cannot overflow the startup buffer.
 
 A discovered host has **no compile-time bit**, so `requiredHosts` / `anyOfHosts`
 cannot name it; a feature queries it by name:
@@ -146,11 +164,14 @@ marker is **not** a license to impersonate a host: a DLL derived from this base
 is a lineage copy, not an independent host, and the lineage mutual-exclusion
 check refuses it (the scan skips modules that export the lineage marker).
 
-`scripts/linux/probe_hosts.sh` builds a marker-exporting stub DLL and exercises
-the whole path under Wine, including malformed markers (wrong magic, null name)
-and a marker export that raises an access violation; all three must be rejected
-without a crash, while the valid host is detected, gets the next custom bit and
-is visible through `HasHostName()` to a feature.
+`scripts/linux/probe_hosts.sh` builds marker-exporting stub DLLs and exercises
+the whole path under Wine, including five malformed markers (wrong magic, null
+name, a marker export that raises an access violation, a wild name pointer and
+an over-long name); all five must be rejected without a crash, while the valid
+host is detected, gets the next custom bit and is visible through
+`HasHostName()` to a feature.  The guarded marker reader itself is also covered
+by `tests/test_host_registry.cpp` (wild marker pointer, exact 63-character
+boundary, truncated formatting buffers).
 
 ## Gate semantics
 
@@ -164,6 +185,12 @@ enabled = [Features] switch
 built-in hosts plus the platform's own custom hosts).  A host discovered at run
 time has no compile-time bit; the feature checks it by name in its own body and
 logs the consequence itself.
+
+After host detection the base validates every registered descriptor's
+`requiredHosts` / `anyOfHosts` against the known bit set, and a bit that belongs
+to no registered host is reported in the startup log (a `feature : ...` error
+naming the feature and the unknown bit): a mis-spelled or removed host bit must
+not silently disable a feature.
 
 Startup log examples:
 

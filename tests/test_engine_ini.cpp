@@ -1,5 +1,6 @@
 // Unit test: the INI takeover core (owned-key registry, purge, rules-INI
-// observers, [Platform] IniTakeover gating) and its typed-read contract.
+// observers, [Platform] IniTakeover gating, the engine-section deny-list
+// including the engine type-list sections) and its typed-read contract.
 //
 // Runs as a plain console program on this machine: the takeover core only needs
 // the small interfaces it declares, so the test implements them over an
@@ -294,6 +295,64 @@ int __cdecl main()
 	Check(IniTakeover::RefusedKeyCount() == 2, "both reserved-section registrations are counted as refused");
 	Check(g_warnings == 2, "both refusals are reported through the warn sink");
 	IniTakeover::SetWarnSink(nullptr);
+
+	// -- 3c. deny-list: engine type-list sections are refused (START-02) -----
+	// RulesClass::Init reads these type-name lists itself right after our purge
+	// hook, so owning a type name there would delete the type before the engine
+	// sees it.  The list was recomputed from gamemd.exe (the second review's list
+	// named scenario sections and non-existent sections).
+	const char* const typeListSections[] = {
+		"InfantryTypes",
+		"VehicleTypes",
+		"AircraftTypes",
+		"BuildingTypes",
+		"SuperWeaponTypes",
+		"Warheads",
+		"Teams",
+		"TerrainTypes",
+		"SmudgeTypes",
+		"OverlayTypes",
+	};
+	bool allTypeListsReserved = true;
+	for (const char* const section : typeListSections)
+	{
+		if (!IniTakeover::IsReservedEngineSection(section))
+			allTypeListsReserved = false;
+	}
+	Check(allTypeListsReserved, "all ten engine type-list sections are on the deny-list");
+	Check(IniTakeover::IsReservedEngineSection("warheads") && IniTakeover::IsReservedEngineSection("INFANTRYTYPES"),
+		"the type-list entries are matched case-insensitively");
+
+	// Fact corrections from the second review (see the START-02 triage entry): a
+	// name that the engine does not read as a type list must NOT be refused, or a
+	// legitimate platform-namespaced section would be unusable.
+	Check(!IniTakeover::IsReservedEngineSection("Projectiles"),
+		"[Projectiles] is not an engine type-list section (it does not exist in gamemd.exe)");
+	Check(!IniTakeover::IsReservedEngineSection("Weapons"),
+		"[Weapons] has no standalone engine section name");
+	Check(!IniTakeover::IsReservedEngineSection("Infantry"),
+		"[Infantry] is a map/scenario section, not an engine type list");
+	Check(!IniTakeover::IsReservedEngineSection("Units"),
+		"[Units] is a map/scenario section, not an engine type list");
+	Check(!IniTakeover::IsReservedEngineSection("Aircraft"),
+		"[Aircraft] is a map/scenario section, not an engine type list");
+
+	// The refusal holds for a type list: nothing is registered, nothing purged.
+	const std::size_t refusedBeforeTypeList = IniTakeover::RefusedKeyCount();
+	const std::size_t ownedBeforeTypeList = IniTakeover::OwnedKeyCount();
+	IniTakeover::SetWarnSink(&CaptureWarning);
+	IniTakeover::RegisterOwnedKey("Warheads", "MyCustomWarhead");
+	IniTakeover::SetWarnSink(nullptr);
+	Check(IniTakeover::OwnedKeyCount() == ownedBeforeTypeList,
+		"an owned key in a type-list section is not registered");
+	Check(IniTakeover::RefusedKeyCount() == refusedBeforeTypeList + 1,
+		"the type-list refusal is counted");
+
+	FakeIni typeListIni;
+	typeListIni.Set("Warheads", "MyCustomWarhead", "keep-me");
+	const IniTakeover::ApplyResult typeListResult = IniTakeover::Apply(nullptr, typeListIni);
+	Check(typeListResult.purged == 0, "nothing is purged for a refused type-list key");
+	Check(typeListIni.Has("Warheads", "MyCustomWarhead"), "the engine's type entry survives the purge");
 
 	IniTakeover::RegisterRulesIniObserver(&ObserveRulesIni);
 	IniTakeover::RegisterRulesIniObserver(nullptr);

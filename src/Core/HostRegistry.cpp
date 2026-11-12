@@ -44,18 +44,71 @@ bool EqualsIgnoreCase(const char* const left, const char* const right)
 	return *a == '\0' && *b == '\0';
 }
 
-void Append(char* const buffer, const std::size_t bufferSize, const char* const text)
+// Longest host name accepted by Register(): the marker ABI cap.  Names are
+// compared and printed with bounded helpers, so a source-level name longer than
+// this is rejected at registration instead of being truncated later (HOST-02).
+constexpr std::size_t kHostNameLimit = VENTURE_HOST_MARKER_NAME_MAX;
+
+// Bounded, truncation-safe text builder for the host diagnostics (HOST-02).
+// The previous append used strcat_s and ignored its return value: a long enough
+// detected-host name list made the C runtime's invalid-parameter handler
+// terminate the process instead of truncating the line.  This builder never
+// writes past `bufferSize`, records truncation, and Finish() turns the tail into
+// "..." so a truncated list is visibly truncated in the log.
+struct TextBuffer
 {
-	if (!buffer || bufferSize == 0 || !text)
+	char* buffer;
+	std::size_t bufferSize;
+	std::size_t used;
+	bool truncated;
+};
+
+void TextBufferAppend(TextBuffer& text, const char* const value)
+{
+	if (!text.buffer || text.bufferSize == 0 || !value)
 		return;
-	strcat_s(buffer, bufferSize, text);
+
+	const std::size_t capacity = text.bufferSize - 1u; // room for the terminator
+	for (const char* character = value; *character != '\0'; ++character)
+	{
+		if (text.used >= capacity)
+		{
+			text.truncated = true;
+			break;
+		}
+		text.buffer[text.used] = *character;
+		++text.used;
+	}
+	text.buffer[text.used] = '\0';
 }
 
-void AppendHexBit(const unsigned bit, char* const buffer, const std::size_t bufferSize)
+void TextBufferFinish(TextBuffer& text)
 {
-	char text[24] = {};
-	_snprintf_s(text, sizeof(text), _TRUNCATE, "0x%08X", bit);
-	Append(buffer, bufferSize, text);
+	if (!text.buffer || text.bufferSize == 0)
+		return;
+
+	const std::size_t capacity = text.bufferSize - 1u;
+	if (text.truncated && capacity >= 4u)
+	{
+		// Replace the last three characters with an ellipsis: the buffer is full,
+		// and the prefix up to capacity - 3 is still the beginning of the intended
+		// text, so the result is a truncated prefix ending with "...".
+		text.buffer[capacity - 3u] = '.';
+		text.buffer[capacity - 2u] = '.';
+		text.buffer[capacity - 1u] = '.';
+		text.buffer[capacity] = '\0';
+	}
+	else
+	{
+		text.buffer[text.used] = '\0';
+	}
+}
+
+void AppendHexBit(const unsigned bit, TextBuffer& text)
+{
+	char formatted[24] = {};
+	_snprintf_s(formatted, sizeof(formatted), _TRUNCATE, "0x%08X", bit);
+	TextBufferAppend(text, formatted);
 }
 
 std::string LowerAsciiKey(const std::string& text)
@@ -87,22 +140,27 @@ bool IsUnderWindowsDirectory(const char* const path)
 	return venture::lineage_detail::IsPathUnderDirectory(path, windowsDirectory);
 }
 
-// Calls an untrusted VENTURE_HOST_MARKER_EXPORT_GET_INFO export under SEH.  A
-// marker that crashes must not take the game down: the exception is treated as
-// "not a valid host" and reported by the caller (2.0 marker defence; the
-// __try block deliberately holds no C++ object with a destructor).
-bool TryCallHostMarker(
-	const VentureHostGetInfoFn getInfo,
-	const VentureHostInfo** const outInfo)
+// Copies at most `capacity` characters from an untrusted pointer into
+// `destination` (which must hold `capacity` bytes).  It is called only from the
+// __try region of ReadHostMarker(): a pointer to unmapped memory faults on the
+// first read, and the caller's __except turns that into "not a valid host"
+// instead of a page fault in the game (HOST-01 marker defence).
+//
+// A terminator is deliberately NOT appended when the source has none within
+// `capacity`: the validator runs strnlen_s(destination, capacity), which reports
+// `capacity` for a full buffer and rejects the marker - fabricating a terminator
+// would make an over-long name look valid.
+void CopyUntrustedString(
+	const char* const source,
+	char* const destination,
+	const std::size_t capacity)
 {
-	__try
+	for (std::size_t index = 0; index < capacity; ++index)
 	{
-		*outInfo = getInfo();
-		return true;
-	}
-	__except (EXCEPTION_EXECUTE_HANDLER)
-	{
-		return false;
+		const char character = source[index];
+		destination[index] = character;
+		if (character == '\0')
+			return;
 	}
 }
 }
@@ -113,6 +171,7 @@ HostRegistry::HostRegistry()
 	: knownMask_(0)
 	, mask_(0)
 	, detectionRan_(false)
+	, reportedProblems_(0)
 {
 	// The whole 32-bit host space is a fixed-size table; reserving it up front
 	// keeps the HostDefinition pointers in DetectedHost valid (registration is
@@ -137,6 +196,27 @@ bool HostRegistry::Register(const HostDefinition& definition)
 	if (!moduleName || moduleName[0] == '\0' || !displayName || displayName[0] == '\0')
 	{
 		AddProblem("host registration rejected: the module and display names must be non-empty");
+		return false;
+	}
+
+	// Name length cap (HOST-02): a name longer than the marker ABI limit is
+	// rejected here so every downstream compare/print uses a bounded buffer.
+	// strnlen_s is bounded, so an unterminated string is rejected as over-long
+	// instead of being walked.
+	const std::size_t moduleNameLength = strnlen_s(moduleName, kHostNameLimit + 1u);
+	if (moduleNameLength == 0 || moduleNameLength > kHostNameLimit)
+	{
+		AddProblem(
+			"host registration rejected: the module name must be 1..%u characters",
+			static_cast<unsigned>(kHostNameLimit));
+		return false;
+	}
+	const std::size_t displayNameLength = strnlen_s(displayName, kHostNameLimit + 1u);
+	if (displayNameLength == 0 || displayNameLength > kHostNameLimit)
+	{
+		AddProblem(
+			"host registration rejected: the display name must be 1..%u characters",
+			static_cast<unsigned>(kHostNameLimit));
 		return false;
 	}
 
@@ -334,15 +414,24 @@ const HostDefinition* HostRegistry::FindByName(const char* const name) const
 const char* HostRegistry::FormatNames(
 	const unsigned mask,
 	char* const buffer,
-	const std::size_t bufferSize) const
+	const std::size_t bufferSize,
+	bool* const truncated) const
 {
 	if (!buffer || bufferSize == 0)
+	{
+		if (truncated)
+			*truncated = false;
 		return "";
+	}
 
+	TextBuffer text{buffer, bufferSize, 0, false};
 	buffer[0] = '\0';
 	if (mask == 0)
 	{
-		Append(buffer, bufferSize, kNone);
+		TextBufferAppend(text, kNone);
+		TextBufferFinish(text);
+		if (truncated)
+			*truncated = text.truncated;
 		return buffer;
 	}
 
@@ -354,30 +443,44 @@ const char* HostRegistry::FormatNames(
 			continue;
 
 		if (!first)
-			Append(buffer, bufferSize, ", ");
+			TextBufferAppend(text, ", ");
 
 		const HostDefinition* const definition = FindByBit(bit);
 		if (definition)
-			Append(buffer, bufferSize, definition->displayName);
+			TextBufferAppend(text, definition->displayName);
 		else
-			AppendHexBit(bit, buffer, bufferSize);
+			AppendHexBit(bit, text);
 		first = false;
 	}
 
 	if (first)
-		Append(buffer, bufferSize, kNone);
+		TextBufferAppend(text, kNone);
+	TextBufferFinish(text);
+	if (truncated)
+		*truncated = text.truncated;
 	return buffer;
 }
 
-const char* HostRegistry::FormatDetected(char* const buffer, const std::size_t bufferSize) const
+const char* HostRegistry::FormatDetected(
+	char* const buffer,
+	const std::size_t bufferSize,
+	bool* const truncated) const
 {
 	if (!buffer || bufferSize == 0)
+	{
+		if (truncated)
+			*truncated = false;
 		return "";
+	}
 
+	TextBuffer text{buffer, bufferSize, 0, false};
 	buffer[0] = '\0';
 	if (detected_.empty())
 	{
-		Append(buffer, bufferSize, kNone);
+		TextBufferAppend(text, kNone);
+		TextBufferFinish(text);
+		if (truncated)
+			*truncated = text.truncated;
 		return buffer;
 	}
 
@@ -385,12 +488,15 @@ const char* HostRegistry::FormatDetected(char* const buffer, const std::size_t b
 	for (const DetectedHost& detectedHost : detected_)
 	{
 		if (!first)
-			Append(buffer, bufferSize, ", ");
-		Append(buffer, bufferSize, detectedHost.definition->displayName);
+			TextBufferAppend(text, ", ");
+		TextBufferAppend(text, detectedHost.definition->displayName);
 		if (detectedHost.definition->kind != HostKind::Builtin)
-			Append(buffer, bufferSize, " (custom)");
+			TextBufferAppend(text, " (custom)");
 		first = false;
 	}
+	TextBufferFinish(text);
+	if (truncated)
+		*truncated = text.truncated;
 	return buffer;
 }
 
@@ -404,6 +510,31 @@ const char* HostRegistry::ProblemAt(const int index) const
 	if (index < 0 || index >= ProblemCount())
 		return "";
 	return problems_[static_cast<std::size_t>(index)].c_str();
+}
+
+int HostRegistry::ReportNewProblems(const HostProblemSink sink)
+{
+	if (!sink)
+		return 0;
+
+	int reported = 0;
+	const int total = ProblemCount();
+	while (reportedProblems_ < total)
+	{
+		// Copy the message out before the sink runs: the sink usually logs, and a
+		// log line must stay valid even if the sink re-enters the registry.
+		char message[256] = {};
+		_snprintf_s(
+			message,
+			sizeof(message),
+			_TRUNCATE,
+			"%s",
+			problems_[static_cast<std::size_t>(reportedProblems_)].c_str());
+		++reportedProblems_;
+		sink(message);
+		++reported;
+	}
+	return reported;
 }
 
 void HostRegistry::AddProblem(const char* const format, ...)
@@ -457,6 +588,29 @@ void HostRegistry::SortDetected()
 }
 
 unsigned HostRegistry::RegisterDynamicHost(
+	const char* const moduleName,
+	const char* const displayName,
+	const char* const version,
+	const char* const modulePath)
+{
+	// HOST-04: detection closes registration.  A discovered host registered after
+	// the fact would change the detected set the feature gate was built from
+	// (Platform.cpp snapshots the mask into the FeatureContext), so reject it and
+	// record the problem for the post-initialization drain (HOST-05) instead of
+	// silently extending the set.
+	if (detectionRan_)
+	{
+		AddProblem(
+			"self-identified host \"%s\" from module \"%s\" rejected: registered after "
+			"host detection ran (the detected host set is frozen)",
+			displayName ? displayName : "<unnamed>",
+			moduleName ? moduleName : "<unnamed>");
+		return 0;
+	}
+	return RegisterDynamicHostInternal(moduleName, displayName, version, modulePath);
+}
+
+unsigned HostRegistry::RegisterDynamicHostInternal(
 	const char* const moduleName,
 	const char* const displayName,
 	const char* const version,
@@ -544,26 +698,68 @@ void HostRegistry::DiscoverSelfIdentifyingHosts()
 				if (!entry.hModule || IsUnderWindowsDirectory(entry.szExePath))
 					continue;
 
+				// HOST-06: the Toolhelp snapshot only says the module was loaded
+				// when it was taken.  Hold a temporary reference (not
+				// UNCHANGED_REFCOUNT, and not PIN - that would leak the handle and
+				// prevent a normal unload) so a FreeLibrary from another thread
+				// cannot pull the module out while GetProcAddress, the marker call
+				// and the string copy run.  Released before the marker is validated;
+				// the validator only touches the copied strings.
+				HMODULE pinnedModule = nullptr;
+				if (!GetModuleHandleExA(
+						GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS,
+						reinterpret_cast<LPCSTR>(entry.hModule),
+						&pinnedModule)
+					|| !pinnedModule)
+				{
+					// The module went away between the snapshot and the pin - it is
+					// not a host of this process.
+					continue;
+				}
+
 				// A DLL of this lineage is not an independent host: the lineage
 				// mutual-exclusion check owns it, so it cannot masquerade as a host
 				// through this protocol.  This also skips our own DLL.
-				if (GetProcAddress(entry.hModule, VENTURE_LINEAGE_EXPORT_GET_INFO))
+				if (GetProcAddress(pinnedModule, VENTURE_LINEAGE_EXPORT_GET_INFO))
+				{
+					FreeLibrary(pinnedModule);
 					continue;
+				}
 
 				const auto getInfo = reinterpret_cast<VentureHostGetInfoFn>(
-					GetProcAddress(entry.hModule, VENTURE_HOST_MARKER_EXPORT_GET_INFO));
+					GetProcAddress(pinnedModule, VENTURE_HOST_MARKER_EXPORT_GET_INFO));
 				if (!getInfo)
+				{
+					FreeLibrary(pinnedModule);
 					continue;
+				}
 
-				const VentureHostInfo* marker = nullptr;
-				if (!TryCallHostMarker(getInfo, &marker))
+				// HOST-01: the whole untrusted read (export call plus every pointer
+				// it returns) runs inside ReadHostMarker's POD-only SEH region; what
+				// comes back is copied into caller storage, so a wild name pointer is
+				// a rejection instead of a page fault.  The pin is still held while
+				// the copy runs and is released right after it.
+				char markerName[VENTURE_HOST_MARKER_NAME_MAX + 1u] = {};
+				char markerVersion[VENTURE_HOST_MARKER_NAME_MAX + 1u] = {};
+				VentureHostInfo marker{};
+				const HostMarkerRead markerRead = ReadHostMarker(
+					getInfo,
+					&marker,
+					markerName,
+					sizeof(markerName),
+					markerVersion,
+					sizeof(markerVersion));
+				FreeLibrary(pinnedModule);
+				pinnedModule = nullptr;
+
+				if (markerRead == HostMarkerRead::Raised)
 				{
 					AddProblem(
 						"host marker in module \"%s\" raised an exception - ignored",
 						entry.szModule);
 					continue;
 				}
-				if (!IsValidHostMarker(marker))
+				if (markerRead != HostMarkerRead::Valid)
 				{
 					AddProblem(
 						"host marker in module \"%s\" is invalid (magic, ABI or name/version) - ignored",
@@ -574,9 +770,10 @@ void HostRegistry::DiscoverSelfIdentifyingHosts()
 				Candidate candidate;
 				candidate.moduleName = entry.szModule;
 				candidate.modulePath = entry.szExePath;
-				// Copy the marker strings before the module could be unloaded.
-				candidate.displayName = marker->name;
-				candidate.version = marker->version ? marker->version : "";
+				// The marker strings were copied into local storage while the module
+				// was pinned; the registry owns its copies from here on.
+				candidate.displayName = marker.name ? marker.name : "";
+				candidate.version = marker.version ? marker.version : "";
 				candidates.push_back(std::move(candidate));
 			} while (Module32Next(snapshot, &entry));
 		}
@@ -590,12 +787,69 @@ void HostRegistry::DiscoverSelfIdentifyingHosts()
 	});
 	for (const Candidate& candidate : candidates)
 	{
-		RegisterDynamicHost(
+		RegisterDynamicHostInternal(
 			candidate.moduleName.c_str(),
 			candidate.displayName.c_str(),
 			candidate.version.c_str(),
 			candidate.modulePath.c_str());
 	}
+}
+
+HostMarkerRead ReadHostMarker(
+	const VentureHostGetInfoFn getInfo,
+	VentureHostInfo* const copy,
+	char* const nameBuffer,
+	const std::size_t nameBufferSize,
+	char* const versionBuffer,
+	const std::size_t versionBufferSize)
+{
+	// The validator below runs strnlen_s(..., 64) on both copies, so the caller
+	// must provide at least the documented 64 bytes; a smaller buffer is rejected
+	// instead of being over-read.
+	constexpr std::size_t kCopyCapacity = VENTURE_HOST_MARKER_NAME_MAX + 1u;
+	if (!getInfo || !copy || !nameBuffer || !versionBuffer
+		|| nameBufferSize < kCopyCapacity || versionBufferSize < kCopyCapacity)
+	{
+		return HostMarkerRead::Invalid;
+	}
+
+	*copy = VentureHostInfo{};
+	nameBuffer[0] = '\0';
+	versionBuffer[0] = '\0';
+
+	// POD-only guarded region (HOST-01): the untrusted export is called here and
+	// every byte read through its pointers is copied into caller storage before
+	// the region exits.  No C++ object with a destructor is constructed inside,
+	// which is what makes __try legal in this build (no /EH).
+	__try
+	{
+		const VentureHostInfo* const info = getInfo();
+		if (!info)
+			return HostMarkerRead::Invalid;
+
+		// The alignment/stride of a hostile struct is not trusted either: read
+		// only the fields the contract defines, each read guarded by the region.
+		copy->magic = info->magic;
+		copy->abiVersion = info->abiVersion;
+		if (info->name)
+		{
+			CopyUntrustedString(info->name, nameBuffer, kCopyCapacity);
+			copy->name = nameBuffer;
+		}
+		if (info->version)
+		{
+			CopyUntrustedString(info->version, versionBuffer, kCopyCapacity);
+			copy->version = versionBuffer;
+		}
+	}
+	__except (EXCEPTION_EXECUTE_HANDLER)
+	{
+		return HostMarkerRead::Raised;
+	}
+
+	// Validate the copy, not the foreign pointer.  The contract check is the same
+	// one the marker protocol documents (IsValidHostMarker).
+	return IsValidHostMarker(copy) ? HostMarkerRead::Valid : HostMarkerRead::Invalid;
 }
 
 bool IsValidHostMarker(const VentureHostInfo* const info)
@@ -634,17 +888,17 @@ bool IsModuleLoaded(const char* const moduleName)
 	return moduleName && GetModuleHandleA(moduleName) != nullptr;
 }
 
-bool HasHost(const Host host)
+bool __cdecl HasHost(const Host host)
 {
 	return Hosts().HasBit(HostBit(host));
 }
 
-bool HasHostBit(const unsigned bit)
+bool __cdecl HasHostBit(const unsigned bit)
 {
 	return Hosts().HasBit(bit);
 }
 
-bool HasHostName(const char* const name)
+bool __cdecl HasHostName(const char* const name)
 {
 	return Hosts().HasName(name);
 }

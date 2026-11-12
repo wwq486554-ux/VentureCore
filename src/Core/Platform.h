@@ -17,6 +17,14 @@ namespace venture
 // below stays a no-op (the startup gate stays Refused, see Core/PlatformGate.h).
 bool Startup();
 
+// Tears the platform down and closes the log.  This is an entry point for a
+// derived platform's own teardown path - the base itself never calls it (no
+// engine hook triggers it).  Shutdown() is final for the process: feature
+// initialization is once-only (`InitializeFeatures` is documented to be safe to
+// call once, from Startup), so the startup gate becomes
+// `PlatformGate::State::Finished` and a later Startup() returns false instead
+// of initializing every feature a second time.  Calling it before a successful
+// Startup() is a no-op.  See src/Core/PlatformGate.h and START-04.
 void Shutdown();
 
 // True once Startup() completed successfully.  The engine-facing hook handlers

@@ -69,14 +69,52 @@ description / owning feature / source file` and returns the validated value.
   `key [MyFeature] ProgressEvery: '12abc' is not a valid integer - using the
   default '100'`.  Invalid values are never silent, and there is no switch to
   turn the warning off.
-* **Duplicate declaration** - two modules declaring the same `(section, key)`
-  produce a warning naming both and keep the first declaration; a module
-  declaring a base `[Platform]` key is warned that the key is reserved.
+* **Duplicate declaration** - the first declaration wins: two modules declaring
+  the same `(section, key)` produce a warning naming both, and every later read
+  is resolved against the first declaration's type/default/range - a
+  re-declaration with a conflicting default or range is warned about instead of
+  overwriting the recorded effective value; an identical re-declaration (a
+  repeated base read, or a `[Groups]` switch shared by several modules) is not a
+  duplicate and does not warn.  The parsed value, the invalid count and the
+  template row therefore agree with the warning: all four come from the first
+  declaration.  A module declaring a base `[Platform]` key is warned that the
+  key is reserved and its declaration is ignored.
 * **Effective values** - each declaration logs one Debug line; the startup block
   ends with one Info summary: `ini keys: 9 registered, 1 invalid, 2 unknown`.
+  `registered` counts the keys known to the registry (built-in `[Platform]` keys,
+  declared feature keys and entries recorded through a legacy getter), `invalid`
+  counts every rejected value read during startup - feature keys plus
+  `[Features]` and `[Groups]` switch values - and `unknown` counts the entries the
+  unknown-key scan could not classify.  The summary is a startup snapshot:
+  `[Platform] IniTakeover` is only consumed when the engine first parses
+  `rules(md).ini`, after this block, so an invalid value there is warned about
+  separately and recorded in a separate late-invalid counter
+  (`LateInvalidCount()`) instead of being folded into the startup `invalid`
+  count.
 * **Missing vs empty** - a missing key keeps the default without a warning; a key
   present with an empty value is validated like any other token (so an empty
   bool is invalid).
+
+### Size limits and truncation
+
+The file is read through the Win32 profile API, so the platform inherits its hard
+limits.  They are not silent - each one is diagnosed in the log:
+
+* a raw value is read into a 512-byte buffer (511 characters plus the
+  terminator).  A value that fills the buffer produces one warning per key that
+  it may have been truncated; the validated value is the truncated text - the
+  base does not drop the user's value, it validates what the profile API could
+  deliver;
+* the startup scan enumerates section names into a 16 KiB buffer and one
+  section's entries into a 32 KiB buffer - hard limits of the profile API - and a
+  key name longer than 255 characters cannot be represented; a buffer that is
+  filled and a skipped long key are reported at Debug level rather than silently;
+* a declared string key is copied into the caller's buffer and is always
+  NUL-terminated; a value that does not fit is truncated and the truncation is
+  reported at Debug level.
+
+An oversized or truncated `<Platform>.ini` entry is a configuration problem; the
+base does not repair it and never rewrites the file.
 
 ### Unknown keys at startup
 
@@ -108,10 +146,16 @@ dump - it does not change the feature API.
 `[Platform] DumpIniTemplate=yes` (development only) writes
 `<Platform>.ini.generated` next to the log at startup: the registry rendered as
 INI text ([Platform], [Groups], [Features] and one section per module key, with
-type/default/range/description annotations).  Compare it with the shipped
-`VentureCore.ini.example` (or run `python3 scripts/compare_ini_template.py`
-against a generated file) when a key changed.  The dump is the R1 route; the
-build-time manifest route (R2) is deliberately not implemented.
+type/default/range/description annotations).  The rendered value of every key is
+its **declared default**, not the value the local `<Platform>.ini` happens to
+contain: the dump is a declaration reference for comparing the shipped
+`VentureCore.ini.example` with what the code really reads, so it does not depend
+on the developer's local overrides.  `[Features]` switches are rendered with each
+module's `defaultEnabled`.  Compare the two files with
+`python3 scripts/compare_ini_template.py <generated> VentureCore.ini.example`
+(add `--values` to compare the value text as well) when a key changed.  The dump
+is the R1 route; the build-time manifest route (R2) is deliberately not
+implemented.
 
 The rest of this document is about the third layer's engine half (typed reads
 over the parsed rules/art INI) and the takeover that keeps our own rules keys
@@ -135,7 +179,7 @@ not re-open the files:
 
 | Function | Returns |
 | --- | --- |
-| `EngineIni::ReadBool(ini, section, key, def)` | `def` when the INI/section/key is missing, otherwise the engine's boolean parse (`yes`/`no`/`true`/`false`/`on`/`off`/`1`/`0`) |
+| `EngineIni::ReadBool(ini, section, key, def)` | `def` when the INI/section/key is missing; otherwise `CCINIClass::ReadBool`, which parses the **first character** (`1`/`T`/`Y` → true, `0`/`F`/`N` → false, anything else → `def`, so `on`/`off` fall back to `def`) - see "Boolean and integer parsing is not shared with the platform INI" below |
 | `EngineIni::ReadInt(ini, section, key, def)` | `def` when missing, otherwise the engine's integer parse |
 | `EngineIni::ReadDouble(ini, section, key, def)` | `def` when missing, otherwise the engine's floating-point parse |
 | `EngineIni::ReadString(ini, section, key, def, buffer, size)` | the value, or `def`, copied into `buffer` (always NUL-terminated) |
@@ -162,9 +206,15 @@ case-insensitively (`yes`/`no`, `true`/`false`, `on`/`off`, `1`/`0`) and rejects
 an invalid value with a warning; a declared integer must be one complete number
 inside its range.  The legacy `Ini::GetInt` still parses a leading decimal number
 and ignores trailing text (`12abc` → 12); do not rely on that - declare the key
-with `VENTURE_INI_INT`.  Do not assume a spelling accepted by one parser is
-accepted by the other when documenting a key; the full set of `<Platform>.ini`
-keys is documented in `README.md` and `VentureCore.ini.example`.
+with `VENTURE_INI_INT`.  A key that a module reads only through a legacy getter is
+recorded as **known** by the registry: the startup scan does not report it as
+unknown, and the template dump lists it (annotated as a lenient/legacy read).
+The value itself is still read with the legacy lenient rules and is **not
+validated** - no token/range check, no invalid-count entry - so declare a key
+with the trio when its value needs validation.  Do not assume a spelling accepted
+by one parser is accepted by the other when documenting a key; the full set of
+`<Platform>.ini` keys is documented in `README.md` and
+`VentureCore.ini.example`.
 
 The same functions work for the art INI:
 
@@ -223,11 +273,15 @@ rules INI before any other consumer reads it.
   sections: `[General]`, `[Basic]`, `[AudioVisual]`, `[MultiPlayer]`,
   `[Maximums]`, `[AI]`, `[Colors]`, `[Countries]`, `[Sides]`, `[CrateRules]`,
   `[CombatDamage]`, `[Radiation]`, `[ElevationModel]`, `[WallModel]`,
-  `[SpecialFlags]`, `[Powerups]`, `[LandCharacteristics]`, `[MouseCursors]`
+  `[SpecialFlags]`, `[Powerups]`, `[LandCharacteristics]`, `[MouseCursors]`,
+  plus the engine's type-list sections, which `RulesClass::Init` reads itself
+  right after the purge hook: `[InfantryTypes]`, `[VehicleTypes]`,
+  `[AircraftTypes]`, `[BuildingTypes]`, `[SuperWeaponTypes]`, `[Warheads]`,
+  `[Teams]`, `[TerrainTypes]`, `[SmudgeTypes]`, `[OverlayTypes]`
   (case-insensitive, `IniTakeover::IsReservedEngineSection`).  Without the guard
   a mis-registered vanilla key would be silently deleted from the parsed INI
   before the engine reads it - the takeover would break the game instead of
-  protecting it.
+  protecting it; owning a type-list key would delete the type itself.
 * **Purge** - the engine hook removes the registered pairs from the parsed rules
   INI. Only registered pairs are touched; every other key, including an unowned
   key in the same section, is left alone. The purge is idempotent, and it runs
@@ -279,6 +333,11 @@ Log lines (from the takeover hook):
 
 * `[IniTakeover] [Platform] IniTakeover=yes|no (N owned key(s) registered,
   M refused by the deny-list)` - info, once, at the first rules load;
+* `[IniTakeover] [Platform] IniTakeover has an invalid value - the default 'yes'
+  is in effect; N invalid key(s) resolved after the startup ini summary` - warn,
+  when the switch value was rejected: the switch is read at this late stage, so
+  it cannot be part of the startup `ini keys:` summary (see "Registry rules"
+  above);
 * `[IniTakeover] ... refused as platform-owned - '<section>' is an engine core
   section; put platform keys in a platform-namespaced section` - warn, once per
   refused registration;
@@ -317,9 +376,11 @@ no clean load site exists).
 * **Only registered pairs.** A key that a feature forgets to register, or
   registers after the rules INI has been parsed, stays visible to hosts. Register
   from `Initialize()`.
-* **Engine core sections are never owned.** See the namespace guard above: a
-  platform that wants to change a vanilla rule has to read it and act on it, not
-  hide it from the engine.
+* **Engine core and type-list sections are never owned.** See the namespace
+  guard above: a platform that wants to change a vanilla rule has to read it and
+  act on it, not hide it from the engine - and a type-list key cannot be owned
+  either, because the engine reads the type list itself right after the purge
+  hook.
 * **Concrete entries only.** The purge removes the concrete entry. If a mod
   uses an INI inheritance mechanism (a host platform's `$Inherits` read-layer
   feature) to alias the same key from a parent section, that read-layer resolution
@@ -356,6 +417,9 @@ key.
   missing keys;
 * the registry is case-insensitive, de-duplicating and ignores null/empty
   registrations;
+* the reserved-engine-section deny-list, including the engine's type-list
+  sections, and that a refused key is never registered (nothing is purged, and
+  the refusal is counted and warned);
 * observers run before the purge and see the real value;
 * only owned keys are removed (same-named key in another section and unowned key
   in the same section survive);
@@ -366,10 +430,13 @@ key.
 
 `tests/test_ini_registry.cpp` covers the 2.0 key registry with an in-memory
 "file": bool/int/string reads and defaults, the strict integer parser and the
-range check, invalid values falling back with a warning, duplicate declarations,
-the built-in `[Platform]` keys, `defaultEnabled` and `[Groups]` gates, the
-unknown-key scan (suggestions, known-section keys, Debug-only user sections,
-`IniWarnUnknownKeys=no`) and the R1 template rendering.
+range check, invalid values falling back with a warning, duplicate declarations
+(the first declaration resolving every read, including its default/range and the
+invalid count), the built-in `[Platform]` keys, `defaultEnabled` and `[Groups]`
+gates, the unknown-key scan (suggestions, known-section keys, Debug-only user
+sections, `IniWarnUnknownKeys=no`), the legacy-getter `MarkKnown` bridge, the
+`VENTURE_INI_*` macros, the size-limit/truncation diagnostics, the invalid-switch
+and late-invalid counters, and the R1 template rendering (declared defaults).
 
 The hook boundary itself is verified with `objdump -d -M intel
 --start-address=0x6686C0 --stop-address=0x6686E0 gamemd.exe` (window above), the

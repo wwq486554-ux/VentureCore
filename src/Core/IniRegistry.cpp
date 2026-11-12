@@ -22,6 +22,11 @@ char LowerAscii(const char character)
 		: character;
 }
 
+// The raw-value buffer handed to the provider.  A completely filled buffer is
+// what the INI-06 truncation diagnostic is based on (the Win32 profile API
+// cannot return more characters than this).
+constexpr std::size_t kRawValueBufferSize = 512;
+
 std::string Trim(const std::string& text)
 {
 	std::size_t begin = 0;
@@ -56,6 +61,16 @@ std::string LowerAscii(const std::string& text)
 std::string BoolText(const bool value)
 {
 	return value ? "yes" : "no";
+}
+
+// Duplicate declarations are resolved with the registered declaration (INI-01);
+// a bool default is stored normalised so "YES" and "yes" are the same
+// declaration, while a string default compares byte for byte.
+bool SameDefaultText(const venture::IniKeyInfo& info, const std::string& defaultText)
+{
+	if (info.type == venture::IniValueType::Bool)
+		return EqualsIgnoreCase(info.defaultText, defaultText);
+	return info.defaultText == defaultText;
 }
 
 std::string IntText(const int value)
@@ -222,6 +237,9 @@ void IniRegistry::Reset()
 	keys_.clear();
 	switches_.clear();
 	currentFeatureId_.clear();
+	invalidSwitchCount_ = 0;
+	truncatedCount_ = 0;
+	summaryInvalidTotal_ = 0;
 	scanWarnUnknown_ = false;
 	scanUnknownCount_ = 0;
 	scanReportedSections_.clear();
@@ -288,21 +306,48 @@ IniKeyInfo& IniRegistry::RegisterKey(
 {
 	if (IniKeyInfo* const existing = FindKey(section, key))
 	{
-		if (!currentFeatureId_.empty() && !existing->featureId.empty()
-			&& !EqualsIgnoreCase(existing->featureId, currentFeatureId_))
+		// INI-01: the first declaration is the single source of truth.  Every
+		// read - not only this call site - is resolved with the registered
+		// type/default/range by the Read* methods, so a later declaration can no
+		// longer overwrite the stored value/invalid state with a value judged by
+		// its own default and range while the warning still cited the first one.
+		const bool declarationDiffers = existing->type != type
+			|| !SameDefaultText(*existing, defaultText)
+			|| existing->hasRange != hasRange
+			|| (hasRange && (existing->minValue != minValue || existing->maxValue != maxValue));
+		const bool baseOwned = existing->featureId.empty();
+		const bool ownerDiffers = !currentFeatureId_.empty() && !baseOwned
+			&& !EqualsIgnoreCase(existing->featureId, currentFeatureId_);
+		const bool declaredByAnother = ownerDiffers
+			|| (!currentFeatureId_.empty() && baseOwned);
+
+		if (!existing->duplicateWarned && (declarationDiffers || declaredByAnother))
 		{
-			Emit(true,
-				"duplicate ini key [" + existing->section + "] " + existing->key
-				+ " registered by feature '" + currentFeatureId_ + "' and feature '"
-				+ existing->featureId + "' - keeping the first declaration ("
-				+ existing->sourceFile + ")");
-		}
-		else if (!currentFeatureId_.empty() && existing->featureId.empty())
-		{
-			Emit(true,
-				"ini key [" + existing->section + "] " + existing->key
-				+ " is registered by the base - the feature '" + currentFeatureId_
-				+ "' declaration is ignored");
+			existing->duplicateWarned = true;
+			const std::string callerOwner = currentFeatureId_.empty()
+				? "the base"
+				: "feature '" + currentFeatureId_ + "'";
+			const std::string registeredOwner = existing->featureId.empty()
+				? "the base"
+				: "feature '" + existing->featureId + "'";
+			const std::string callerSource = sourceFile ? sourceFile : "<unknown>";
+			const std::string registeredSource =
+				existing->sourceFile.empty() ? "<unknown>" : existing->sourceFile;
+
+			std::string message = "duplicate ini key [" + existing->section + "] " + existing->key
+				+ " declared by " + callerOwner + " (" + callerSource + ") and "
+				+ registeredOwner + " (" + registeredSource
+				+ ") - keeping the first declaration; every read is resolved with it (type: "
+				+ TypeText(existing->type) + ", default: " + existing->defaultText;
+			if (existing->type == IniValueType::Int
+				&& existing->hasRange && existing->minValue <= existing->maxValue)
+			{
+				message += ", range: " + IntText(existing->minValue) + ".." + IntText(existing->maxValue);
+			}
+			message += ")";
+			if (declarationDiffers)
+				message += "; this call site's default/range differ and are ignored";
+			Emit(true, message);
 		}
 		return *existing;
 	}
@@ -320,6 +365,8 @@ IniKeyInfo& IniRegistry::RegisterKey(
 	info.hasRange = hasRange;
 	info.minValue = minValue;
 	info.maxValue = maxValue;
+	info.sizeWarned = false;
+	info.duplicateWarned = false;
 	keys_.push_back(info);
 	return keys_.back();
 }
@@ -352,15 +399,20 @@ bool IniRegistry::IsKnownSwitch(const char* const key) const
 
 IniRegistry::RawValue IniRegistry::ReadRaw(const char* const section, const char* const key) const
 {
-	RawValue result{false, std::string()};
+	RawValue result{false, false, std::string()};
 	if (!rawReader_ || !section || !key)
 		return result;
 
-	char buffer[512] = {};
+	char buffer[kRawValueBufferSize] = {};
 	rawReader_(section, key, kIniMissingValue, buffer, static_cast<unsigned long>(sizeof(buffer)));
 	if (std::strcmp(buffer, kIniMissingValue) == 0)
 		return result;
 
+	// The provider copies at most sizeof(buffer) - 1 characters (the Win32
+	// profile API limit).  A completely filled buffer means the value may have
+	// been cut; the read methods warn about that instead of silently validating a
+	// fragment (INI-06).
+	result.possiblyTruncated = std::strlen(buffer) >= sizeof(buffer) - 1;
 	result.present = true;
 	result.text = Trim(buffer);
 	return result;
@@ -370,6 +422,53 @@ void IniRegistry::UpdateResolved(IniKeyInfo& info, const std::string& valueText,
 {
 	info.valueText = valueText;
 	info.invalid = invalid;
+}
+
+// INI-06: a raw value that fills the provider buffer may have been cut by the
+// profile API.  Report it once per key instead of silently validating the
+// fragment; the effective value is still the (possibly shortened) text.
+void IniRegistry::NoteRawTruncation(IniKeyInfo& info, const RawValue& raw)
+{
+	if (!raw.possiblyTruncated || info.sizeWarned)
+		return;
+
+	info.sizeWarned = true;
+	++truncatedCount_;
+	Emit(true,
+		"key [" + info.section + "] " + info.key + ": the value fills the profile API buffer ("
+		+ IntText(static_cast<int>(kRawValueBufferSize - 1))
+		+ " characters) - the effective value may be truncated");
+}
+
+// INI-06: the caller's string buffer is a hard limit too; the copy stays safe
+// and NUL-terminated (the safe CRT truncation mode), but it is no longer silent.
+void IniRegistry::CopyValueToBuffer(
+	const IniKeyInfo& info,
+	char* const buffer,
+	const unsigned long bufferSize,
+	const std::string& value)
+{
+	if (!buffer || bufferSize == 0)
+		return;
+
+	if (value.size() >= static_cast<std::size_t>(bufferSize))
+	{
+		++truncatedCount_;
+		Emit(false,
+			"key [" + info.section + "] " + info.key + ": the value ("
+			+ IntText(static_cast<int>(value.size())) + " characters) does not fit the caller buffer ("
+			+ IntText(static_cast<int>(bufferSize)) + " bytes) - truncated");
+	}
+
+	_snprintf_s(buffer, static_cast<std::size_t>(bufferSize), _TRUNCATE, "%s", value.c_str());
+}
+
+void IniRegistry::EmitTypeMismatch(const IniKeyInfo& info, const IniValueType requested) const
+{
+	Emit(true,
+		"key [" + info.section + "] " + info.key + " is registered as a " + TypeText(info.type)
+		+ " key - this " + TypeText(requested)
+		+ " read is ignored and returns its own default (one type per key; the first declaration wins)");
 }
 
 void IniRegistry::Emit(const bool warning, const std::string& text) const
@@ -399,13 +498,26 @@ bool IniRegistry::ReadBool(
 	const char* const sourceFile)
 {
 	IniKeyInfo& info = RegisterKey(section, key, IniValueType::Bool, BoolText(defaultValue), description, sourceFile);
-	const RawValue raw = ReadRaw(info.section.c_str(), info.key.c_str());
+	if (info.type != IniValueType::Bool)
+	{
+		EmitTypeMismatch(info, IniValueType::Bool);
+		return defaultValue;
+	}
 
-	bool value = defaultValue;
+	const RawValue raw = ReadRaw(info.section.c_str(), info.key.c_str());
+	NoteRawTruncation(info, raw);
+
+	// Resolve with the registered declaration - this call site's on the first
+	// read, the first declaration's on a duplicate (INI-01) - so the stored
+	// value, the invalid flag, the warning text and the template dump describe
+	// exactly one declaration.
+	bool fallback = defaultValue;
+	(void)ParseBoolToken(info.defaultText, fallback); // keeps the caller default if it is not a token
+	bool value = fallback;
 	bool invalid = false;
 	if (raw.present && !ParseBoolToken(raw.text, value))
 	{
-		value = defaultValue;
+		value = fallback;
 		invalid = true;
 	}
 
@@ -432,9 +544,21 @@ int IniRegistry::ReadInt(
 	IniKeyInfo& info = RegisterKey(
 		section, key, IniValueType::Int, IntText(defaultValue), description, sourceFile,
 		true, minValue, maxValue);
-	const RawValue raw = ReadRaw(info.section.c_str(), info.key.c_str());
+	if (info.type != IniValueType::Int)
+	{
+		EmitTypeMismatch(info, IniValueType::Int);
+		return defaultValue;
+	}
 
-	int value = defaultValue;
+	const RawValue raw = ReadRaw(info.section.c_str(), info.key.c_str());
+	NoteRawTruncation(info, raw);
+
+	// The registered declaration drives the parse, the range check and the
+	// fallback default (INI-01: a duplicate caller's default/range are ignored).
+	long fallback = defaultValue;
+	if (!ParseIntToken(info.defaultText, fallback))
+		fallback = defaultValue;
+	int value = static_cast<int>(fallback);
 	bool invalid = false;
 	std::string reason;
 	if (raw.present)
@@ -453,10 +577,12 @@ int IniRegistry::ReadInt(
 		else
 		{
 			const int candidate = static_cast<int>(parsed);
-			if (minValue <= maxValue && (candidate < minValue || candidate > maxValue))
+			if (info.hasRange && info.minValue <= info.maxValue
+				&& (candidate < info.minValue || candidate > info.maxValue))
 			{
 				invalid = true;
-				reason = "is outside the allowed range " + IntText(minValue) + ".." + IntText(maxValue);
+				reason = "is outside the allowed range " + IntText(info.minValue)
+					+ ".." + IntText(info.maxValue);
 			}
 			else
 			{
@@ -487,19 +613,27 @@ void IniRegistry::ReadString(
 {
 	const std::string defaultText = defaultValue ? defaultValue : "";
 	IniKeyInfo& info = RegisterKey(section, key, IniValueType::String, defaultText, description, sourceFile);
+	if (info.type != IniValueType::String)
+	{
+		EmitTypeMismatch(info, IniValueType::String);
+		if (buffer && bufferSize > 0)
+		{
+			_snprintf_s(
+				buffer,
+				static_cast<std::size_t>(bufferSize),
+				_TRUNCATE,
+				"%s",
+				defaultText.c_str());
+		}
+		return;
+	}
+
 	const RawValue raw = ReadRaw(info.section.c_str(), info.key.c_str());
-	const std::string value = raw.present ? raw.text : defaultText;
+	NoteRawTruncation(info, raw);
+	const std::string value = raw.present ? raw.text : info.defaultText;
 
 	UpdateResolved(info, value, false);
-	if (buffer && bufferSize > 0)
-	{
-		_snprintf_s(
-			buffer,
-			static_cast<std::size_t>(bufferSize),
-			_TRUNCATE,
-			"%s",
-			value.c_str());
-	}
+	CopyValueToBuffer(info, buffer, bufferSize, value);
 	EmitValue(info, raw.present);
 }
 
@@ -522,6 +656,48 @@ void IniRegistry::ReadBaseString(
 	const char* const description)
 {
 	ReadString(section, key, defaultValue, buffer, bufferSize, description, nullptr);
+}
+
+void IniRegistry::MarkKnown(
+	const char* const section,
+	const char* const key,
+	const IniValueType type,
+	const char* const defaultText)
+{
+	if (!section || !key)
+		return;
+
+	const std::string sectionText = Trim(section);
+	const std::string keyText = Trim(key);
+	if (sectionText.empty() || keyText.empty())
+		return;
+
+	// Already declared: the declarative declaration wins, nothing to record.
+	if (FindKey(sectionText.c_str(), keyText.c_str()))
+		return;
+
+	// INI-08: the value itself is still parsed leniently by the legacy getter
+	// (the platform adapter calls this before delegating), so this entry records
+	// the declaration only - it is known to the unknown-key scan and listed by
+	// the template dump, but not validated and never logged as an effective value.
+	IniKeyInfo info{};
+	info.section = sectionText;
+	info.key = keyText;
+	info.type = type;
+	info.description =
+		"read through a legacy Ini::Get* getter (lenient parsing, not validated; "
+		"declare the key with the INI registry to validate it)";
+	info.featureId = currentFeatureId_;
+	info.sourceFile.clear();
+	info.defaultText = defaultText ? defaultText : "";
+	info.valueText = info.defaultText;
+	info.invalid = false;
+	info.hasRange = false;
+	info.minValue = 0;
+	info.maxValue = 0;
+	info.sizeWarned = false;
+	info.duplicateWarned = false;
+	keys_.push_back(info);
 }
 
 bool IniRegistry::ReadFeatureSwitch(const char* const iniKey, const bool defaultEnabled)
@@ -547,6 +723,10 @@ bool IniRegistry::ReadFeatureSwitch(const char* const iniKey, const bool default
 	Emit(false, text);
 	if (invalid)
 	{
+		// Counted for the startup summary: an invalid [Features]/[Groups] switch
+		// value used to live only in this local and the summary's invalid counter
+		// missed it, so a broken switch looked like a clean startup (INI-03).
+		++invalidSwitchCount_;
 		Emit(true,
 			"[" VC_SECTION_FEATURES "] " + key + ": '" + raw.text
 			+ "' is not a valid bool - using the default '" + BoolText(defaultEnabled) + "'");
@@ -586,7 +766,20 @@ void IniRegistry::SetFeatureSwitches(const IniFeatureSwitch* const switches, con
 
 IniScanResult IniRegistry::ScanUnknownKeys(const bool warnUnknown)
 {
-	IniScanResult result{KeyCount(), InvalidCount(), 0};
+	const int invalidSwitches = InvalidSwitchCount();
+	IniScanResult result{
+		KeyCount(),
+		InvalidCount() + invalidSwitches,
+		0,
+		invalidSwitches,
+		TruncatedCount()};
+
+	// Snapshot boundary for LateInvalidCount(): this is the startup summary pass,
+	// so anything rejected later (the rules-INI stage reads [Platform]
+	// IniTakeover after the block) is reported there instead of being silently
+	// missing from the summary (INI-03).
+	summaryInvalidTotal_ = result.invalid;
+
 	scanWarnUnknown_ = warnUnknown;
 	scanUnknownCount_ = 0;
 	scanReportedSections_.clear();
@@ -693,6 +886,16 @@ std::string IniRegistry::RenderTemplate() const
 {
 	std::string out;
 
+	// R1 dump (INI-04): a declaration reference.  Every rendered value is the
+	// declared default, never the value this machine's <Platform>.ini happens to
+	// contain, so the template can be compared with the shipped .example
+	// regardless of local overrides; the values actually read are in the log.
+	AppendLine(out,
+		"; " VC_PLATFORM_INI_NAME ": declared defaults from the " VC_PLATFORM_NAME
+		" key registry (R1 template dump)");
+	AppendLine(out, "; Every value below is the DECLARED DEFAULT, not the value in the INI file.");
+	out += "\r\n";
+
 	// [Platform]
 	AppendLine(out, "[" VC_SECTION_PLATFORM "]");
 	AppendLine(out, "; Platform-wide options, read by the base.");
@@ -703,7 +906,7 @@ std::string IniRegistry::RenderTemplate() const
 		std::string annotation = "; " + info.description;
 		annotation += " (type: " + std::string(TypeText(info.type)) + ", default: " + info.defaultText + ")";
 		AppendLine(out, annotation);
-		AppendLine(out, info.key + "=" + info.valueText);
+		AppendLine(out, info.key + "=" + info.defaultText);
 	}
 	out += "\r\n";
 
@@ -717,7 +920,7 @@ std::string IniRegistry::RenderTemplate() const
 			continue;
 		hasGroup = true;
 		AppendLine(out, "; " + info.description);
-		AppendLine(out, info.key + "=" + info.valueText);
+		AppendLine(out, info.key + "=" + info.defaultText);
 	}
 	if (!hasGroup)
 		AppendLine(out, "; (this platform declares no feature group)");
@@ -777,7 +980,7 @@ std::string IniRegistry::RenderTemplate() const
 				annotation += ", feature: " + info.featureId;
 			annotation += ")";
 			AppendLine(out, annotation);
-			AppendLine(out, info.key + "=" + info.valueText);
+			AppendLine(out, info.key + "=" + info.defaultText);
 		}
 	}
 
@@ -798,6 +1001,28 @@ int IniRegistry::InvalidCount() const
 			++invalid;
 	}
 	return invalid;
+}
+
+int IniRegistry::InvalidSwitchCount() const
+{
+	return invalidSwitchCount_;
+}
+
+int IniRegistry::TruncatedCount() const
+{
+	return truncatedCount_;
+}
+
+bool IniRegistry::IsKeyInvalid(const char* const section, const char* const key) const
+{
+	const IniKeyInfo* const info = FindKey(section, key);
+	return info && info->invalid;
+}
+
+int IniRegistry::LateInvalidCount() const
+{
+	const int current = InvalidCount() + InvalidSwitchCount();
+	return current > summaryInvalidTotal_ ? current - summaryInvalidTotal_ : 0;
 }
 
 const IniKeyInfo* IniRegistry::KeyAt(const int index) const

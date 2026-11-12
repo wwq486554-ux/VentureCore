@@ -16,6 +16,10 @@
 //              LineagePolicy=refuse).  The registries reject new entries and
 //              every engine-facing handler returns immediately, so the refused
 //              DLL does not touch the engine's state (C-06).
+//   Finished - Shutdown() ran.  The platform cannot be restarted in the same
+//              process: feature initialization is once-only, so a second
+//              Startup() returns false instead of re-initializing features and
+//              re-opening the log (START-04).
 //
 // This is a header-only module on purpose: the engine-free registry layers
 // (src/Command/Commands.cpp, src/Event/EventChannel.cpp) and their unit tests
@@ -35,6 +39,7 @@ public:
 		Pending,
 		Running,
 		Refused,
+		Finished,
 	};
 
 	// Current state; Pending until Startup() finishes.
@@ -43,12 +48,16 @@ public:
 	static bool IsPending() { return StateRef() == State::Pending; }
 	static bool IsRunning() { return StateRef() == State::Running; }
 	static bool IsRefused() { return StateRef() == State::Refused; }
+	static bool IsFinished() { return StateRef() == State::Finished; }
 
 	// Called by Platform::Startup() (MarkRunning/MarkRefused) and
-	// Platform::Shutdown() (MarkPending); the Mark* functions are also what the
-	// registry unit tests use to enter a state.
+	// Platform::Shutdown() (MarkFinished); the Mark* functions are also what the
+	// registry unit tests use to enter (and reset) a state.
 	static void MarkRunning() { StateRef() = State::Running; }
 	static void MarkRefused() { StateRef() = State::Refused; }
+	static void MarkFinished() { StateRef() = State::Finished; }
+	// Test/reset hook only: the platform itself never marks Pending again after
+	// Startup() has run.
 	static void MarkPending() { StateRef() = State::Pending; }
 
 private:

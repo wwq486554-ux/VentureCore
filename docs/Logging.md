@@ -52,6 +52,25 @@ truncation.  The lines below it keep their historic shape (`VentureCore ...`,
 they already have.  The bare `====` line that used to open the startup block is
 gone; its closing counterpart is unchanged.
 
+## Startup problems before the log is open
+
+SyringeEx installs the DLL and runs its static initializers before the engine
+reaches `ExeRun`, so a registration that fails at that point - for example a
+command or an event type rejected by the static registrars in
+`src/Engine/Hooks.Commands.cpp` - cannot be written to the log file yet:
+`Log::Open()` has not run, and a RELEASE build keeps the debugger silent.
+**Warning and Error** lines written while the file is closed are not lost: the
+logger keeps a bounded, allocation-free startup queue (8 lines; a further line is
+counted, not stored) and flushes it right after `Log::Open()` has written the
+per-process separator header.  Informational/Debug lines are not queued - they
+only describe the normal path - and formatting/filtering happen when the line is
+written, so a queued line keeps the level in force at that moment.  If the queue
+overflows, one line at flush time reports how many diagnostics were dropped.
+`Log::PendingCount()` returns the number of queued lines and
+`Log::DiscardPending()` drops them: both are for a test or a derived platform that
+wants to inspect/discard its startup diagnostics, while the base itself only calls
+`Open()`.
+
 ## Levels: `[Platform] LogLevel`
 
 ```ini

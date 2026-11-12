@@ -499,6 +499,8 @@ void TestSmallEnumeration()
 	Collector collector;
 	venture::Ini::EnumerateEntries(&CollectEntry, &collector);
 	Check(!collector.entries.empty(), "EnumerateEntries visits the installed fixture");
+	Check(venture::Ini::EnumerationLimitCount() == 0,
+		"the normal fixture hits no enumeration limit (INI-06 diagnostic counter)");
 
 	Check(HasSection(collector, "Platform"), "enumeration reports the [Platform] section");
 	Check(HasSection(collector, "Values"), "enumeration reports the [Values] section");
@@ -530,6 +532,8 @@ void TestKeyLengthBoundary(const std::string& fixturesDirectory)
 	venture::Ini::EnumerateEntries(&CollectEntry, &collector);
 	const std::vector<std::string> keys = KeysOfSection(collector, "Keys");
 	Check(keys.size() == 2, "enumeration skips keys of 256+ characters (char key[256] in Ini::EnumerateEntries)");
+	Check(venture::Ini::EnumerationLimitCount() >= 1,
+		"the skipped over-long key is counted as an enumeration limit (INI-06)");
 	Check(keys.size() == 2 && keys[0] == std::string(255, 'K'),
 		"a 255-character key is enumerated unchanged (the last key that fits)");
 	Check(keys.size() == 2 && keys[1] == "Zeta", "enumeration continues after a skipped over-long key");
@@ -560,6 +564,8 @@ void TestOversizedSectionList()
 
 	Check(!collector.entries.empty(),
 		"enumeration over a >16 KB section-name list still visits at least one section");
+	Check(venture::Ini::EnumerationLimitCount() >= 1,
+		"the truncated section-name list is counted as an enumeration limit (INI-06)");
 	Check(collector.entries.size() < 1600,
 		"the 16384-byte section-name buffer bounds the enumeration (fewer than the 1600 sections)");
 	Check(everySectionGenerated,
@@ -611,6 +617,8 @@ void TestOversizedSingleSection()
 
 	Check(!collector.entries.empty(),
 		"enumeration over a >32 KB single section still visits at least one key");
+	Check(venture::Ini::EnumerationLimitCount() >= 1,
+		"the truncated single-section body is counted as an enumeration limit (INI-06)");
 	Check(collector.entries.size() < 3000,
 		"the 32768-byte single-section buffer bounds the enumeration (fewer than the 3000 keys)");
 	Check(sectionOk, "the oversized single-section entries stay in their section");

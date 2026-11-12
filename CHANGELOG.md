@@ -41,11 +41,12 @@ preserved.  See `docs/Updating.md` for the migration checklist.
   discovered at startup without editing the base.  The scan skips Windows
   modules and lineage copies, calls the export under SEH, validates
   magic/ABI/name/version and registers the platform as a dynamic custom host on
-  the lowest free bit of the shared 29-slot custom range; malformed or crashing
-  markers are logged and ignored.  Name and version are recorded for the log
-  only (no version gating; capabilities/flags reserved); features query the host
-  by name with `HasHostName`.  `scripts/linux/probe_hosts.sh` exercises the path
-  with a valid marker plus wrong-magic, null-name and crashing stubs.
+  the lowest free bit of the shared 29-slot custom range; a marker that fails
+  validation is logged as a problem and ignored.  Name and version are recorded
+  for the log only (no version gating; capabilities/flags reserved); features
+  query the host by name with `HasHostName`.  `scripts/linux/probe_hosts.sh`
+  exercises the path with a valid marker plus wrong-magic, null-name and
+  crashing stubs.
 - startup unknown-key scan: an unknown `[Features]` switch warns with a "did you
   mean ...?" suggestion, an unknown `[Platform]`/`[Groups]`/feature key warns, a
   user-defined section is Debug-logged only; `[Platform] IniWarnUnknownKeys=no`
@@ -116,8 +117,10 @@ roadmap items (T1-T3 host-specific features, Phobos interop, AE) are additive
 Reference verification (2026-11-11, `--clean`, MSVC 14.44 under Wine): 23
 translation units, 0 warnings; `verify_build.py` 7/7; `load_probe.sh` PASS
 (exports 7/7); `run_tests.sh` 10/10; `check_eol.py` 17 rules / 0 mismatch;
-`abi_probe.sh` 20 types, every `sizeof` assertion matches; real game (YR + Ares)
-normal path and lineage-refuse scenario both pass.
+`abi_probe.sh` printed all 20 types and every `sizeof` `static_assert` in
+`src/Engine/EngineCompat.h` matches (the probe prints the sizes; the assertions
+live in the header); real game (YR + Ares) normal path and lineage-refuse
+scenario both pass.
 
 ## [0.4.0-experimental] - 2026-11-11
 

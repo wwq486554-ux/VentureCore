@@ -29,13 +29,12 @@ checked; the offending line numbers are printed.
 
 ``--values`` additionally compares the raw value text (case-insensitive,
 surrounding whitespace trimmed) of the keys the two files share.  Semantics:
-the generated template is rendered by the R1 dump from the key registry, i.e.
-the *effective* values of the environment that produced it - a key the base read
-shows the developer machine's local override, the rest show the declared
-defaults - while the shipped ``.example`` documents the declared defaults.
-``--values`` is therefore a development aid: run it against a generated template
-produced from a *clean/default* INI, and read the annotations in the generated
-file before treating a difference as a bug.  (See docs/Ini.md, "R1 template
+the generated template is rendered by the R1 dump from the key registry and
+lists the *declared defaults* of every registered key (INI-04) - it is not a
+snapshot of the developer machine's effective values, so it can be compared
+directly with the shipped ``.example``.  A difference still deserves a look at
+the annotations in the generated file, but the comparison no longer depends on
+which keys the local run happened to read.  (See docs/Ini.md, "R1 template
 dump".)
 
 Exit status

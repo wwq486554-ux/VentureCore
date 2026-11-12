@@ -14,6 +14,17 @@ namespace venture
 // PID, local date/time). The lines below it keep their historic shape, so greps
 // for "<Platform> ...", "hosts   :" or "startup complete" keep working.
 //
+// Static-initializer diagnostics (START-01): the command and event registrars are
+// file-static objects, so a rejected registration is logged before Open() has run
+// (no file handle yet, and a RELEASE build's debugger output is still gated off).
+// Warning and Error lines logged while the file is closed are buffered in a
+// small, allocation-free, bounded queue and flushed into the file by Open() /
+// OpenAt() right after the separator header.  Informational/Debug lines are not
+// buffered - they only describe the normal path.  If the queue overflows, the
+// overflow count is reported once at flush time.  Formatting and level filtering
+// happen at call time, so an early line keeps the level in force when it was
+// written.
+//
 // Debugger output is compiled in unconditionally only in DEBUG builds. A RELEASE
 // build stays silent unless [Platform] DebugOutput=yes was configured - see
 // docs/Logging.md. scripts/verify_build.py enforces that every call site lives
@@ -48,6 +59,13 @@ public:
 	// Enables debugger output in a RELEASE build ([Platform] DebugOutput=yes).
 	// DEBUG builds always write to the debugger and ignore this switch.
 	static void SetDebugOutput(bool enabled);
+
+	// START-01 introspection: number of Warn/Error lines waiting for Open() to
+	// flush them, and a way to drop them (a test, or a derived platform that
+	// deliberately discards its startup diagnostics).  The test that covers the
+	// behaviour uses them; the platform itself only calls Open().
+	static int PendingCount();
+	static void DiscardPending();
 
 	// `format` must not be NULL; it is a printf-style format string.  A line is
 	// filtered against the configured minimum level before it is formatted, so

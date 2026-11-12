@@ -55,7 +55,9 @@ and macro behaviour may all change.  The procedure, in order:
    lists the sha256 of every file plus the exact file set, so a checkout at the
    right commit but with edited/added/removed files is rejected (a dirty git
    checkout is rejected as well).  The same manifest is verified by
-   `fetch_yrpp.sh` before it swaps a staged copy into place.
+   `fetch_yrpp.sh` before it swaps a staged copy into place.  The Linux build runs
+   this gate itself before compiling; the Visual Studio build does not, so run
+   the script (or add it as a pre-build step) when you build on Windows.
 
 7. Clean build and verify:
 
@@ -74,11 +76,12 @@ and macro behaviour may all change.  The procedure, in order:
 8. Record the review in `docs/EngineBindings.md` (pin value and any ABI changes)
    and add a `CHANGELOG.md` entry if behaviour changed.
 
-The build script itself runs `check_yrpp.py` before compiling, so a stale or
-edited `external/YRpp` cannot silently produce a binary: it aborts with the
+The Linux build script runs `check_yrpp.py` before compiling, so a stale or
+edited `external/YRpp` cannot silently produce a binary there: it aborts with the
 expected and actual revision plus the changed/missing/unexpected files.  The
-compile-time gate in `EngineCompat.h` catches layout drift, and the runtime log
-plus the `YrppCommit` version-resource string record what was built.
+Visual Studio build does not run that gate (run the script yourself, see step 6).
+The compile-time gate in `EngineCompat.h` catches layout drift, and the runtime
+log plus the `YrppCommit` version-resource string record what was built.
 
 ## 2. Updating the platform code
 
@@ -145,9 +148,13 @@ Checklist for a version bump:
   `descriptor.group` adds a `[Groups] <group>=yes|no` master switch (default on).
 * A module's own `<Platform>.ini` keys are declared at the read site with
   `FeatureContext::IniBool` / `IniInt` / `IniString` (or the `VENTURE_INI_*`
-  macros).  The registry validates them and logs effective values; do not add new
-  reads through the legacy `IniGet*` getters (they bypass the registry, so an
-  invalid value or unknown key stays invisible).
+  macros).  The registry validates them, logs effective values and reports a
+  duplicate declaration; do not add new reads through the legacy `IniGet*`
+  getters.  The legacy getters still compile and a key read through one is
+  recorded as known (the template dump lists it as a lenient/legacy read), but
+  the value is not validated: it keeps the lenient parsing rules and a bad value
+  does not warn or enter the invalid count.  Declare each key unconditionally in
+  `Initialize()` - the `[Features]` switch gates behaviour, not registration.
 * Do not rename an existing `iniKey` or feature key without a migration note in
   `CHANGELOG.md`: old user INIs would silently fall back to the default.
 * `[Platform]` currently has seven keys (see `README.md` /
@@ -176,16 +183,17 @@ Host detection is a registry, not a hard-coded table:
    discovered by the startup scan and gets the lowest free custom bit.  Changing
    the marker layout or the validation rules requires bumping
    `VENTURE_HOST_MARKER_ABI_VERSION` and updating the producer and
-   `docs/HostMatrix.md`; the scanner's SEH wrapper and length caps must stay.
-3. Detection is by loaded module only: a host that fails to inject looks exactly
+   `docs/HostMatrix.md`; the scanner's POD-only SEH wrapper and its length caps
+   must stay.
+4. Detection is by loaded module only: a host that fails to inject looks exactly
    like one that is not installed.  There is no environment ranking - features
    declare what they need with `requiredHosts` / `anyOfHosts`.
-4. Re-check the declared host requirements of every feature when a host's
+5. Re-check the declared host requirements of every feature when a host's
    presence semantics change.
-5. Add a run-time check to the in-game test: the startup line
+6. Add a run-time check to the in-game test: the startup line
    `hosts   : Ares, Phobos (2 host(s))` must list the expected hosts, and the
    per-feature `disabled - requires ...` lines must name the missing ones.
-6. Run `scripts/linux/probe_hosts.sh` after changing the registry: it builds a
+7. Run `scripts/linux/probe_hosts.sh` after changing the registry: it builds a
    stub custom host and verifies registration, detection, formatting and the
    `requiredHosts` gate under Wine (no game process needed).
 
@@ -257,8 +265,10 @@ table; a 1.x save keeps loading and its extension state is preserved.
    `IniBool/IniInt/IniString` (or the `VENTURE_INI_*` macros) and pass the
    description/default/range.  The base then validates the value, warns about
    invalid values and unknown keys, and includes the key in the
-   `DumpIniTemplate` output.  The legacy getters still compile but bypass the
-   registry.
+   `DumpIniTemplate` output.  The legacy getters still compile and record the
+   key as known (the template dump lists it as a lenient/legacy read), but they
+   bypass validation: the value keeps the lenient parsing rules and a bad value
+   does not warn or count as invalid.
 5. **New `[Platform]` keys** are optional: `IniWarnUnknownKeys` and
    `DumpIniTemplate`.  Existing user INIs keep working; a mis-spelled key now
    produces a startup warning (that is the point of the registry).

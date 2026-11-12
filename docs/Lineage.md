@@ -98,10 +98,17 @@ in the same file as the rest of the startup picture).
    is the current copy.  A copy loaded under another file name is a different
    module and is exactly the conflict to report.
 
-The scan never throws and never terminates the process.  If the toolhelp
-snapshot is unavailable, the scanner returns "no conflict" and the platform
-starts normally - the mutual-exclusion check is a safety net, not a startup
-dependency.
+The scan does not throw C++ exceptions and does not terminate the process on its
+own: if the toolhelp snapshot is unavailable, the scanner returns "no conflict"
+and the platform starts normally - the mutual-exclusion check is a safety net,
+not a startup dependency.
+
+The scan is **not** a security boundary and does not contain faults raised inside
+a foreign module: when a module exports the probe symbol, its
+`VentureLineage_GetInfo()` is called directly, so a module that exports the
+symbol but crashes inside it can still take the process down.  (The host-marker
+scan protects its call; containment of a faulting lineage export is a known
+limitation, see "Limits and residual risks".)
 
 ## Policy and startup behaviour
 
@@ -117,9 +124,15 @@ LineagePolicy=refuse
 | `refuse` (default) | log the conflict, then leave the platform disabled |
 | `warn` | log the conflict and continue with the features enabled |
 
-The value is case-insensitive; a missing or unrecognised value falls back to
-`refuse` (the safe choice).  The resolved policy is applied **before** any
-feature is initialized.
+The value is case-insensitive; a missing value falls back to `refuse` (the safe
+choice).  An unrecognised value falls back to `refuse` as well, and the startup
+block records the mis-spelling instead of silently enforcing the fallback:
+
+```text
+[WARN ] lineage : unrecognised LineagePolicy 'warm' - using refuse
+```
+
+The resolved policy is applied **before** any feature is initialized.
 
 Log lines, in the same shape as the rest of the startup block:
 
@@ -173,6 +186,19 @@ than absent: it costs the hook windows and the module, and it does nothing else.
 the extension table and the savegame trailer, so do not ship a configuration
 where two lineage DLLs of different builds are meant to coexist.
 
+## Process lifetime
+
+Startup is once per process.  `Platform::Startup()` runs from the engine's
+`ExeRun` hook; `Platform::Shutdown()` is a teardown entry point for a derived
+platform's own lifecycle - the base never calls it (no engine hook triggers it).
+Shutdown is final for the process and there is **no supported restart path**: the
+startup gate becomes `PlatformGate::State::Finished`, the log is closed and the
+extension state is cleared, and a later `Startup()` returns false instead of
+initializing every feature a second time (feature initialization is once-only,
+and the engine hooks stay installed but inert).  Calling `Shutdown()` before a
+successful startup is a no-op; a refused platform never initialized its features,
+so there is nothing to shut down either.
+
 ## How it is verified
 
 `scripts/linux/load_probe.sh` loads the built DLL into a tiny Win32 host under
@@ -208,6 +234,10 @@ are covered by `tests/test_lineage.cpp`; run it with
 * Loading the *same file* twice with `LoadLibraryA` returns the same module and
   increments its reference count, so it is not reported as a conflict - it is
   one copy of the DLL state, not two.
+* The scan calls an exported function of another module directly (`GetProcAddress`
+  then a call).  A module that exports the probe symbol but raises inside the
+  call can take the process down; containing a faulting foreign export is a known
+  limitation of this scan (the host-marker scan has the protected path).
 * The marker layout is ABI: append fields only with an
   `VENTURE_LINEAGE_ABI_VERSION` bump, and keep the `__cdecl` exports
   undecorated.

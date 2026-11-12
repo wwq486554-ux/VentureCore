@@ -18,6 +18,7 @@
 #include <cstdarg>
 #include <cstddef>
 #include <cstdio>
+#include <cstring>
 #include <string>
 
 namespace
@@ -27,8 +28,13 @@ unsigned g_hostMask = 0;
 // (Pending / Running / Refused), so engine-free registries can check it too.
 
 // Adapts the variadic FeatureContext logging callback to the platform logger.
-void FeatureLog(const char* const format, ...)
+// A NULL format is dropped here: the C runtime's invalid-parameter handler would
+// otherwise terminate the process (API-04, same guard as Log::WriteV).
+void __cdecl FeatureLog(const char* const format, ...)
 {
+	if (!format)
+		return;
+
 	char message[1024] = {};
 	va_list args;
 	va_start(args, format);
@@ -63,9 +69,18 @@ void IniRegistryLog(const bool warning, const char* const message)
 		venture::Log::Debug("ini     : %s", message);
 }
 
+// Host registration problems are recorded while the detection set is built and
+// by a registration rejected after detection (HOST-05).  The registry hands out
+// each problem exactly once; the startup path drains before and after feature
+// initialization.
+void __cdecl HostProblemLog(const char* const message)
+{
+	venture::Log::Error("hosts   : %s", message);
+}
+
 // FeatureContext adapters for the declarative INI readers.  The macros in
 // include/platform/Feature.h pass __FILE__ as the source file.
-bool FeatureIniBool(
+bool __cdecl FeatureIniBool(
 	const char* const section,
 	const char* const key,
 	const bool defaultValue,
@@ -75,7 +90,7 @@ bool FeatureIniBool(
 	return venture::IniRegistry::Instance().ReadBool(section, key, defaultValue, description, sourceFile);
 }
 
-int FeatureIniInt(
+int __cdecl FeatureIniInt(
 	const char* const section,
 	const char* const key,
 	const int defaultValue,
@@ -88,7 +103,7 @@ int FeatureIniInt(
 		section, key, defaultValue, minValue, maxValue, description, sourceFile);
 }
 
-void FeatureIniString(
+void __cdecl FeatureIniString(
 	const char* const section,
 	const char* const key,
 	const char* const defaultValue,
@@ -101,8 +116,52 @@ void FeatureIniString(
 		section, key, defaultValue, buffer, bufferSize, description, sourceFile);
 }
 
+// Legacy (pre-2.0) FeatureContext getters.  The value keeps the lenient
+// Ini::Get* parsing (no validation, no effective-value logging), but the key is
+// recorded as known first (IniRegistry::MarkKnown) so the startup unknown-key
+// scan does not report a key the module really reads and the R1 template dump
+// lists it (INI-08).  __cdecl because the FeatureContext callbacks are pinned
+// (API-05; the project builds with /Gz = stdcall default).
+bool __cdecl FeatureIniGetBool(
+	const char* const section,
+	const char* const key,
+	const bool defaultValue)
+{
+	venture::IniRegistry::Instance().MarkKnown(
+		section, key, venture::IniValueType::Bool, defaultValue ? "yes" : "no");
+	return venture::Ini::GetBool(section, key, defaultValue);
+}
+
+int __cdecl FeatureIniGetInt(
+	const char* const section,
+	const char* const key,
+	const int defaultValue)
+{
+	char defaultText[24] = {};
+	_snprintf_s(defaultText, sizeof(defaultText), _TRUNCATE, "%d", defaultValue);
+	venture::IniRegistry::Instance().MarkKnown(
+		section, key, venture::IniValueType::Int, defaultText);
+	return venture::Ini::GetInt(section, key, defaultValue);
+}
+
+void __cdecl FeatureIniGetString(
+	const char* const section,
+	const char* const key,
+	const char* const defaultValue,
+	char* const buffer,
+	const unsigned long bufferSize)
+{
+	venture::IniRegistry::Instance().MarkKnown(
+		section, key, venture::IniValueType::String, defaultValue ? defaultValue : "");
+	venture::Ini::GetString(section, key, defaultValue, buffer, bufferSize);
+}
+
 // R1 template dump ([Platform] DumpIniTemplate=yes, development only): renders
 // the key registry next to the log so it can be compared with the .ini.example.
+// The rendered values are the **declared defaults** of the registry, not the
+// effective values of the local .ini (INI-04): the template is a declaration
+// list, so it stays independent of read order and of which keys the local run
+// happened to touch.
 void DumpIniTemplate()
 {
 	const char* const iniPath = venture::Ini::Path();
@@ -163,6 +222,16 @@ void RequireSyringeEx()
 
 	ExitProcess(1u);
 }
+
+// [Platform] LineagePolicy parsing is case-insensitive and falls back to
+// "refuse" for anything it does not recognise (Lineage.h).  The fallback is
+// silent in the parser, so report a mis-spelled value here instead of silently
+// enforcing "refuse" while the log line still cites the configured text
+// (START-03).
+bool IsRecognisedLineagePolicy(const char* const text)
+{
+	return _stricmp(text, "refuse") == 0 || _stricmp(text, "warn") == 0;
+}
 }
 
 namespace venture
@@ -170,11 +239,14 @@ namespace venture
 bool Startup()
 {
 	// The gate is tri-state: a second ExeRun after a successful start is a no-op,
-	// and a refusal is final for the process (do not retry the scan and write a
-	// second startup block to the log).
+	// a refusal is final for the process (do not retry the scan and write a
+	// second startup block to the log), and a Shutdown() is final too - the
+	// platform cannot be restarted in the same process (START-04).
 	if (PlatformGate::IsRunning())
 		return true;
 	if (PlatformGate::IsRefused())
+		return false;
+	if (PlatformGate::IsFinished())
 		return false;
 
 	RequireSyringeEx();
@@ -196,10 +268,15 @@ bool Startup()
 		Log::Warn("ini     : cannot resolve the game directory - defaults apply");
 	}
 
-	// 2.0 INI registry: every <Platform>.ini read goes through it so values are
-	// validated and logged, unknown keys are reported once after feature startup
-	// and the R1 template dump has a single source of truth.  The legacy getters
-	// stay available to feature modules (docs/Ini.md).
+	// 2.0 INI registry: the platform's own <Platform>.ini reads go through it, so
+	// they are validated, counted and logged, unknown keys are reported once after
+	// feature startup and the R1 template dump has a single source of truth.  The
+	// legacy getters remain available to feature modules for compatibility; the
+	// value keeps the pre-2.0 lenient parsing (no validation, no effective-value
+	// logging), but the key is recorded as known before the read (MarkKnown), so
+	// the unknown-key scan and the template dump see it - see docs/Ini.md and
+	// docs/Updating.md.  (START-08: the previous comment claimed every read went
+	// through the registry, which the FeatureContext wiring below contradicted.)
 	IniRegistry& ini = IniRegistry::Instance();
 	ini.SetRawReader(&Ini::GetString);
 	ini.SetEnumerator(&Ini::EnumerateEntries);
@@ -241,9 +318,9 @@ bool Startup()
 
 	// Host problems are recorded while the set is built: an invalid/duplicate
 	// source-level registration (Hosts.Custom.cpp) or a rejected/invalid host
-	// marker found during the second-phase scan.  Report them once.
-	for (int problem = 0, problems = Hosts().ProblemCount(); problem < problems; ++problem)
-		Log::Error("hosts   : %s", Hosts().ProblemAt(problem));
+	// marker found during the second-phase scan.  The drain reports each problem
+	// once; a second drain runs after feature initialization (HOST-05).
+	Hosts().ReportNewProblems(&HostProblemLog);
 
 	if (Hosts().DetectedCount() == 0)
 	{
@@ -251,9 +328,15 @@ bool Startup()
 	}
 	else
 	{
-		char hostNames[256] = {};
-		Hosts().FormatDetected(hostNames, sizeof(hostNames));
+		// HOST-02: FormatDetected appends truncation-safely and always
+		// NUL-terminates; 1024 bytes cover the worst legal case with room to
+		// spare, and anything longer becomes "..." instead of a crash.
+		char hostNames[1024] = {};
+		bool hostNamesTruncated = false;
+		Hosts().FormatDetected(hostNames, sizeof(hostNames), &hostNamesTruncated);
 		Log::Info("hosts   : %s (%d host(s))", hostNames, Hosts().DetectedCount());
+		if (hostNamesTruncated)
+			Log::Warn("hosts   : the detected-host name list was truncated to fit the log buffer");
 	}
 
 	// Debug level only: the resolved module path of every detected host makes a
@@ -279,6 +362,10 @@ bool Startup()
 		static_cast<unsigned long>(sizeof(policyText)),
 		"conflict of a second DLL of this lineage: refuse|warn");
 	const LineagePolicy lineagePolicy = ParseLineagePolicy(policyText, LineagePolicy::Refuse);
+	if (policyText[0] != '\0' && !IsRecognisedLineagePolicy(policyText))
+	{
+		Log::Warn("lineage : unrecognised LineagePolicy '%s' - using refuse", policyText);
+	}
 	const LineageDecision lineage = DecideLineage(ScanForeignLineage(), lineagePolicy);
 
 	if (!lineage.conflict)
@@ -308,10 +395,6 @@ bool Startup()
 		return false;
 	}
 
-	// Only an allowed platform announces its event channel (a refused DLL logs
-	// nothing beyond the line above).
-	void LogEventChannelStartup(); LogEventChannelStartup();
-
 	// Extension types register themselves lazily (feature store construction or
 	// first Fetch); route their validation problems to the logger before any
 	// feature is initialized (D-22).  The rules-INI takeover registrations happen
@@ -327,9 +410,9 @@ bool Startup()
 	context.HasHost = &HasHost;
 	context.HasHostBit = &HasHostBit;
 	context.HasHostName = &HasHostName;
-	context.IniGetBool = &Ini::GetBool;
-	context.IniGetInt = &Ini::GetInt;
-	context.IniGetString = &Ini::GetString;
+	context.IniGetBool = &FeatureIniGetBool;
+	context.IniGetInt = &FeatureIniGetInt;
+	context.IniGetString = &FeatureIniGetString;
 	context.IniBool = &FeatureIniBool;
 	context.IniInt = &FeatureIniInt;
 	context.IniString = &FeatureIniString;
@@ -337,18 +420,47 @@ bool Startup()
 
 	InitializeFeatures(context);
 
+	// Diagnostics that could only be produced after the first host drain: a host
+	// registration rejected by the frozen detection set (HOST-05), a malformed or
+	// duplicate feature descriptor (API-01/API-02), and a feature whose host
+	// requirement names a bit no registered host defines (HOST-07).
+	Hosts().ReportNewProblems(&HostProblemLog);
+	for (int problem = 0, problems = FeatureRegistrationProblemCount(); problem < problems; ++problem)
+		Log::Error("feature : %s", FeatureRegistrationProblemAt(problem));
+
+	// Only an allowed platform announces its event channel (a refused DLL logs
+	// nothing beyond the lineage error above).  The announce runs after
+	// InitializeFeatures: a feature may register an event channel from its
+	// Initialize(), and the announce must count what is actually registered
+	// (START-06).
+	void LogEventChannelStartup(); LogEventChannelStartup();
+
 	// One startup pass over the file: unknown [Platform]/[Groups]/[Features]
 	// entries and unknown keys in a feature section are warned about, a
 	// user-defined section is only Debug-logged, and the summary line reports the
 	// registry state.  See docs/Ini.md.
+	//
+	// Both switches are read *before* the scan/summary so an invalid value is part
+	// of the validated, counted set the summary reports (INI-03); the template
+	// dump itself runs after the summary so it describes the final registry state.
 	const bool warnUnknownKeys = ini.ReadBaseBool(VC_SECTION_PLATFORM, "IniWarnUnknownKeys", true,
 		"warn about unknown <Platform>.ini keys at startup");
+	const bool dumpIniTemplate = ini.ReadBaseBool(VC_SECTION_PLATFORM, "DumpIniTemplate", false,
+		"development: write <Platform>.ini.generated next to the log");
 	const IniScanResult iniScan = ini.ScanUnknownKeys(warnUnknownKeys);
 	Log::Info("ini keys: %d registered, %d invalid, %d unknown",
 		iniScan.registered, iniScan.invalid, iniScan.unknown);
 
-	if (ini.ReadBaseBool(VC_SECTION_PLATFORM, "DumpIniTemplate", false,
-		"development: write <Platform>.ini.generated next to the log"))
+	// INI-06: the Win32 profile API has fixed enumeration buffers; report when a
+	// buffer was too small so an oversized file is never scanned silently.  Debug
+	// level: the scan still used everything the API returned.
+	const std::size_t enumerationLimits = Ini::EnumerationLimitCount();
+	if (enumerationLimits > 0)
+	{
+		Log::Debug("ini     : %zu enumeration limit(s) hit - a section list, a section body or a key name exceeds a Win32 profile API buffer; the unknown-key scan may be incomplete (see docs/Ini.md)", enumerationLimits);
+	}
+
+	if (dumpIniTemplate)
 	{
 		DumpIniTemplate();
 	}
@@ -374,10 +486,15 @@ void Shutdown()
 	if (!IsStarted())
 		return;
 
+	// Teardown entry point for a derived platform (the base itself never calls
+	// it).  It releases the engine-visible state and closes the log; because the
+	// feature registries are not restartable (InitializeFeatures is once-only),
+	// the gate becomes Finished instead of Pending, so a later Startup() returns
+	// false rather than initializing everything a second time (START-04).
 	Log::Info("%s shutting down", VC_PLATFORM_NAME);
 	ExtensionIndex::Instance().ClearAll();
 	Log::Close();
-	PlatformGate::MarkPending();
+	PlatformGate::MarkFinished();
 }
 
 void OnScenarioClear()

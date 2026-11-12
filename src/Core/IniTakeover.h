@@ -95,10 +95,12 @@ public:
 		std::size_t registered; // keys in the platform registry
 	};
 
-	// Sections the engine itself owns ([General], [Basic], [AudioVisual], ...).
-	// A feature that registers one of these as platform-owned would delete an
-	// engine key from the parsed rules INI before the engine reads it - the exact
-	// hazard the takeover exists to prevent (C-09).  Case-insensitive.
+	// Sections the engine itself owns ([General], [Basic], [AudioVisual], ... and
+	// the type-list sections such as [InfantryTypes]/[Warheads]).  A feature that
+	// registers one of these as platform-owned would delete an engine key from the
+	// parsed rules INI before the engine reads it - the exact hazard the takeover
+	// exists to prevent (C-09); for a type-list section it would delete the type
+	// itself (START-02).  Case-insensitive.
 	static bool IsReservedEngineSection(const char* section);
 
 	// Registers a (section, key) pair the platform owns. Case-insensitive and

@@ -5,6 +5,7 @@
 #include "Core/PlatformVersion.h"
 
 #include <cstdarg>
+#include <cstddef>
 #include <cstdio>
 #include <cstring>
 
@@ -18,6 +19,18 @@ bool g_debugOutput = false;
 // per process: a full disk would otherwise emit one diagnostic per log line,
 // which is worse than the dropped lines it reports.
 bool g_writeFailureReported = false;
+
+// START-01: Warn/Error lines written before the log file is open (the command and
+// event registrars run as file-static initializers) are queued here and flushed
+// by Open()/OpenAt().  The storage is fixed and trivially initialisable, so it is
+// zero-initialised before any dynamic initializer runs - no static-initialisation
+// order dependency, no allocation, no exceptions.  The queue is deliberately small
+// (a handful of startup problems); overflow is counted and reported once at flush.
+constexpr int kPendingCapacity = 8;
+constexpr std::size_t kPendingLineSize = 256;
+char g_pendingLines[kPendingCapacity][kPendingLineSize] = {};
+int g_pendingCount = 0;
+int g_pendingDropped = 0;
 
 const char* LevelTag(const venture::LogLevel level)
 {
@@ -62,6 +75,44 @@ void WriteLineToFile(const char* const line)
 	{
 		g_writeFailureReported = true;
 		EmitDebugOutput("[VentureCore] cannot write the log file; the line is dropped\n");
+	}
+}
+
+// START-01: bounded, allocation-free queue for diagnostics logged before Open().
+void QueuePendingDiagnostic(const char* const line)
+{
+	if (!line)
+		return;
+
+	if (g_pendingCount >= kPendingCapacity)
+	{
+		++g_pendingDropped;
+		return;
+	}
+
+	_snprintf_s(g_pendingLines[g_pendingCount], kPendingLineSize, _TRUNCATE, "%s", line);
+	++g_pendingCount;
+}
+
+// START-01: called by Open()/OpenAt() right after the separator header, so the
+// regular file logging starts with whatever the static initializers reported.
+void FlushPendingDiagnostics()
+{
+	for (int index = 0; index < g_pendingCount; ++index)
+		WriteLineToFile(g_pendingLines[index]);
+	g_pendingCount = 0;
+
+	if (g_pendingDropped > 0)
+	{
+		char line[160] = {};
+		_snprintf_s(
+			line,
+			sizeof(line),
+			_TRUNCATE,
+			"[VentureCore] %d startup diagnostic(s) dropped - the pre-open log buffer is full\r\n",
+			g_pendingDropped);
+		g_pendingDropped = 0;
+		WriteLineToFile(line);
 	}
 }
 
@@ -124,7 +175,20 @@ void WriteV(const venture::LogLevel level, const char* const format, va_list arg
 		LevelTag(level),
 		message);
 
-	WriteLineToFile(line);
+	// Before Open() there is no file handle: queue a startup problem (Warn/Error)
+	// for the flush that Open()/OpenAt() performs, so a rejected registration from
+	// a static initializer is not lost (START-01).  Info/Debug lines only describe
+	// the normal path and are not queued.
+	if (g_file == INVALID_HANDLE_VALUE)
+	{
+		if (level == venture::LogLevel::Warn || level == venture::LogLevel::Error)
+			QueuePendingDiagnostic(line);
+	}
+	else
+	{
+		WriteLineToFile(line);
+	}
+
 	EmitDebugOutput(line);
 }
 }
@@ -174,6 +238,7 @@ bool Log::OpenAt(const char* const path)
 	}
 
 	WriteSeparatorHeader();
+	FlushPendingDiagnostics();
 	return true;
 }
 
@@ -184,6 +249,13 @@ void Log::Close()
 		CloseHandle(g_file);
 		g_file = INVALID_HANDLE_VALUE;
 	}
+
+	// The base closes the log only at shutdown, after Open() at startup already
+	// flushed the queue; drop whatever a (future) caller queued for a log that is
+	// not going to be opened any more so a later Open() cannot resurrect stale
+	// lines from a previous lifecycle.
+	g_pendingCount = 0;
+	g_pendingDropped = 0;
 }
 
 bool Log::IsOpen()
@@ -204,6 +276,17 @@ LogLevel Log::MinLevel()
 void Log::SetDebugOutput(const bool enabled)
 {
 	g_debugOutput = enabled;
+}
+
+int Log::PendingCount()
+{
+	return g_pendingCount;
+}
+
+void Log::DiscardPending()
+{
+	g_pendingCount = 0;
+	g_pendingDropped = 0;
 }
 
 void Log::Write(const LogLevel level, const char* const format, ...)

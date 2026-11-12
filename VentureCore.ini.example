@@ -11,7 +11,14 @@
 ; yes/no, true/false, on/off and 1/0 (case-insensitive, whole token).  A value
 ; that cannot be parsed falls back to the declared default and is reported as a
 ; warning in the log; unknown keys are reported at startup too (see
-; IniWarnUnknownKeys below and docs/Ini.md).
+; IniWarnUnknownKeys below and docs/Ini.md).  An invalid [Features] switch value
+; is counted in the startup "ini keys:" summary together with the feature keys.
+;
+; Size limits: the file is read through the Win32 profile API, so one raw value
+; is capped at 511 characters.  A value that fills the buffer is reported with a
+; "may be truncated" warning and the platform validates the truncated text; a
+; key name longer than 255 characters cannot be represented.  Keep values well
+; inside these limits.
 ;
 ; The platform is a starter base: this base contains no gameplay features, so
 ; turning switches on or off does not change the game yet.  The [Features]
@@ -65,7 +72,9 @@ IniWarnUnknownKeys=yes
 ; DumpIniTemplate: development aid, default no.  yes writes
 ; VentureCore.ini.generated next to the log at startup: the key registry as an
 ; INI file (with type/default/range/description comments), for comparing this
-; example with what the code really reads.  Not needed by players.
+; example with what the code really reads.  The generated values are the
+; declared defaults, not the values this local file contains.  Not needed by
+; players.
 DumpIniTemplate=no
 
 [Groups]

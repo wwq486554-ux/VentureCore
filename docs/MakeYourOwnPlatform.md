@@ -18,8 +18,9 @@ The compiled reference implementation of everything below is
 * Visual Studio 2022 (v143 / MSVC 14.44) - or the same toolchain under Wine on
   Linux (`scripts/linux/build_linux.sh`);
 * a *Yuri's Revenge* 1.001 installation with SyringeEx;
-* the pinned YRpp checkout in `external/YRpp/` (see `README.md`; the build refuses
-  to run without the pin matching).
+* the pinned YRpp checkout in `external/YRpp/` (see `README.md`; the Linux build
+  refuses to run without the pin matching - the Visual Studio build does not run
+  the YRpp gate itself).
 
 ## 1. Copy and rename
 
@@ -252,8 +253,9 @@ void Initialize(const venture::FeatureContext& context)
 
 * an invalid bool / non-integer / out-of-range integer falls back to the
   declared default and produces a **warning** (never silently);
-* a duplicate `(section, key)` declaration by two modules warns and keeps the
-  first declaration;
+* a duplicate `(section, key)` declaration is resolved by the first declaration
+  (a later read keeps the first default/range) and a conflicting re-declaration
+  warns;
 * every effective value is logged at Debug level, and the startup block ends
   with `ini keys: N registered, M invalid, K unknown`;
 * an unknown `[Platform]`/`[Groups]` key, an unknown key in a module section and
@@ -264,10 +266,41 @@ void Initialize(const venture::FeatureContext& context)
   `<Platform>.ini.generated` next to the log from the registry, for comparing a
   shipped `.ini.example` with what the code really reads;
 * the legacy `FeatureContext::IniGetBool/IniGetInt/IniGetString` functions still
-  exist for existing modules but bypass all of the above - do not use them in
-  new code.
+  exist for existing modules, and a key read through one is recorded as **known**
+  (the template dump lists it as a lenient/legacy read), but the value is **not
+  validated**: the legacy getters keep their lenient parsing rules and a bad
+  value produces no warning and does not enter the invalid count.  Do not use
+  them in new code; declare the key with the trio when its value needs
+  validation.
 
 See `docs/Ini.md` for the full contract.
+
+### The `FeatureContext` contract
+
+`FeatureContext` is a stack local of `Platform::Startup()` and is passed to
+`Initialize()` by `const&`; it is valid **only while `Initialize()` runs**.  A
+feature that needs a service after initialization (from a hook, for example) must
+copy the pointer values it needs by value into its own storage; storing
+`&context` - or a pointer to one of its members - leaves a dangling reference once
+`Startup()` returns.  The pointed-to strings (`platformName`, `iniPath`) and the
+callback targets have process lifetime, so copying those pointer values is safe.
+
+The base fills in every callback in `Startup()`.  A unit test or a derived
+platform may build a partial context (the platform's own tests do, to exercise
+one adapter at a time), so a feature whose code is reused in such a harness must
+check a pointer before calling it.  The one nullability the base itself
+guarantees: a null `Log` means "no logging available" (`FeatureRegistry` checks
+it); the platform always provides the real one.
+
+`IniString` / the legacy `IniGetString` write at most `bufferSize` bytes
+**including** the NUL terminator, silently truncate a longer value (the registry
+still records the full value for diagnostics) and do nothing when `buffer` is
+null or `bufferSize` is 0.  Size the buffer for the documented maximum.
+
+The descriptor and everything it points at (`id`, `iniKey`, `name`, the
+`enabled` flag, the group string) must have static lifetime: the registries keep
+raw pointers to them for the whole process.  The examples use file-static
+descriptors.
 
 A feature that **only changes vanilla behaviour** is an ordinary feature: no new
 keys, no new extension, just hooks that alter what the engine does.  Declare the
@@ -341,14 +374,27 @@ malformed markers that must be rejected without crashing).
 
 ## 4a. Feature-author conventions (enforced by the base)
 
+* **Descriptor registration** - descriptors are registered at load time by a
+  file-static registrar.  A malformed descriptor (missing/empty `id`, `iniKey` or
+  `name`, null `Initialize`/`enabled`) and a duplicate `id` or `iniKey` (ASCII
+  case-insensitive) are rejected at load time and reported in the startup log;
+  registration closes as soon as feature initialization starts, so a feature
+  cannot register another feature from its own `Initialize()`.
+* **Calling convention** - the `FeatureContext` callbacks and
+  `FeatureDescriptor::Initialize` are pinned `__cdecl`.  Keep feature translation
+  units on the project (`VentureCore.props`, which builds with `/Gz` = stdcall
+  default) or spell `__cdecl` on your own callbacks: the pinned pointer type turns
+  a mismatch into a compile error instead of a silent stack imbalance at run time.
 * **Command names** are compared case-insensitively and must carry the platform
   prefix (for example `Venture Test Command`); a name that differs only in case
   is rejected, and a collision with an already registered engine command is
   logged (`docs/Commands.md`).
 * **Owned rules-INI keys** must live in a platform-namespaced section
   (`[VentureCore]`, `[Examples]`, ...).  Registering a key in an engine core
-  section (`[General]`, `[Basic]`, `[AudioVisual]`, `[MultiPlayer]`, ...) is
-  refused with a warning (`docs/Ini.md`).
+  section (`[General]`, `[Basic]`, `[AudioVisual]`, `[MultiPlayer]`, ...) or in
+  one of the engine's type-list sections (`[InfantryTypes]`, `[VehicleTypes]`,
+  `[BuildingTypes]`, `[Warheads]`, `[Teams]`, ...) is refused with a warning
+  (`docs/Ini.md`).
 * **Extension type ids** must be `>= AbstractExt::FirstUserTypeId` (0x100); a
   conflicting base or a cyclic chain is rejected and the type id is poisoned -
   `Fetch` returns `nullptr` instead of risking a wrong cast

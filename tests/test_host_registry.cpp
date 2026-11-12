@@ -5,8 +5,11 @@
 // The registry is engine-free apart from the Win32 module probe inside Detect(),
 // which this test replaces with an injected fake, so registration rules, the
 // bit/name conflict checks, the custom-slot limit, detection, deterministic
-// ordering and the formatting helpers are all covered without a game process.
+// ordering, the marker reader (including its SEH-protected untrusted-pointer
+// path), the truncation-safe formatters and the problem drain are all covered
+// without a game process.
 
+#include <cstdint>
 #include <cstdio>
 #include <cstring>
 
@@ -312,21 +315,25 @@ void TestDynamicRegistration()
 	registry.Register(MakeHost(Bit(venture::Host::Kratos), "Kratos.dll", "Kratos", venture::HostKind::Builtin));
 	Check(registry.Register(MakeHost(1u << 3, "StaticHost.dll", "StaticHost", venture::HostKind::Custom)),
 		"the source-level custom host registers");
-	Check(registry.Detect(&LoadStaticAndSelf) == (1u << 3),
-		"the source-level custom host is detected by the module probe");
 
+	// A discovered host is registered before detection runs; the public entry
+	// point is closed after Detect() (HOST-04), so the marker scan uses the
+	// internal path while detection is in progress and the test drives the public
+	// path in its documented pre-detection window.
 	const unsigned dynamicBit = registry.RegisterDynamicHost(
 		"SelfHost.dll", "SelfHost", "v1.2.3", "Z:\\game\\SelfHost.dll");
 	Check(dynamicBit == (1u << 4), "a discovered host takes the lowest free custom bit");
-	Check(registry.Mask() == ((1u << 3) | (1u << 4)), "the discovered host is part of the detected set");
+	Check(registry.Mask() == (1u << 4), "the discovered host is part of the detected set");
 	Check(registry.HasBit(dynamicBit), "HasBit sees the discovered host");
 	Check(registry.HasName("SELFHOST"), "HasHostName matches the discovered host case-insensitively");
 
 	char buffer[256] = {};
-	Check(std::strcmp(registry.FormatDetected(buffer, sizeof(buffer)), "StaticHost (custom), SelfHost (custom)") == 0,
-		"the detected set lists the source-level and the discovered host in bit order");
+	Check(std::strcmp(registry.FormatDetected(buffer, sizeof(buffer)), "SelfHost (custom)") == 0,
+		"the discovered host is formatted with the custom suffix");
 
-	const venture::DetectedHost* const discovered = registry.DetectedAt(1);
+	const venture::DetectedHost* const discovered = registry.DetectedAt(0);
+	Check(discovered && discovered->definition->bit == dynamicBit,
+		"the discovered host is the first detected entry");
 	Check(discovered && discovered->definition->version
 		&& std::strcmp(discovered->definition->version, "v1.2.3") == 0,
 		"the marker version is recorded");
@@ -349,9 +356,22 @@ void TestDynamicRegistration()
 	const unsigned mask = registry.Detect(&LoadStaticAndSelf);
 	Check(mask == ((1u << 3) | (1u << 4)), "Detect re-probes the discovered host by module name");
 	Check(registry.DetectedCount() == 2, "the re-probe finds the source-level and the dynamic host");
+	Check(std::strcmp(registry.FormatDetected(buffer, sizeof(buffer)),
+		"StaticHost (custom), SelfHost (custom)") == 0,
+		"the detected set lists both custom hosts in bit order");
+
+	// HOST-04: detection closes registration.  This used to be accepted, which
+	// could extend the detected set after the feature gate had snapshotted it.
+	const unsigned secondBit = registry.RegisterDynamicHost(
+		"AfterDetect.dll", "AfterDetect", "v2.0", "Z:\\game\\AfterDetect.dll");
+	Check(secondBit == 0, "HOST-04: a discovered host registered after detection is rejected");
+	Check(registry.Mask() == mask, "the rejected registration did not change the detected set");
+	Check(registry.DefinitionCount() == 5, "the rejected registration did not add a definition");
+	Check(Contains(registry.ProblemAt(registry.ProblemCount() - 1), "after host detection"),
+		"the frozen-set rejection is recorded as a problem");
 
 	// The 29-slot limit is shared: fill a fresh registry with dynamically
-	// discovered hosts and verify the 30th is rejected.
+	// discovered hosts and verify the 30th is rejected (all before detection).
 	FillCustomNames();
 	venture::HostRegistry full;
 	full.Register(MakeHost(Bit(venture::Host::Ares), "Ares.dll", "Ares", venture::HostKind::Builtin));
@@ -370,6 +390,286 @@ void TestDynamicRegistration()
 		"the exhausted-slot problem is recorded");
 }
 
+// -- HOST-01: untrusted marker pointers are read inside the SEH region -------
+//
+// Synthetic getters with the same shape a hostile/stale marker DLL can produce.
+// MarkerGetterBadName is the HOST-01 regression: a well-formed marker struct
+// whose `name` is a wild pointer.  Before the reader copied everything under
+// __try, the first character read faulted outside any SEH region and took the
+// process down; the test binary surviving is the red/green criterion.
+const VentureHostInfo* __cdecl MarkerGetterGood()
+{
+	static const VentureHostInfo info{
+		VENTURE_HOST_MARKER_MAGIC,
+		VENTURE_HOST_MARKER_ABI_VERSION,
+		"MyPlatform",
+		"v1.2.0",
+		0u,
+		0u,
+	};
+	return &info;
+}
+
+const VentureHostInfo* __cdecl MarkerGetterBadName()
+{
+	static VentureHostInfo info{};
+	info.magic = VENTURE_HOST_MARKER_MAGIC;
+	info.abiVersion = VENTURE_HOST_MARKER_ABI_VERSION;
+	info.name = reinterpret_cast<const char*>(static_cast<std::uintptr_t>(1));
+	info.version = nullptr;
+	return &info;
+}
+
+const VentureHostInfo* __cdecl MarkerGetterBadStruct()
+{
+	return reinterpret_cast<const VentureHostInfo*>(static_cast<std::uintptr_t>(1));
+}
+
+char g_overlongMarkerText[128];
+
+const VentureHostInfo* __cdecl MarkerGetterOverlongName()
+{
+	static VentureHostInfo info{};
+	info.magic = VENTURE_HOST_MARKER_MAGIC;
+	info.abiVersion = VENTURE_HOST_MARKER_ABI_VERSION;
+	info.name = g_overlongMarkerText; // no NUL within the 64-byte copy window
+	info.version = nullptr;
+	return &info;
+}
+
+const VentureHostInfo* __cdecl MarkerGetterOverlongVersion()
+{
+	static VentureHostInfo info{};
+	info.magic = VENTURE_HOST_MARKER_MAGIC;
+	info.abiVersion = VENTURE_HOST_MARKER_ABI_VERSION;
+	info.name = "MyPlatform";
+	info.version = g_overlongMarkerText; // no NUL within the 64-byte copy window
+	return &info;
+}
+
+void TestHostMarkerReader()
+{
+	std::memset(g_overlongMarkerText, 'x', sizeof(g_overlongMarkerText) - 1u);
+	g_overlongMarkerText[sizeof(g_overlongMarkerText) - 1u] = '\0';
+
+	char name[VENTURE_HOST_MARKER_NAME_MAX + 1u] = {};
+	char version[VENTURE_HOST_MARKER_NAME_MAX + 1u] = {};
+	VentureHostInfo copy{};
+
+	Check(venture::ReadHostMarker(&MarkerGetterGood, &copy, name, sizeof(name), version, sizeof(version))
+		== venture::HostMarkerRead::Valid,
+		"HOST-01: a well-formed marker reads as valid");
+	Check(copy.name == name && std::strcmp(name, "MyPlatform") == 0,
+		"the marker name is copied into the caller's buffer");
+	Check(copy.version == version && std::strcmp(version, "v1.2.0") == 0,
+		"the marker version is copied into the caller's buffer");
+
+	Check(venture::ReadHostMarker(&MarkerGetterBadName, &copy, name, sizeof(name), version, sizeof(version))
+		== venture::HostMarkerRead::Raised,
+		"HOST-01: a wild name pointer is caught by the guarded read, not fatal");
+	Check(venture::ReadHostMarker(&MarkerGetterBadStruct, &copy, name, sizeof(name), version, sizeof(version))
+		== venture::HostMarkerRead::Raised,
+		"HOST-01: a wild marker pointer is caught by the guarded read too");
+	Check(venture::ReadHostMarker(&MarkerGetterOverlongName, &copy, name, sizeof(name), version, sizeof(version))
+		== venture::HostMarkerRead::Invalid,
+		"an over-long name is rejected instead of walking foreign memory");
+	Check(venture::ReadHostMarker(&MarkerGetterOverlongVersion, &copy, name, sizeof(name), version, sizeof(version))
+		== venture::HostMarkerRead::Invalid,
+		"an over-long version is rejected");
+	Check(venture::ReadHostMarker(nullptr, &copy, name, sizeof(name), version, sizeof(version))
+		== venture::HostMarkerRead::Invalid,
+		"a null export is rejected");
+	Check(venture::ReadHostMarker(&MarkerGetterGood, nullptr, name, sizeof(name), version, sizeof(version))
+		== venture::HostMarkerRead::Invalid,
+		"a null output pointer is rejected");
+	char tooSmall[8] = {};
+	Check(venture::ReadHostMarker(&MarkerGetterGood, &copy, tooSmall, sizeof(tooSmall), version, sizeof(version))
+		== venture::HostMarkerRead::Invalid,
+		"a name buffer smaller than the ABI limit is rejected instead of over-read");
+}
+
+// -- HOST-02: bounded/truncation-safe formatting and name length limits ------
+char g_longHostModules[4][40];
+char g_longHostNames[4][64];
+char g_tooLongHostName[80];
+char g_tooLongHostModule[80];
+char g_cappedHostName[64];
+char g_cappedHostModule[64];
+
+void FillLongHostNames()
+{
+	for (int index = 0; index < 4; ++index)
+	{
+		_snprintf_s(g_longHostModules[index], sizeof(g_longHostModules[index]), _TRUNCATE,
+			"LongHost%d.dll", index);
+		std::memset(g_longHostNames[index], static_cast<int>('A') + index, 63);
+		g_longHostNames[index][63] = '\0';
+	}
+	std::memset(g_tooLongHostName, 'n', sizeof(g_tooLongHostName) - 1u);
+	g_tooLongHostName[sizeof(g_tooLongHostName) - 1u] = '\0';
+	std::memset(g_tooLongHostModule, 'm', sizeof(g_tooLongHostModule) - 1u);
+	g_tooLongHostModule[sizeof(g_tooLongHostModule) - 1u] = '\0';
+	std::memset(g_cappedHostName, 'Z', 63);
+	g_cappedHostName[63] = '\0';
+	std::memset(g_cappedHostModule, 'M', 63);
+	g_cappedHostModule[63] = '\0';
+}
+
+bool EndsWithEllipsis(const char* const text)
+{
+	const std::size_t length = std::strlen(text);
+	return length >= 3u && std::strcmp(text + length - 3u, "...") == 0;
+}
+
+void TestTruncationSafeFormatting()
+{
+	FillLongHostNames();
+
+	venture::HostRegistry registry;
+	registry.Register(MakeHost(Bit(venture::Host::Ares), "Ares.dll", "Ares", venture::HostKind::Builtin));
+	for (int index = 0; index < 4; ++index)
+	{
+		Check(registry.RegisterDynamicHost(g_longHostModules[index], g_longHostNames[index], "", "") != 0,
+			"a long (63-character) discovered host name registers");
+	}
+
+	// Four 63-character names plus " (custom)" need 294 bytes: the old strcat_s
+	// append overflowed a 256-byte caller buffer and the CRT invalid-parameter
+	// handler terminated the process.  Now the line is truncated with an ellipsis.
+	char small[64] = {};
+	bool truncated = false;
+	const char* const smallResult = registry.FormatDetected(small, sizeof(small), &truncated);
+	Check(smallResult == small && truncated, "HOST-02: a long detected set truncates instead of aborting");
+	Check(std::strlen(small) == sizeof(small) - 1u, "the truncated result fills the buffer without overflowing it");
+	Check(small[sizeof(small) - 1u] == '\0', "the truncated result stays NUL-terminated");
+	Check(EndsWithEllipsis(small), "the truncated result ends with an ellipsis");
+
+	char full[1024] = {};
+	truncated = true;
+	registry.FormatDetected(full, sizeof(full), &truncated);
+	Check(!truncated, "HOST-02: a large enough buffer holds the whole list untruncated");
+	// 4 discovered names x (63 + " (custom)") + 3 separators = 4 * 72 + 6 = 294
+	Check(std::strlen(full) == 294u, "the untruncated list has the expected length");
+
+	// FormatNames has the same contract: many undeclared bits in a small buffer.
+	char names[32] = {};
+	truncated = false;
+	registry.FormatNames(0xFFFFFFF8u, names, sizeof(names), &truncated);
+	Check(truncated && std::strlen(names) == sizeof(names) - 1u && EndsWithEllipsis(names),
+		"HOST-02: FormatNames truncates a long bit list safely");
+
+	// Degenerate buffers must not crash and must stay terminated.
+	char one[1] = {};
+	Check(registry.FormatDetected(one, sizeof(one)) == one && one[0] == '\0',
+		"a one-byte buffer holds only the terminator");
+	char two[2] = {};
+	Check(registry.FormatDetected(two, sizeof(two)) == two && two[sizeof(two) - 1u] == '\0'
+			&& std::strlen(two) <= 1u,
+		"a two-byte buffer holds at most one character and stays NUL-terminated");
+	Check(std::strcmp(registry.FormatDetected(nullptr, 16u), "") == 0,
+		"a null buffer returns the empty string");
+	Check(std::strcmp(registry.FormatNames(Bit(venture::Host::Ares), nullptr, 0u), "") == 0,
+		"a zero-sized FormatNames buffer returns the empty string");
+
+	// HOST-02 name length cap: Register rejects a name longer than the marker ABI
+	// limit, and an exactly-63-character name is still accepted.
+	const int problemsBefore = registry.ProblemCount();
+	Check(!registry.Register(MakeHost(1u << 20, g_tooLongHostModule, "TooLongModule", venture::HostKind::Custom)),
+		"a module name longer than 63 characters is rejected");
+	Check(registry.ProblemCount() == problemsBefore + 1
+		&& Contains(registry.ProblemAt(registry.ProblemCount() - 1), "module name must be 1..63"),
+		"the over-long module name problem is recorded");
+	Check(!registry.Register(MakeHost(1u << 21, "TooLongDisplay.dll", g_tooLongHostName, venture::HostKind::Custom)),
+		"a display name longer than 63 characters is rejected");
+	Check(Contains(registry.ProblemAt(registry.ProblemCount() - 1), "display name must be 1..63"),
+		"the over-long display name problem is recorded");
+	Check(registry.Register(MakeHost(1u << 22, g_cappedHostModule, "CappedModule", venture::HostKind::Custom)),
+		"a 63-character module name is still accepted");
+	Check(registry.Register(MakeHost(1u << 23, "CappedName.dll", g_cappedHostName, venture::HostKind::Custom)),
+		"a 63-character display name is still accepted");
+}
+
+// -- HOST-05: the problem drain reports each problem exactly once -------------
+int g_problemLineCount = 0;
+char g_problemLines[2048] = {};
+
+void AppendProblemLine(const char* const message)
+{
+	++g_problemLineCount;
+	if (!message)
+		return;
+
+	const std::size_t used = std::strlen(g_problemLines);
+	const std::size_t capacity = sizeof(g_problemLines) - 1u;
+	std::size_t index = 0;
+	while (message[index] != '\0' && used + index < capacity)
+	{
+		g_problemLines[used + index] = message[index];
+		++index;
+	}
+	const std::size_t written = used + index;
+	g_problemLines[written] = '\0';
+	if (written + 1u < sizeof(g_problemLines))
+	{
+		g_problemLines[written] = '\n';
+		g_problemLines[written + 1u] = '\0';
+	}
+}
+
+void __cdecl CaptureHostProblem(const char* const message)
+{
+	AppendProblemLine(message);
+}
+
+void TestProblemDrain()
+{
+	venture::HostRegistry registry;
+	registry.Register(MakeHost(Bit(venture::Host::Ares), "Ares.dll", "Ares", venture::HostKind::Builtin));
+	registry.Detect(&LoadAres);
+	Check(registry.ProblemCount() == 0, "HOST-05: a clean detection records no problem");
+
+	g_problemLineCount = 0;
+	g_problemLines[0] = '\0';
+	Check(registry.ReportNewProblems(&CaptureHostProblem) == 0,
+		"HOST-05: the drain reports nothing when no problem is pending");
+
+	// The startup path takes its first drain right after Detect().  A problem
+	// recorded later must reach the second drain instead of being lost.
+	Check(!registry.Register(MakeHost(1u << 3, "Late.dll", "Late", venture::HostKind::Custom)),
+		"a source-level registration after detection is rejected");
+	Check(registry.ReportNewProblems(&CaptureHostProblem) == 1,
+		"HOST-05: the drain reports the late-registration problem");
+	Check(g_problemLineCount == 1, "the sink saw exactly one line");
+	Check(Contains(g_problemLines, "after host detection"),
+		"the drained problem explains the lifecycle");
+	Check(registry.ReportNewProblems(&CaptureHostProblem) == 0,
+		"HOST-05: a reported problem is never reported twice");
+
+	// HOST-04's rejection plus the second drain: the exact combination the fixed
+	// startup path relies on.
+	const int problemsBefore = registry.ProblemCount();
+	g_problemLineCount = 0;
+	g_problemLines[0] = '\0';
+	Check(registry.RegisterDynamicHost("LateHost.dll", "LateHost", "", "") == 0,
+		"HOST-04: a discovered host registered after detection is rejected");
+	Check(registry.ProblemCount() == problemsBefore + 1,
+		"the frozen-set rejection is recorded as a problem");
+	Check(registry.ReportNewProblems(&CaptureHostProblem) == 1,
+		"HOST-05: the second drain reports the problem recorded after detection");
+	Check(Contains(g_problemLines, "after host detection"),
+		"the second-drain problem names the frozen set");
+
+	// A null sink must not consume the pending problems.
+	Check(!registry.Register(MakeHost(1u << 4, "Late2.dll", "Late2", venture::HostKind::Custom)),
+		"a second late registration is rejected");
+	g_problemLineCount = 0;
+	g_problemLines[0] = '\0';
+	Check(registry.ReportNewProblems(nullptr) == 0, "a null drain sink reports nothing");
+	Check(registry.ReportNewProblems(&CaptureHostProblem) == 1,
+		"the null sink did not advance the drain cursor");
+	Check(Contains(g_problemLines, "after host detection"), "the pending problem is still reported");
+}
+
 int __cdecl main()
 {
 	TestBuiltinRegistration();
@@ -378,6 +678,9 @@ int __cdecl main()
 	TestFormattingEdgeCases();
 	TestMarkerValidation();
 	TestDynamicRegistration();
+	TestHostMarkerReader();
+	TestTruncationSafeFormatting();
+	TestProblemDrain();
 
 	std::printf("\n%s (%d failure%s)\n", g_failures == 0 ? "PASS" : "FAILED",
 		g_failures, g_failures == 1 ? "" : "s");

@@ -18,7 +18,7 @@ It is a template, not a mod: it deliberately contains **no gameplay features**.
 > marker, the YRpp binding gate and the verification tooling) is implemented,
 > in-game verified, and the 1.x line was hardened by an independent blind review
 > (`CHANGELOG.md`).  2.0 changes the host model and the INI layer and keeps the
-> same verification suite (15 engine-free tests, 12 static checks, two Wine
+> same verification suite (16 engine-free tests, 12 static checks, two Wine
 > probes); its delta still needs the independent review pass planned in the
 > roadmap.  The automated checks for each layer are named in this README and in
 > `docs/`; they do not replace an in-game check.
@@ -101,9 +101,10 @@ named with it (an in-game run is still the only end-to-end check - see
   serial through the savegame trailer and logs sparsely; `example_ini_key` reads
   and takes over one `rules(md).ini` key.  Neither has a gameplay effect; they
   demonstrate the whole feature contract and are meant to be copied.
-* **Engine binding gate** - YRpp pinned by commit; enforced at build time
-  (`scripts/linux/check_yrpp.py`), compile time (`static_assert`s in
-  `src/Engine/EngineCompat.h`) and run time (log + version resource).
+* **Engine binding gate** - YRpp pinned by commit; enforced by the Linux build
+  (`scripts/linux/check_yrpp.py`; on the Visual Studio path run it yourself),
+  compile time (`static_assert`s in `src/Engine/EngineCompat.h`) and run time
+  (log + version resource).
 * **Hook catalogue + static verification** - `docs/HookCatalogue.md` lists every
   hook (20 records, 19 distinct handlers); `scripts/verify_build.py` parses that
   table and verifies a built DLL against it without hard-coding a second copy.
@@ -165,10 +166,12 @@ scripts/linux/fetch_yrpp.sh --from /path/to/YRpp
 
 On Windows, clone the YRpp repository and check out the commit named by
 `VC_YRPP_PIN` in `src/Core/EnginePin.h` into `external/YRpp` (or run the same
-helper from Git Bash).  The build fails if the revision does not match the pin,
-or if the checkout's content does not match `external/YRpp.sha256`; when the pin
-is intentionally updated, regenerate the manifest with
-`fetch_yrpp.sh --write-manifest`.
+helper from Git Bash).  The Visual Studio build does not run the YRpp gate
+itself: run `scripts/linux/check_yrpp.py` after the checkout (the Linux build
+runs it automatically before compiling).  The gate rejects a revision that does
+not match the pin and a checkout whose content does not match
+`external/YRpp.sha256`; when the pin is intentionally updated, regenerate the
+manifest with `fetch_yrpp.sh --write-manifest`.
 
 ### Linux (MSVC under Wine)
 
@@ -261,9 +264,11 @@ generated source-level registration with an explicit bit, and checks that
 detection, `HasHostName`, `(custom)` formatting and the `requiredHosts` gate
 track the module being loaded and unloaded; it also builds a platform DLL that
 exports the 2.0 `VentureHost_GetInfo` marker and verifies automatic discovery,
-bit allocation and the recorded version, plus three malformed markers (wrong
-magic, null name, crashing export) that must be rejected without crashing.  The
-built-in hosts, the declaration matrix and the marker validation are covered by
+bit allocation and the recorded version, plus five malformed markers (wrong
+magic, null name, crashing export, wild name pointer, over-long name) that must
+be rejected without crashing.  The built-in hosts, the declaration matrix, the
+guarded marker reader (wild pointers, the 63-character boundary, truncated
+formatting buffers) and the marker validation are covered by
 `tests/test_host_registry.cpp` and `tests/test_host_gate.cpp`.
 
 The 2.0 INI key registry is covered by `tests/test_ini_registry.cpp` (defaults,

@@ -56,7 +56,7 @@ void OnRulesIniReady(IniTakeover::IReader& rulesIni)
 		enabled ? "yes" : "no");
 }
 
-void Initialize(const FeatureContext& context)
+void __cdecl Initialize(const FeatureContext& context)
 {
 	(void)context;
 

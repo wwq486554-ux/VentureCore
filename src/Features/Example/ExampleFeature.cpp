@@ -86,7 +86,7 @@ ExampleStore& Store()
 	return ExampleStore::Instance();
 }
 
-void Initialize(const FeatureContext& context)
+void __cdecl Initialize(const FeatureContext& context)
 {
 	(void)context;
 	Store().SetName("UnitClass/ExampleUnitExt");

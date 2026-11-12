@@ -13,7 +13,7 @@
 //   Startup() -> gate, SyringeEx check, log, <Platform>.ini, host detection,
 //                lineage scan, extension/problem sinks, feature registry,
 //                unknown-key audit, "startup complete", gate Running
-//   Shutdown()/Startup() lifecycle and the tri-state gate.
+//   Shutdown()/Startup() lifecycle and the four-state gate.
 //
 // What the test does NOT exercise: the engine-facing hooks (Engine/Hooks.*.cpp,
 // load_probe.sh / probe_hosts.sh territory), a real `SyringeEx` injection and a
@@ -218,7 +218,8 @@ int __cdecl main(void)
 	// -- shutdown ------------------------------------------------------------
 	venture::Shutdown();
 	Check(!venture::IsStarted(), "Shutdown() stops the platform");
-	Check(PlatformGate::IsPending(), "Shutdown() returns the gate to Pending");
+	Check(PlatformGate::IsFinished(),
+		"Shutdown() marks the gate Finished: the platform is not restartable (START-04)");
 	Check(!venture::Log::IsOpen(), "Shutdown() closes the log");
 
 	// -- log assertions (first startup block) --------------------------------
@@ -241,16 +242,18 @@ int __cdecl main(void)
 			"the startup block records a clean lineage scan");
 	}
 
-	// -- restart -------------------------------------------------------------
-	Check(venture::Startup(), "Startup() runs again after Shutdown()");
-	Check(venture::IsStarted(), "the platform is started after the second Startup()");
-	venture::Shutdown();
-	Check(!venture::IsStarted(), "the platform is stopped after the second Shutdown()");
+	// -- a shutdown is final: no second startup (START-04) -------------------
+	// Feature initialization is once-only, so Shutdown() moves the gate to
+	// Finished and a later Startup() reports failure without re-initializing the
+	// features or re-opening the log.
+	Check(!venture::Startup(), "Startup() after Shutdown() returns false: the platform cannot restart");
+	Check(!venture::IsStarted(), "the platform stays stopped after the refused restart");
+	Check(PlatformGate::IsFinished(), "the gate stays Finished after the refused restart");
 	if (havePaths)
 	{
-		Check(ReadWholeFile(logPath, log), "the log file can be read after the second startup");
-		Check(CountOccurrences(log, "startup complete - 0 feature(s) registered") == 2,
-			"each startup appends its own 'startup complete' block");
+		Check(ReadWholeFile(logPath, log), "the log file can be read after the refused restart");
+		Check(CountOccurrences(log, "startup complete - 0 feature(s) registered") == 1,
+			"the refused restart did not write a second startup block");
 	}
 
 	// -- a refusal is final --------------------------------------------------
@@ -261,7 +264,7 @@ int __cdecl main(void)
 	{
 		std::string afterRefusal;
 		Check(ReadWholeFile(logPath, afterRefusal), "the log file can be read after the refused Startup()");
-		Check(CountOccurrences(afterRefusal, "startup complete - 0 feature(s) registered") == 2,
+		Check(CountOccurrences(afterRefusal, "startup complete - 0 feature(s) registered") == 1,
 			"the refused Startup() did not write another startup block");
 	}
 	PlatformGate::MarkPending();

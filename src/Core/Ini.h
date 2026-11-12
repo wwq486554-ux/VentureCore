@@ -1,5 +1,7 @@
 #pragma once
 
+#include <cstddef>
+
 #include <windows.h>
 
 namespace venture
@@ -31,5 +33,12 @@ public:
 	static void EnumerateEntries(
 		void (*visitor)(const char* section, const char* key, void* userData),
 		void* userData);
+
+	// INI-06 diagnostics: hard-limit events of the most recent EnumerateEntries()
+	// call - a truncated section-name list (16 KiB buffer), a truncated section
+	// body (32 KiB buffer) or a key name too long for the per-key buffer (256
+	// bytes).  These are Win32 profile API limits; the startup path reports a
+	// nonzero value at Debug level after the unknown-key scan.
+	static std::size_t EnumerationLimitCount();
 };
 }

@@ -51,7 +51,7 @@ void ResetLog()
 
 // FeatureContext::Log callback: append every line, so the gate's reasons can be
 // asserted independently of the order the features are registered in.
-void CaptureLog(const char* const format, ...)
+void __cdecl CaptureLog(const char* const format, ...)
 {
 	char line[512] = {};
 	va_list args;
@@ -102,7 +102,7 @@ bool ProbePhobosOnly(const char* const moduleName)
 	return std::strcmp(moduleName, "Phobos.dll") == 0;
 }
 
-void NoopInitialize(const venture::FeatureContext& context)
+void __cdecl NoopInitialize(const venture::FeatureContext& context)
 {
 	(void)context;
 	++g_initializeCalls;
@@ -154,6 +154,15 @@ const venture::FeatureDescriptor kAnyOfKratos{
 const venture::FeatureDescriptor kSwitchOff{
 	"test_switch_off", "SwitchOff", "Switch off",
 	0u, 0u, &g_enabledSwitchOff, &NoopInitialize };
+
+// HOST-07: a host requirement naming a bit no registered host defines.  Bit 20 is
+// outside the built-in range and outside every custom bit this test registers, so
+// it can never be present: the gate keeps the feature disabled and the registry
+// records the stale declaration as a startup problem.
+bool g_enabledUnknownHostBit = false;
+const venture::FeatureDescriptor kRequiresUnknownHostBit{
+	"test_unknown_host_bit", "UnknownHostBit", "Requires an unknown host bit",
+	1u << 20, 0u, &g_enabledUnknownHostBit, &NoopInitialize };
 }
 
 void TestGateRules()
@@ -210,6 +219,7 @@ void TestFeatureGateEndToEnd()
 	venture::RegisterFeature(&kAnyOfKratosOrPhobos);
 	venture::RegisterFeature(&kAnyOfKratos);
 	venture::RegisterFeature(&kSwitchOff);
+	venture::RegisterFeature(&kRequiresUnknownHostBit);
 
 	venture::IniRegistry& ini = venture::IniRegistry::Instance();
 	ini.SetRawReader(&FakeIniRawValue);
@@ -244,7 +254,25 @@ void TestFeatureGateEndToEnd()
 	Check(g_enabledAnyOfKratosOrPhobos, "anyOfHosts=Kratos|Phobos: enabled by Phobos");
 	Check(!g_enabledAnyOfKratos, "anyOfHosts=Kratos: disabled while Kratos is absent");
 	Check(!g_enabledSwitchOff, "[Features] switch off: disabled");
-	Check(g_initializeCalls == 8, "Initialize() runs for every feature, enabled or not");
+	Check(g_initializeCalls == 9, "Initialize() runs for every feature, enabled or not");
+
+	// HOST-07: a declared host bit no registered host defines is reported as a
+	// declaration problem naming the feature, instead of silently disabling it.
+	Check(!g_enabledUnknownHostBit,
+		"HOST-07: a host bit no registered host defines keeps the feature disabled");
+	Check(venture::FeatureRegistrationProblemCount() >= 1,
+		"HOST-07: the unknown host bit is recorded as a startup problem");
+	bool sawUnknownHostBitProblem = false;
+	for (int problem = 0; problem < venture::FeatureRegistrationProblemCount(); ++problem)
+	{
+		const char* const message = venture::FeatureRegistrationProblemAt(problem);
+		if (std::strstr(message, "test_unknown_host_bit") != nullptr
+			&& std::strstr(message, "unknown host bit") != nullptr)
+		{
+			sawUnknownHostBitProblem = true;
+		}
+	}
+	Check(sawUnknownHostBitProblem, "HOST-07: the problem names the feature and the unknown bit");
 
 	Check(LogContains("[Features] test_no_requirement (No requirement): enabled"),
 		"the enabled log line has no tier suffix");

@@ -43,6 +43,16 @@ void Warn(const char* const message)
 // one of them would silently remove it before the engine reads it, so the
 // takeover refuses these (C-09).  Case-insensitive; keep the list to sections
 // the engine/host platforms are known to consume.
+//
+// Two kinds of engine core section are listed:
+//   * the scalar/global rules sections (log, balance, colours, ...);
+//   * the engine's type-list sections.  RulesClass::Init reads those itself right
+//     after our purge hook (the type-name lists it registers/validates:
+//     InfantryTypes ... OverlayTypes), so owning a type name there would delete
+//     the type itself before the engine sees it (START-02).  [Projectiles] is
+//     not an engine type-list section in this build, and [Weapons] has no
+//     standalone section name - do not add guessed names: a name that the engine
+//     does not read would refuse a legitimate platform-namespaced section.
 const char* const kReservedEngineSections[] = {
 	"General",
 	"Basic",
@@ -62,6 +72,17 @@ const char* const kReservedEngineSections[] = {
 	"Powerups",
 	"LandCharacteristics",
 	"MouseCursors",
+	// Engine type-list sections read by RulesClass::Init (START-02).
+	"InfantryTypes",
+	"VehicleTypes",
+	"AircraftTypes",
+	"BuildingTypes",
+	"SuperWeaponTypes",
+	"Warheads",
+	"Teams",
+	"TerrainTypes",
+	"SmudgeTypes",
+	"OverlayTypes",
 };
 
 // ASCII-only case folding. The engine's INI names are ASCII, and a local

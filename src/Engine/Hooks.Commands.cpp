@@ -140,6 +140,11 @@ void ExecuteTestCommand()
 
 // Registers the example command and its event at load time: before the engine
 // asks for the command list and before any event can be dispatched.
+//
+// This object is a file-static initializer, so the two Log::Warn calls below run
+// before Platform::Startup() and therefore before Log::Open().  They are not
+// lost: the logger queues Warn/Error lines written while the file is closed and
+// flushes them into <Platform>.log when it opens (START-01).
 struct Registrar
 {
 	Registrar()

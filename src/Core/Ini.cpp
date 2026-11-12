@@ -3,6 +3,7 @@
 #include "Core/PlatformConfig.h"
 #include "Core/PlatformPaths.h"
 
+#include <cstddef>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -10,6 +11,11 @@
 namespace
 {
 char g_iniPath[MAX_PATH * 2] = {};
+
+// INI-06: hard-limit events of the most recent EnumerateEntries() call (see
+// Ini.h).  The Win32 profile API truncates when its buffers are full; counting
+// the events lets the startup path report an incomplete scan.
+std::size_t g_enumerationLimits = 0;
 
 bool EqualsIgnoreCase(const char* const left, const char* const right)
 {
@@ -37,6 +43,11 @@ bool Ini::Exists()
 
 	const DWORD attributes = GetFileAttributesA(g_iniPath);
 	return attributes != INVALID_FILE_ATTRIBUTES && (attributes & FILE_ATTRIBUTE_DIRECTORY) == 0;
+}
+
+std::size_t Ini::EnumerationLimitCount()
+{
+	return g_enumerationLimits;
 }
 
 bool Ini::GetBool(const char* const section, const char* const key, const bool defaultValue)
@@ -115,6 +126,7 @@ void Ini::EnumerateEntries(
 	void (*visitor)(const char* section, const char* key, void* userData),
 	void* const userData)
 {
+	g_enumerationLimits = 0;
 	if (!visitor || g_iniPath[0] == '\0' || !Exists())
 		return;
 
@@ -124,6 +136,11 @@ void Ini::EnumerateEntries(
 	if (sectionBytes == 0)
 		return;
 
+	// GetPrivateProfileSectionNamesA returns nSize-1 when the double-NUL list
+	// does not fit; a full buffer means section names were cut (INI-06).
+	if (sectionBytes >= sizeof(sectionNames) - 2)
+		++g_enumerationLimits;
+
 	for (const char* section = sectionNames; *section != '\0'; section += std::strlen(section) + 1)
 	{
 		char entries[32768] = {};
@@ -131,6 +148,10 @@ void Ini::EnumerateEntries(
 			section, entries, static_cast<DWORD>(sizeof(entries)), g_iniPath);
 		if (entryBytes == 0)
 			continue;
+
+		// A full entry buffer means keys past the 32 KiB cap were cut (INI-06).
+		if (entryBytes >= sizeof(entries) - 2)
+			++g_enumerationLimits;
 
 		for (const char* entry = entries; *entry != '\0'; entry += std::strlen(entry) + 1)
 		{
@@ -147,8 +168,14 @@ void Ini::EnumerateEntries(
 
 			char key[256] = {};
 			const std::size_t keyLength = static_cast<std::size_t>(trimmedEnd - keyBegin);
-			if (keyLength == 0 || keyLength >= sizeof(key))
+			if (keyLength == 0)
 				continue;
+			if (keyLength >= sizeof(key))
+			{
+				// Longer than the registry's per-key buffer: skip and count (INI-06).
+				++g_enumerationLimits;
+				continue;
+			}
 			std::memcpy(key, keyBegin, keyLength);
 			key[keyLength] = '\0';
 			visitor(section, key, userData);

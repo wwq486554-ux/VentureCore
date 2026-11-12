@@ -220,9 +220,11 @@ range fall through - see the fail-closed size policy above.
 
 The engine sender is installed at DLL load time with
 `EventChannel::SetSender(...)`; the channel unit itself never includes an engine
-header. The startup log is hooked in from `src/Core/Platform.cpp`, right after
-the host-detection line, and prints the channel range, every registered event
-type with its payload size, the fail-closed policy and the mixed-client warning.
+header. The startup log is hooked in from `src/Core/Platform.cpp` after host
+detection and the lineage check, once feature initialization has run, so the
+logged channel state includes the event types a feature registered from its
+`Initialize()`; it prints the channel range, every registered event type with its
+payload size, the fail-closed policy and the mixed-client warning.
 
 ## Startup log
 

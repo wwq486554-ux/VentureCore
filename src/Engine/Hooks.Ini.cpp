@@ -179,9 +179,25 @@ void ResolveTakeoverSwitch()
 
 	g_takeoverSwitchResolved = true;
 
-	const bool enabled = venture::IniRegistry::Instance().ReadBaseBool(
+	venture::IniRegistry& registry = venture::IniRegistry::Instance();
+	const bool enabled = registry.ReadBaseBool(
 		VC_SECTION_PLATFORM, "IniTakeover", true,
 		"hide platform-owned rules(md).ini keys from host platforms loaded next to us");
+
+	// INI-03: [Platform] IniTakeover can only be read here, when the engine first
+	// parses rules(md).ini - after the startup "ini keys:" summary was written.
+	// An invalid value would therefore be missing from that snapshot; report it as
+	// its own warning and count it against the snapshot instead (the registry
+	// already warned about the rejected value; this line names the consequence).
+	if (registry.IsKeyInvalid(VC_SECTION_PLATFORM, "IniTakeover"))
+	{
+		venture::Log::Warn(
+			"[IniTakeover] [%s] IniTakeover has an invalid value - the default 'yes' is in effect; "
+			"%d invalid key(s) resolved after the startup ini summary",
+			VC_SECTION_PLATFORM,
+			registry.LateInvalidCount());
+	}
+
 	venture::IniTakeover::SetEnabled(enabled);
 	venture::Log::Info(
 		"[IniTakeover] [%s] IniTakeover=%s (%zu owned key(s) registered, %zu refused by the deny-list)",
