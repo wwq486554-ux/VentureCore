@@ -202,8 +202,10 @@ These automatic checks cover this machine; the in-game run is a human step:
 python3 scripts/verify_build.py         # static: PE image, hook table, exports,
                                         # version strings, feature id, log policy
 scripts/linux/load_probe.sh             # dynamic: LoadLibrary, exports, lineage conflict
-scripts/linux/probe_hosts.sh            # dynamic: custom host registration/detection gate
+scripts/linux/probe_hosts.sh            # dynamic: host registration/marker discovery/gating
 scripts/linux/run_tests.sh              # engine-free unit tests, same toolchain
+python3 scripts/check_live_log.py --dir <game dir>
+                                        # optional: judge a live in-game log (normal/probe)
 python3 scripts/linux/check_eol.py      # line endings vs .gitattributes
 scripts/linux/abi_probe.sh              # optional: engine ABI sizes pinned by EngineCompat.h
 ```
@@ -246,6 +248,13 @@ strict integer parsing and ranges, invalid-value warnings, duplicate keys,
 rendering).  After a run with `[Platform] DumpIniTemplate=yes`,
 `scripts/compare_ini_template.py <generated file> VentureCore.ini.example` checks
 that the shipped example still lists exactly the registered keys.
+
+`scripts/check_live_log.py` is the in-game aid: it judges the last process block
+of a live `<Platform>.log` (`--mode normal`: startup shape, host-set line, `ini
+keys:` summary, feature lines, no `[ERROR]`, syringe exit code; `--mode probe`:
+additionally the unknown-key/invalid-value warnings and the generated-template
+comparison).  It is what the 2.0 in-game test uses for the concise PASS/FAIL
+verdict.
 
 The real test - launching the game with SyringeEx and the DLL installed - must be
 done by a human.  See `docs/HookCatalogue.md` for what each hook does and
