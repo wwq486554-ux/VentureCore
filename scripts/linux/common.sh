@@ -65,6 +65,17 @@ fi
 : "${VCS_JOBS:=$(nproc 2>/dev/null || echo 4)}"
 : "${VCS_DEBUG_INFO:=z7}"          # z7 (robust under Wine) | zi (MSBuild default)
 : "${VCS_MODULES:=0}"              # 1 = also pass /experimental:module (see scripts/linux/README.md)
+# Wall-clock limits for individual tool runs.  A hung wineserver or a probe
+# waiting on a window must not keep the shared toolchain lock busy for an hour;
+# every wine invocation is wrapped in a limit (TOOL-10).  The caller passes the
+# applicable one to vcs_wine_run.
+: "${VCS_COMPILE_TIMEOUT:=600}"    # one cl.exe compile (seconds)
+: "${VCS_LINK_TIMEOUT:=600}"       # one link.exe / rc.exe run (seconds)
+: "${VCS_PROBE_TIMEOUT:=300}"      # one probe binary under Wine (seconds)
+: "${VCS_SETUP_TIMEOUT:=1200}"     # wineboot + the setup smoke test (seconds)
+# 1 = add /WX to cl.exe (any compiler warning fails the build/tests/probes).
+# The build script additionally asserts a zero warning count either way (TOOL-07).
+: "${VCS_WARNINGS_AS_ERRORS:=0}"
 
 # ---------------------------------------------------------------------------
 # Locating the Windows installation
@@ -295,6 +306,140 @@ vcs_wine_ready() {
      || -e "$VCS_WINEPREFIX/.update-timestamp" ]]
 }
 
+# Runs one Wine invocation under a wall-clock limit (TOOL-10).  Neither the
+# compiler/linker/resource compiler nor the probe binaries may run unbounded: a
+# stuck process keeps the toolchain lock (and the shared Wine prefix) busy, and
+# the next build would wait up to the lock timeout for it.
+#
+# usage: vcs_wine_run <seconds> <command> [args...]
+# Returns the command status; 124 means the limit expired (same as coreutils
+# timeout).  Without coreutils timeout (unusual on Linux) it runs unbounded and
+# warns once, matching the old behaviour instead of failing the build.
+vcs_wine_run() {
+  local limit="$1"; shift
+  if ! [[ $limit =~ ^[0-9]+$ ]] || (( limit <= 0 )); then
+    vcs_die "vcs_wine_run: invalid timeout '$limit'"
+  fi
+  if command -v timeout >/dev/null 2>&1; then
+    timeout -k 15 "$limit" "$@"
+    return $?
+  fi
+  if [[ ${VCS_TIMEOUT_WARNED:-0} != 1 ]]; then
+    vcs_warn "coreutils 'timeout' is not installed - Wine tool runs have no time limit"
+    VCS_TIMEOUT_WARNED=1
+  fi
+  "$@"
+}
+
+# ---------------------------------------------------------------------------
+# Compiler flags - one definition for every configuration (TOOL-01)
+# ---------------------------------------------------------------------------
+#
+# The DLL build, the unit tests, the benchmark and the probes compile the same
+# platform sources.  When they use different code-generation flags, a green test
+# run says nothing about the DLL that ships: the tests used to compile /Od with
+# RTTI and the stack protector on while the DLL was /O2 /GR- /GS-.  vcs_cl_flags
+# is therefore the *only* definition of the cl.exe options, and
+# vcs_assert_flag_parity() fails the run if a profile ever diverges from the
+# build profile in anything except the documented delta below.
+#
+# Profiles (third argument):
+#   build (default) - the VentureCore.dll build; honours VCS_DEBUG_INFO.
+#   test            - scripts/linux/run_tests.sh: identical to build.
+#   bench           - scripts/linux/bench_store.sh: identical to build, so the
+#                     benchmark numbers describe the shipped code.
+#   probe           - the ABI / load / host probes: identical to build.
+#
+# The only allowed difference is the *debug-info format* (no code generation):
+# the test/bench/probe profiles always use /Z7 (each is a one-off binary; a
+# shared /Zi PDB would be another cross-run temp file under Wine), while the
+# build honours VCS_DEBUG_INFO (z7 by default, zi to match MSBuild's /Zi).
+# /Gz (stdcall default) and /WX- are part of the shared list exactly like in the
+# DLL build - the tests' `int __cdecl main` convention relies on /Gz - so they
+# are not profile deltas.
+#
+# Deliberate cross-build-system differences (Linux vs MSBuild) are listed in
+# scripts/linux/README.md and in the comments next to the options below
+# (TOOL-08).
+#
+# usage: vcs_cl_flags <Debug|Release> [build-type] [profile]
+# Prints one option per line.  Invocation-specific options (/c, /Fo, /LD, /Fe,
+# /link ...) are added by the caller.
+vcs_cl_flags() {
+  local cfg="${1:-Release}" bt="${2:-}" profile="${3:-build}"
+  local -a f=(
+    /nologo /W4 /WX- /diagnostics:column
+    /DSYR_VER=2 /D_HAS_EXCEPTIONS=0 /DNOMINMAX /D_CRT_SECURE_NO_WARNINGS
+    /D_WIN32_WINNT=0x0601 /DNTDDI_VERSION=0x06010000 /D_WINDLL
+    /GF /Gm- /MT /Zp8 /GS- /Gy /arch:SSE2 /fp:precise
+    /Zc:wchar_t /Zc:forScope /Zc:inline /Zc:rvalueCast /GR-
+    /std:c++20 /permissive- /FS /Gz /TP /external:W4 /analyze-
+    /wd4100 /wd4201 /wd4530 /wd4731 /wd4740 /wd4458 /wd4819 /wd5103 /wd5105
+  )
+  # TOOL-02: deliberately no /EH option.  _HAS_EXCEPTIONS=0 above plus the
+  # force-included include/platform/BuildGuards.h (see the /FI below) make the
+  # "no C++ exceptions" policy explicit and fail the compile if it is broken.
+  # TOOL-03: /DNDEBUG in Release removes the live asserts from the shipped DLL.
+  # TOOL-08: /FC is deliberately absent - without it __FILE__ is the
+  # repository-relative path the build passes in, not the build machine's
+  # absolute path.  /openmp was dropped: no source uses _OPENMP and the shipped
+  # DLL never imported vcomp/libomp.
+  case "$cfg" in
+    Release) f+=( /O2 /Oy /DNDEBUG ) ;;
+    Debug)   f+=( /Od /Oy- /DDEBUG /wd26495 ) ;;
+    *) vcs_die "vcs_cl_flags: unknown configuration '$cfg'" ;;
+  esac
+  case "$bt" in
+    NIGHTLY) f+=( /DNIGHTLY ) ;;
+    RELEASE) f+=( /DRELEASE ) ;;
+    "")      ;;
+    *)       vcs_die "vcs_cl_flags: unknown build type '$bt' (NIGHTLY or RELEASE)" ;;
+  esac
+  if [[ ${VCS_WARNINGS_AS_ERRORS:-0} == 1 ]]; then
+    f+=( /WX )
+  fi
+  if [[ $profile == build && ${VCS_DEBUG_INFO:-z7} == zi ]]; then
+    f+=( /Zi "/Fd$(vcs_w "${VCS_PDB_DIR:-$VCS_ROOT/Release/IntDir}/vc143.pdb")" )
+  else
+    f+=( /Z7 )
+  fi
+  if [[ ${VCS_MODULES:-0} == 1 ]]; then
+    f+=( /experimental:module "/stdIfcDir$(vcs_w "$VCS_MSVC_DIR/ifc/$VCS_MSVC_ARCH")" )
+  fi
+  # TOOL-02: force-included build guard - every translation unit compiled by any
+  # of the scripts includes it first, so a return of /EH or a dropped
+  # _HAS_EXCEPTIONS=0 is a compile error, not a silently different binary.
+  f+=( "/FI$(vcs_w "$VCS_ROOT/include/platform/BuildGuards.h")" )
+  printf '%s\n' "${f[@]}"
+}
+
+# Hash of the code-generation flags of one configuration/profile, used to prove
+# that the tests/benchmark/probes compile with the same options as the DLL
+# (TOOL-01).  The debug-info format tokens are normalised away because /Z7 vs
+# /Zi is the one documented (non-codegen) profile delta.
+vcs_flags_hash() {
+  local cfg="${1:-Release}" bt="${2:-}" profile="${3:-build}"
+  vcs_cl_flags "$cfg" "$bt" "$profile" \
+    | grep -vE '^(/Z7|/Zi|/Fd)' | md5sum | cut -d' ' -f1
+}
+
+# Fails unless every profile compiles with the build profile's flags.  The
+# acceptance commands (run_tests.sh, bench_store.sh, the probes) call this, so a
+# future profile-specific flag that is not a documented delta stops the run
+# instead of silently weakening the test evidence (TOOL-01).
+vcs_assert_flag_parity() {
+  local cfg="${1:-Release}" bt="${2:-}" ref profile hash
+  ref="$(vcs_flags_hash "$cfg" "$bt" build)"
+  for profile in test bench probe; do
+    hash="$(vcs_flags_hash "$cfg" "$bt" "$profile")"
+    [[ $hash == "$ref" ]] || vcs_die \
+      "compiler flags of profile '$profile' differ from the 'build' profile (hash $hash != $ref).
+  All cl.exe invocations must come from scripts/linux/common.sh's vcs_cl_flags;
+  only the /Z7-vs-/Zi debug-info format may differ between profiles (TOOL-01)."
+  done
+  VCS_FLAGS_HASH="$ref"
+}
+
 # ---------------------------------------------------------------------------
 # Project file list (single source of truth: the Visual Studio project files)
 # ---------------------------------------------------------------------------
@@ -322,6 +467,72 @@ vcs_list_resources() {
 }
 
 # ---------------------------------------------------------------------------
+# Cross-check the Linux build against the Visual Studio project files (TOOL-10)
+# ---------------------------------------------------------------------------
+#
+# The source list is derived from VentureCore.vcxproj/YRpp.props, but the
+# include path and the preprocessor definitions are maintained separately in
+# this file.  A change in VentureCore.props therefore used to be invisible to
+# the Linux build (and to the flags guard).  This check makes the divergence a
+# build error and enforces the batch-A policy on both build systems:
+#   * _HAS_EXCEPTIONS=0 is defined and the dead HAS_EXCEPTIONS macro is gone
+#     (TOOL-02);
+#   * the Release configuration defines NDEBUG (TOOL-03);
+#   * the project include roots are exactly src, include and external/YRpp, so
+#     the include path below cannot drift from VentureCore.props (TOOL-10).
+vcs_check_project_sync() {
+  local props="$VCS_ROOT/VentureCore.props" token line
+  local -a tokens=() have=()
+  local -a want=("$VCS_ROOT/src" "$VCS_ROOT/include" "$VCS_ROOT/external/YRpp")
+  local -a missing=()
+  local include_line="" defines_line="" release_block=""
+
+  [[ -f $props ]] || vcs_die "missing $props"
+  # The tags are single-line in VentureCore.props, which keeps this check simple.
+  include_line="$(sed -n 's:.*<AdditionalIncludeDirectories>\(.*\)</AdditionalIncludeDirectories>.*:\1:p' "$props" | head -n 1)"
+  defines_line="$(sed -n 's:.*<PreprocessorDefinitions>\(.*\)</PreprocessorDefinitions>.*:\1:p' "$props" | head -n 1)"
+  [[ -n $include_line && -n $defines_line ]] \
+    || vcs_die "cannot read <AdditionalIncludeDirectories>/<PreprocessorDefinitions> from VentureCore.props"
+
+  # -- preprocessor definitions: exceptions disabled, NDEBUG in Release -------
+  [[ $defines_line == *_HAS_EXCEPTIONS=0* ]] || vcs_die \
+    "VentureCore.props does not define _HAS_EXCEPTIONS=0.
+  The platform is built without C++ exceptions; keep the define in sync with
+  scripts/linux/common.sh's vcs_cl_flags (TOOL-02)."
+  if [[ $defines_line =~ (^|;)HAS_EXCEPTIONS=0(;|$) ]]; then
+    vcs_die "VentureCore.props defines the dead HAS_EXCEPTIONS macro - use _HAS_EXCEPTIONS=0 instead (TOOL-02)"
+  fi
+  release_block="$(sed -n "/Configuration.Contains('Release')/,/<\/ItemDefinitionGroup>/p" "$props")"
+  [[ $release_block == *"<PreprocessorDefinitions>NDEBUG;"* ]] || vcs_die \
+    "VentureCore.props' Release configuration does not define NDEBUG.
+  The Linux Release build passes /DNDEBUG and the shipped DLL must not carry
+  live asserts (TOOL-03); keep both in sync."
+
+  # -- include path: the project's source roots must all be on the Linux path --
+  include_line="${include_line//\\//}"
+  IFS=';' read -r -a tokens <<<"$include_line"
+  for token in "${tokens[@]}"; do
+    case "$token" in
+      '$(MSBuildThisFileDirectory)src')     have+=("$VCS_ROOT/src") ;;
+      '$(MSBuildThisFileDirectory)include') have+=("$VCS_ROOT/include") ;;
+      '$(YRppDir)')                         have+=("$VCS_ROOT/external/YRpp") ;;
+      '$(IntDir)Generated')                 : ;; # added by the build script itself
+      '%(AdditionalIncludeDirectories)')    : ;;
+      '')                                   : ;;
+      *) vcs_warn "VentureCore.props adds an include path the Linux build does not mirror: $token" ;;
+    esac
+  done
+  for token in "${want[@]}"; do
+    local found=0
+    for line in "${have[@]}"; do [[ $line == "$token" ]] && { found=1; break; }; done
+    (( found )) || missing+=("$token")
+  done
+  (( ${#missing[@]} == 0 )) || vcs_die \
+    "the Linux build include path disagrees with VentureCore.props - missing: ${missing[*]}
+  Update VCS_INC_DIRS in scripts/linux/common.sh and VentureCore.props together (TOOL-10)."
+}
+
+# ---------------------------------------------------------------------------
 # Generated git stamp header
 # ---------------------------------------------------------------------------
 #
@@ -336,10 +547,11 @@ vcs_generate_git_header() {
   local gen_dir="$1" commit ref dirty tmp
   mkdir -p "$gen_dir"
   commit="$(git -C "$VCS_ROOT" rev-parse --short HEAD 2>/dev/null || true)"
-  ref="$(git -C "$VCS_ROOT" symbolic-ref HEAD 2>/dev/null || true)"
-  if [[ -z $ref && -n $commit ]]; then
-    ref="$(git -C "$VCS_ROOT" for-each-ref --points-at HEAD --format='%(refname)' 2>/dev/null | sed -n '1p')"
-  fi
+  # On a branch this is refs/heads/<name>; on a detached HEAD it is the literal
+  # "HEAD".  The MSBuild ComputeGitInfo target runs the same command, so the two
+  # build systems stamp the same value for the same checkout and a snapshot never
+  # records an arbitrary tag from --points-at (TOOL-10).
+  ref="$(git -C "$VCS_ROOT" rev-parse --symbolic-full-name HEAD 2>/dev/null || true)"
   dirty=""
   if [[ -n $commit ]] && [[ -n $(git -C "$VCS_ROOT" status --porcelain 2>/dev/null) ]]; then
     dirty="-dirty"
@@ -372,12 +584,15 @@ vcs_generate_git_header() {
 # usage: vcs_lock_toolchain   (keeps an flock'd fd open until the script exits)
 vcs_lock_toolchain() {
   local lock_dir lock_path fd
-  if [[ -d ${VCS_WINEPREFIX:-} ]]; then
-    lock_dir="$VCS_WINEPREFIX"
-  else
-    lock_dir="$VCS_ROOT/Release/IntDir"
-    mkdir -p "$lock_dir" 2>/dev/null || true
-  fi
+  # The lock path must not depend on whether the prefix exists yet: a bare
+  # [[ -d $VCS_WINEPREFIX ]] test used to switch between the prefix and
+  # Release/IntDir, so setup_wineprefix.sh (prefix missing) and a build (prefix
+  # present) locked different files (TOOL-10).  The prefix directory itself is
+  # created here - an empty prefix is not "initialised" (see vcs_wine_ready), so
+  # this cannot make a broken prefix look ready, and flock/drive_c stay inside
+  # the same directory that the real tools use.
+  lock_dir="$VCS_WINEPREFIX"
+  mkdir -p "$lock_dir" 2>/dev/null || true
   lock_path="$lock_dir/.toolchain.lock"
 
   # NB: no 2>/dev/null here - "exec" with only redirections applies them to the

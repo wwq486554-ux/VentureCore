@@ -14,16 +14,37 @@
 # process).  Tests print their own diagnostics and exit 0 on success; anything
 # else is a failure.
 #
+# Build configuration (TOOL-01): the compiler options come from
+# scripts/linux/common.sh's vcs_cl_flags - the single definition shared with the
+# DLL build, the benchmark and the probes.  The tests are compiled with the
+# *release* code-generation flags and the same preprocessor definitions as the
+# shipped VentureCore.dll (same optimisation/stack-protector/RTTI settings, no
+# C++ exceptions, NDEBUG in Release), so a green test run actually describes the
+# shipped binary.  vcs_assert_flag_parity fails the run if the test profile ever
+# diverges from the build profile in anything but the documented debug-info
+# format; the flag hash is printed below.  Because NDEBUG is on, assert() is
+# compiled out of the test binaries exactly as in the DLL: use the Check()/FAIL()
+# conventions of the suite, never assert(), to verify behaviour.
+#
 # Options:
-#   --list        list the discovered tests and exit
-#   --verbose     echo the compiler command line and print each test's run output
-#   --no-run      only compile, do not execute
+#   --list         list the discovered tests and exit
+#   --verbose      echo the compiler command line and print each test's run output
+#   --no-run       only compile, do not execute (no completion-marker check)
+#   --build-type T build type macro for the test build: RELEASE (default, the
+#                  shipped configuration) or NIGHTLY; matches the DLL build
 #   -h, --help
 #
-# Each test binary runs with a time limit (default 120 s, override with
-# VCS_TEST_TIMEOUT=N).  A test that hangs is killed and reported as a failure:
-# the runner holds the toolchain lock, so a hung binary would otherwise block
-# every later build until the lock timeout.
+# Completion marker (TOOL-12): a test counts as passed only when it exits 0,
+# its output contains the suite's stable final marker (`PASS (0 failures)` /
+# `PASS (1 failure)` or `test_<name>: all checks passed`, trailing CR allowed)
+# and it printed at least one per-check line starting with `ok `.  Exiting 0
+# alone used to be enough, so a test whose Check() calls were deleted would
+# still "pass"; now it is reported as "no completion marker" / "no checks".
+#
+# Each compiler invocation and each test binary runs under a wall-clock limit
+# (VCS_COMPILE_TIMEOUT / VCS_TEST_TIMEOUT).  The runner holds the shared
+# toolchain lock, and a hung binary would otherwise block every later build
+# until the lock timeout.
 #
 # The toolchain lock from common.sh is held while compiling, so this can run
 # next to a build without corrupting the shared Wine prefix - but it does not
@@ -33,8 +54,10 @@
 # Notes:
 #   * `main` is declared `int __cdecl main(void)` because the platform is built
 #     with /Gz (stdcall default), exactly like the load/ABI probes;
-#   * the tests include headers only from src/ and include/ (already on
-#     INCLUDE), so they work without YRpp or gamemd.exe.
+#   * headers come from src/, include/ and the external/YRpp include path (the
+#     production TUs linked by the integration tests include <Syringe.h>), but
+#     no engine ABI type is needed and gamemd.exe does not have to be present:
+#     the engine-facing hooks stay in load_probe.sh / probe_hosts.sh.
 
 set -euo pipefail
 
@@ -48,28 +71,30 @@ verbose=0
 no_run=0
 list_only=0
 filter=""
+build_type="RELEASE"
 
 while (( $# )); do
   case "$1" in
-    --list)     list_only=1 ;;
-    --verbose)  verbose=1 ;;
-    --no-run)   no_run=1 ;;
-    -h|--help)  usage; exit 0 ;;
-    -*)         vcs_die "unknown argument: $1 (try --help)" ;;
-    *)          filter="$1" ;;
+    --list)       list_only=1 ;;
+    --verbose)    verbose=1 ;;
+    --no-run)     no_run=1 ;;
+    --build-type) build_type="${2:?--build-type needs a value}"; shift ;;
+    --build-type=*) build_type="${1#*=}" ;;
+    -h|--help)    usage; exit 0 ;;
+    -*)           vcs_die "unknown argument: $1 (try --help)" ;;
+    *)            filter="$1" ;;
   esac
   shift
 done
+[[ $build_type == RELEASE || $build_type == NIGHTLY ]] \
+  || vcs_die "--build-type must be RELEASE (default, the shipped configuration) or NIGHTLY (got '$build_type')"
 
+# Each test binary runs under its own wall-clock limit (the compile step uses
+# VCS_COMPILE_TIMEOUT).  A hung test is reported as a failure instead of
+# blocking every later build on the shared toolchain lock (TOOL-10/TOOL-12).
 test_timeout="${VCS_TEST_TIMEOUT:-120}"
 if ! [[ $test_timeout =~ ^[0-9]+$ ]] || (( test_timeout <= 0 )); then
   vcs_die "VCS_TEST_TIMEOUT must be a positive number of seconds (got '$test_timeout')"
-fi
-timeout_prefix=()
-if command -v timeout >/dev/null 2>&1; then
-  timeout_prefix=(timeout -k 10 "$test_timeout")
-else
-  vcs_warn "coreutils 'timeout' is not installed - tests run without a time limit"
 fi
 
 tests_dir="$VCS_ROOT/tests"
@@ -98,16 +123,20 @@ command -v wine >/dev/null 2>&1 || vcs_die "wine is not installed"
 vcs_locate_toolchain
 
 work_dir="$VCS_ROOT/Release/IntDir/linux/tests"
+gen_dir="$VCS_ROOT/Release/IntDir/Generated"
 mkdir -p "$work_dir"
 
-cl_flags=(
-  /nologo /W4 /WX- /MT /EHsc- /Gz /std:c++20
-  /DNOMINMAX /D_CRT_SECURE_NO_WARNINGS /D_WIN32_WINNT=0x0601 /DNTDDI_VERSION=0x06010000
-  /wd4100 /wd4201 /wd4458 /wd4819
-)
+# TOOL-01: the test build must use the shipped DLL's flags.  The assert is a
+# real machine check (profile hashes), not a comment, and the resulting hash is
+# printed so the acceptance log can be compared with the build log.
+vcs_assert_flag_parity Release "$build_type"
+flags_hash="$(vcs_flags_hash Release "$build_type" test)"
+vcs_info "compile flags: release-aligned (hash $flags_hash, definition: scripts/linux/common.sh vcs_cl_flags)"
+mapfile -t cl_flags < <(vcs_cl_flags Release "$build_type" test)
 
 failed=0
 passed=0
+total_checks=0
 declare -a failed_names=()
 declare -a warning_tests=()
 total_warnings=0
@@ -116,9 +145,26 @@ vcs_lock_toolchain
 
 # Tests compile the platform sources directly, so the generated git stamp header
 # that src/Core/PlatformVersion.h includes has to exist and be on INCLUDE.
-gen_dir="$VCS_ROOT/Release/IntDir/Generated"
 vcs_generate_git_header "$gen_dir"
 vcs_wine_env "$gen_dir"
+
+# Marks a test as passed only when its output carries the suite's completion
+# marker and at least one executed check (TOOL-12).  Prints the check count and a
+# failure reason through the globals below.
+parse_test_log() { # $1 = test name, $2 = run log; sets test_checks/test_marker_ok
+  local name="$1" log="$2"
+  test_checks="$(grep -acE '^ok ' "$log" 2>/dev/null || true)"
+  test_checks="${test_checks:-0}"
+  test_marker_ok=0
+  if grep -aqiE '^PASS \([0-9]+ failures?\)' "$log" 2>/dev/null; then
+    test_marker_ok=1
+  elif grep -aqiE "^test_[A-Za-z0-9_]+: all checks passed" "$log" 2>/dev/null; then
+    test_marker_ok=1
+  fi
+  if grep -aqE '^FAIL ' "$log" 2>/dev/null; then
+    test_marker_ok=0
+  fi
+}
 
 for test in "${selected[@]}"; do
   name="${test%.cpp}"
@@ -129,13 +175,19 @@ for test in "${selected[@]}"; do
   # TEST_DEPS: one comment line with repo-relative source paths.  A test without
   # the line is valid (it links only itself), so a no-match grep must not abort
   # the run under "set -o pipefail" - that used to fail the whole runner without
-  # a message for such a test.
+  # a message for such a test.  The list is read with `read -r -a` so that
+  # quoting/word-splitting mistakes cannot silently split a dependency path
+  # (TOOL-14); paths with spaces are not supported by this convention.
   deps_line="$(grep -m1 '^// *TEST_DEPS:' "$src" | sed -e 's|^// *TEST_DEPS: *||' -e 's|\r$||' || true)"
   sources=("$src")
-  for dep in $deps_line; do
-    [[ -f "$VCS_ROOT/$dep" ]] || vcs_die "$test: TEST_DEPS names a missing source: $dep"
-    sources+=("$VCS_ROOT/$dep")
-  done
+  if [[ -n $deps_line ]]; then
+    IFS=$' \t' read -r -a deps <<<"$deps_line"
+    for dep in "${deps[@]}"; do
+      [[ -n $dep ]] || continue
+      [[ -f "$VCS_ROOT/$dep" ]] || vcs_die "$test: TEST_DEPS names a missing source: $dep"
+      sources+=("$VCS_ROOT/$dep")
+    done
+  fi
   win_sources=()
   for s in "${sources[@]}"; do win_sources+=("$(vcs_w "$s")"); done
 
@@ -146,12 +198,21 @@ for test in "${selected[@]}"; do
   fi
 
   set +e
-  ( cd "$work_dir" && wine "$VCS_VC_BIN/cl.exe" "${cl_flags[@]}" "${win_sources[@]}" \
+  ( cd "$work_dir" && vcs_wine_run "$VCS_COMPILE_TIMEOUT" wine "$VCS_VC_BIN/cl.exe" \
+      "${cl_flags[@]}" "${win_sources[@]}" \
       "/Fe$(vcs_w "$exe")" /link /SUBSYSTEM:CONSOLE /MACHINE:X86 \
       dbghelp.lib onecore.lib ) >"$log" 2>&1
   compile_rc=$?
   set -e
 
+  if (( compile_rc == 124 )); then
+    (( verbose )) || printf 'FAIL (compile timeout after %ss)\n' "$VCS_COMPILE_TIMEOUT"
+    printf 'fatal error: cl.exe timed out after %ss (VCS_COMPILE_TIMEOUT)\n' "$VCS_COMPILE_TIMEOUT" >>"$log"
+    sed -n '1,40p' "$log" >&2
+    failed=$((failed + 1))
+    failed_names+=("$name (compile timeout)")
+    continue
+  fi
   if (( compile_rc != 0 )) || [[ ! -f $exe ]]; then
     (( verbose )) || printf 'FAIL (compile)\n'
     sed -n '1,40p' "$log" >&2
@@ -180,7 +241,7 @@ for test in "${selected[@]}"; do
 
   run_log="$work_dir/$name.run.log"
   set +e
-  ( cd "$work_dir" && "${timeout_prefix[@]}" wine "$(vcs_w "$exe")" ) >"$run_log" 2>&1
+  ( cd "$work_dir" && vcs_wine_run "$test_timeout" wine "$(vcs_w "$exe")" ) >"$run_log" 2>&1
   run_rc=$?
   set -e
 
@@ -193,12 +254,29 @@ for test in "${selected[@]}"; do
   fi
 
   if (( run_rc == 0 )); then
-    passed=$((passed + 1))
-    if (( verbose )); then
-      printf '%s\n' "    --- $name output ---"
-      sed -n '1,80p' "$run_log" | sed 's/^/    /'
+    parse_test_log "$name" "$run_log"
+    if (( test_marker_ok )) && (( test_checks > 0 )); then
+      passed=$((passed + 1))
+      total_checks=$((total_checks + test_checks))
+      if (( verbose )); then
+        printf '  [run]   %-34s PASS (%d checks)\n' "$test" "$test_checks"
+        printf '%s\n' "    --- $name output ---"
+        sed -n '1,80p' "$run_log" | sed 's/^/    /'
+      else
+        printf '  [run]   %-34s PASS (%d checks)\n' "$test" "$test_checks"
+      fi
     else
-      printf '  [run]   %-34s PASS\n' "$test"
+      failed=$((failed + 1))
+      if (( test_marker_ok == 0 )); then
+        failed_names+=("$name (no completion marker)")
+        printf '  [run]   %-34s FAIL (no completion marker / FAIL line)\n' "$test"
+      else
+        failed_names+=("$name (no checks executed)")
+        printf '  [run]   %-34s FAIL (no "ok" check lines - gutted test?)\n' "$test"
+      fi
+      printf '    a passing test must print "ok    <what>" per check and a final "PASS (0 failures)"\n' >&2
+      printf '    (or "test_<name>: all checks passed"); see TOOL-12 in the header of this script\n' >&2
+      sed -n '1,80p' "$run_log" | sed 's/^/    /' >&2
     fi
   else
     failed=$((failed + 1))
@@ -217,9 +295,9 @@ fi
 if (( failed == 0 )); then
   if (( no_run )); then
     # Compiling is not running: say so, or a CI log would read like a pass.
-    vcs_info "tests: $passed/$((passed + failed)) compiled (--no-run: not executed)"
+    vcs_info "tests: $passed/$((passed + failed)) compiled (--no-run: not executed, completion markers not checked)"
   else
-    vcs_info "tests: $passed/$((passed + failed)) passed"
+    vcs_info "tests: $passed/$((passed + failed)) passed ($total_checks check(s) executed)"
   fi
   exit 0
 fi

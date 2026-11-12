@@ -177,19 +177,31 @@ int __cdecl main(int argc, char** argv)
 }
 EOF
 
-cl_flags=(
-  /nologo /W4 /MT /EHsc- /Gz /std:c++20
-  /DSYR_VER=2 /D_WIN32_WINNT=0x0601 /DNTDDI_VERSION=0x06010000
-)
+# The probe compiles with the shipped DLL's flags (TOOL-01): one definition in
+# common.sh, no /EH, _HAS_EXCEPTIONS=0, NDEBUG - see the header of run_tests.sh.
+vcs_assert_flag_parity Release RELEASE
+mapfile -t cl_flags < <(vcs_cl_flags Release RELEASE probe)
+vcs_info "compile flags: release-aligned (hash $(vcs_flags_hash Release RELEASE probe))"
 
 # Compile inside the work dir: cl.exe writes the object file next to its current
-# directory, and a probe run from the repository root must not litter it.
-( cd "$work_dir" && wine "$VCS_VC_BIN/cl.exe" "${cl_flags[@]}" "$(vcs_w "$probe_src")" \
+# directory, and a probe run from the repository root must not litter it.  Both
+# the compile and the probe run are time-limited so a hung process cannot hold
+# the shared toolchain lock for an hour (TOOL-10).
+set +e
+( cd "$work_dir" && vcs_wine_run "$VCS_COMPILE_TIMEOUT" wine "$VCS_VC_BIN/cl.exe" "${cl_flags[@]}" "$(vcs_w "$probe_src")" \
     "/Fe$(vcs_w "$probe_exe")" /link /SUBSYSTEM:CONSOLE /MACHINE:X86 dbghelp.lib onecore.lib ) \
-  >"$work_dir/build.log" 2>&1 \
-  || { cat "$work_dir/build.log" >&2; vcs_die "load probe failed to build"; }
+  >"$work_dir/build.log" 2>&1
+build_rc=$?
+set -e
+if (( build_rc == 124 )); then
+  printf 'fatal error: cl.exe timed out after %ss (VCS_COMPILE_TIMEOUT)\n' "$VCS_COMPILE_TIMEOUT" >>"$work_dir/build.log"
+fi
+if (( build_rc != 0 )) || [[ ! -f $probe_exe ]]; then
+  cat "$work_dir/build.log" >&2
+  vcs_die "load probe failed to build (exit $build_rc)"
+fi
 
 cp -f "$dll" "$copy_dll"
 echo '--- load probe ---'
-wine "$(vcs_w "$probe_exe")" "$(vcs_w "$dll")" "$(vcs_w "$copy_dll")"
+vcs_wine_run "$VCS_PROBE_TIMEOUT" wine "$(vcs_w "$probe_exe")" "$(vcs_w "$dll")" "$(vcs_w "$copy_dll")"
 echo '--- load probe OK ---'

@@ -14,17 +14,22 @@ and macro behaviour may all change.  The procedure, in order:
    * `VC_YRPP_PIN` - full 40-hex commit id,
    * `VC_YRPP_PIN_SHORT` - the 8-character form used in the log,
    * and `VC_YRPP_REPO` / `VC_YRPP_BRANCH` if the source moved.
-3. Install it into `external/YRpp` and update the stamp:
+3. Install it into `external/YRpp`, update the stamp and the content manifest:
 
    ```bash
-   scripts/linux/fetch_yrpp.sh --from /path/to/YRpp
+   scripts/linux/fetch_yrpp.sh --from /path/to/YRpp --write-manifest
    ```
 
-   The source must normally be a git checkout whose `HEAD` is the new pin.
-   `--commit SHA` is only accepted for a source tree without `.git`; its
-   content cannot be verified, so the script warns about that.  Re-running the
-   script without arguments when `external/YRpp` is already at the pin is a
-   no-op, and the script refuses to use `external/YRpp` as its own source.
+   The source must normally be a git checkout whose `HEAD` is the new pin; a
+   dirty checkout (modified or untracked files) is rejected.  `--commit SHA` is
+   only accepted for a source tree without `.git`: the function cannot identify
+   the commit, so the staged copy must match the committed content manifest
+   instead.  `--write-manifest` is the explicit step that accepts a new content
+   set and rewrites `external/YRpp.sha256` (commit the manifest together with
+   the pin change).  Without it, an unknown content set is refused.  Re-running
+   the script without arguments when `external/YRpp` is already at the pin is a
+   no-op (it still verifies the manifest), and the script refuses to use
+   `external/YRpp` as its own source.
 
 4. Re-measure the ABI and run the probe:
 
@@ -46,22 +51,34 @@ and macro behaviour may all change.  The procedure, in order:
    scripts/linux/check_yrpp.py
    ```
 
+   The gate checks the commit id **and** the content: `external/YRpp.sha256`
+   lists the sha256 of every file plus the exact file set, so a checkout at the
+   right commit but with edited/added/removed files is rejected (a dirty git
+   checkout is rejected as well).  The same manifest is verified by
+   `fetch_yrpp.sh` before it swaps a staged copy into place.
+
 7. Clean build and verify:
 
    ```bash
    scripts/linux/build_linux.sh Release --build-type RELEASE --clean
-   python3 scripts/verify_build.py
+   VCS_GAMEMD_EXE=/path/to/gamemd.exe python3 scripts/verify_build.py
    scripts/linux/load_probe.sh
    ```
+
+   `VCS_GAMEMD_EXE` (or `--gamemd`) is the pinned engine executable for the
+   offline hook-window check; without it that check is an explicit SKIP, not a
+   PASS.  The verifier also rejects a DLL whose `PlatformBuildType` is not
+   `RELEASE` or whose git stamp does not match the working copy, so verify the
+   artifact you are about to ship, not an older one.
 
 8. Record the review in `docs/EngineBindings.md` (pin value and any ABI changes)
    and add a `CHANGELOG.md` entry if behaviour changed.
 
-The build script itself runs `check_yrpp.py` before compiling, so a stale
-`external/YRpp` cannot silently produce a binary: it aborts with the expected and
-actual revisions.  The compile-time gate in `EngineCompat.h` catches layout drift,
-and the runtime log plus the `YrppCommit` version-resource string record what was
-built.
+The build script itself runs `check_yrpp.py` before compiling, so a stale or
+edited `external/YRpp` cannot silently produce a binary: it aborts with the
+expected and actual revision plus the changed/missing/unexpected files.  The
+compile-time gate in `EngineCompat.h` catches layout drift, and the runtime log
+plus the `YrppCommit` version-resource string record what was built.
 
 ## 2. Updating the platform code
 
@@ -108,10 +125,12 @@ Checklist for a version bump:
 1. Bump the numbers.  For a non-stable build add `VC_PRERELEASE_SUFFIX`; remove
    it for a stable release.
 2. Add a `CHANGELOG.md` section for the new version, dated.
-3. Rebuild with `--build-type RELEASE` for a release artefact and run
-   `python3 scripts/verify_build.py` (it expects the `VERSION_STRINGS` at the top
-   of that file - currently `2.0.0.0` / `2.0.0`; update them in the
-   same change as the version bump).
+3. Rebuild with `--build-type RELEASE` for a release artefact and verify it with
+   `VCS_GAMEMD_EXE=<pinned gamemd.exe> python3 scripts/verify_build.py` (the
+   verifier expects the `VERSION_STRINGS` at the top of that file - currently
+   `2.0.0.0` / `2.0.0`; update them in the same change as the version bump, and
+   pass the engine executable so the offline hook-window check runs instead of
+   being skipped).
 4. Run `scripts/linux/load_probe.sh`.
 5. Verify the version resource of the produced DLL, e.g.
    `winedump -j resource Release/VentureCore.dll` (or the Windows Explorer file
@@ -178,7 +197,9 @@ Host detection is a registry, not a hard-coded table:
   (rewrite offending files).
 * `external/YRpp/` and `external/YRpp.commit` are gitignored - never commit
   YRpp, it is an external dependency without a license declaration (see
-  `NOTICE.md`).
+  `NOTICE.md`).  `external/YRpp.sha256` **is** committed: it is the content
+  manifest (file hashes only, no YRpp content) and must be regenerated with
+  `fetch_yrpp.sh --write-manifest` whenever the pin changes.
 * Build output (`Release/`, `Debug/`, `*.pdb`, `*.obj`, ...) is gitignored; do
   not commit artefacts.
 * The build generates `Release/IntDir/Generated/VentureCore.Git.h` for both the
@@ -245,7 +266,8 @@ table; a 1.x save keeps loading and its extension state is preserved.
    the base no longer detects it.
 7. **Recompile everything** - the `FeatureDescriptor` / `FeatureContext` layouts
    changed, so a stale object file is an ABI mismatch rather than a warning.
-8. **Re-run the checklist**: `--clean` build, `python3 scripts/verify_build.py`,
+8. **Re-run the checklist**: `--clean` build, `VCS_GAMEMD_EXE=<pinned
+   gamemd.exe> python3 scripts/verify_build.py`,
    `scripts/linux/run_tests.sh`, `scripts/linux/load_probe.sh`,
    `scripts/linux/probe_hosts.sh`, then the in-game smoke test from your own
    documentation.

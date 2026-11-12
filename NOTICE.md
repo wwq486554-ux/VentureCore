@@ -25,7 +25,10 @@ distributed here.
 practice without a formal grant.  For that reason:
 
 * this repository does **not** redistribute YRpp - `external/YRpp/` and
-  `external/YRpp.commit` are excluded by `.gitignore`;
+  `external/YRpp.commit` are excluded by `.gitignore`.  The one committed file
+  in that directory, `external/YRpp.sha256`, is a manifest of file hashes (no
+  YRpp source) used to verify the local checkout, so it is not a redistribution
+  of YRpp either;
 * the local checkout is fetched with `scripts/linux/fetch_yrpp.sh` and pinned by
   commit in `src/Core/EnginePin.h` (`VC_YRPP_PIN`).  The build refuses to run
   against a different revision (`scripts/linux/check_yrpp.py`, plus

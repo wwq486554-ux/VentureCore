@@ -7,6 +7,9 @@
 #   --build-type NIGHTLY|RELEASE   defines NIGHTLY / RELEASE (default: none, local build)
 #   -j, --jobs N                   parallel compiler invocations (default: nproc)
 #   --clean                        drop all Linux-side build state and rebuild
+#   --check                        verify that VentureCore.props/.vcxproj and
+#                                  the Linux compiler flags agree, print the
+#                                  flag hash and exit (no Wine, no build)
 #   --fix-eol                      normalise the line endings of repository text
 #                                  files to what .gitattributes declares (CRLF),
 #                                  then build. Without it the check only warns.
@@ -23,11 +26,19 @@
 #                                  or <repo>/../.wine-venturecore when $HOME is not writable)
 #   -h, --help
 #
-# The compiler/linker/resource-compiler command lines mirror what MSBuild
-# produces for VentureCore.vcxproj (they were taken verbatim from the
-# Release/IntDir/VentureCore.tlog files written by a Visual Studio build), so the
-# resulting binaries are built by the same toolset with the same options as on
-# Windows. See scripts/linux/README.md for the few intentional deviations.
+# The cl.exe options themselves live in scripts/linux/common.sh (vcs_cl_flags) -
+# the single definition shared with run_tests.sh, bench_store.sh and the probes.
+# The linker/resource-compiler command lines mirror what MSBuild produces for
+# VentureCore.vcxproj.  The deliberate differences from the MSBuild build are
+# listed in scripts/linux/README.md ("Intentional differences from the MSBuild
+# build") and next to the flags in common.sh; nothing else is meant to differ.
+#
+# Diagnostics: the number of compiler/linker/resource warnings is counted, the
+# summary is printed and archived as Release/IntDir/linux/log/build-summary.log,
+# and VCS_WARNINGS_AS_ERRORS=1 turns the first warning into a build failure
+# (TOOL-07).
+#
+# Exit status: 0 = DLL built (or --check passed), non-zero = failure.
 
 set -euo pipefail
 
@@ -42,6 +53,7 @@ build_type=""
 do_clean=0
 do_stage=0
 do_fix_eol=0
+do_check=0
 deploy_dir=""
 verbose=0
 compile_one=""
@@ -55,6 +67,7 @@ while (( $# )); do
     -j|--jobs)        VCS_JOBS="${2:?-j needs a value}"; shift ;;
     -j*)              VCS_JOBS="${1#-j}" ;;
     --clean)          do_clean=1 ;;
+    --check)          do_check=1 ;;
     --stage)          do_stage=1 ;;
     --fix-eol)        do_fix_eol=1 ;;
     --deploy)         deploy_dir="${2:?--deploy needs a directory}"; shift ;;
@@ -118,39 +131,21 @@ implib_path="$int_dir/$target_name.lib"
 # Export the settings the child processes need; they must resolve identically.
 export VCS_WINEPREFIX VCS_MSVC_VER VCS_SDK_VER VCS_WINDOWS_ROOT VCS_JOBS
 export VCS_DEBUG_INFO VCS_MODULES VCS_CHILD_CFG="$cfg" VCS_CHILD_BT="$build_type"
+export VCS_COMPILE_TIMEOUT VCS_LINK_TIMEOUT
+# /Zi needs a PDB path; the --compile-one child recomputes $int_dir itself, so
+# this is only for callers inside this script and for the hash.
+export VCS_PDB_DIR="$int_dir"
 
-# ---------------------------------------------------------------------------
-# Compiler flags, mirroring the CL.command.1.tlog from the Visual Studio build
-# ---------------------------------------------------------------------------
-vcs_cl_flags() {
-  local c="$1" bt="$2"
-  local -a f=(
-    /c /nologo /W4 /WX- /diagnostics:column
-    /DSYR_VER=2 /DHAS_EXCEPTIONS=0 /DNOMINMAX /D_CRT_SECURE_NO_WARNINGS
-    /D_WIN32_WINNT=0x0601 /DNTDDI_VERSION=0x06010000 /D_WINDLL
-    /GF /Gm- /MT /Zp8 /GS- /Gy /arch:SSE2 /fp:precise
-    /Zc:wchar_t /Zc:forScope /Zc:inline /Zc:rvalueCast /GR- /openmp
-    /std:c++20 /permissive- /FS /Gz /TP /external:W4 /analyze- /FC
-    /wd4100 /wd4201 /wd4530 /wd4731 /wd4740 /wd4458 /wd4819 /wd5103 /wd5105
-  )
-  case "$c" in
-    Release) f+=( /O2 /Oy ) ;;
-    Debug)   f+=( /Od /Oy- /DDEBUG /wd26495 ) ;;
-  esac
-  case "$bt" in
-    NIGHTLY) f+=( /DNIGHTLY ) ;;
-    RELEASE) f+=( /DRELEASE ) ;;
-  esac
-  if [[ $VCS_DEBUG_INFO == zi ]]; then
-    f+=( /Zi "/Fd$(vcs_w "$int_dir/vc143.pdb")" )
-  else
-    f+=( /Z7 )
-  fi
-  if [[ $VCS_MODULES == 1 ]]; then
-    f+=( /experimental:module "/stdIfcDir$(vcs_w "$VCS_MSVC_DIR/ifc/$VCS_MSVC_ARCH")" )
-  fi
-  printf '%s\n' "${f[@]}"
-}
+# ---- --check: static agreement check, no Wine (TOOL-01/TOOL-10) -------------
+if (( do_check )); then
+  vcs_check_project_sync
+  vcs_assert_flag_parity "$cfg" "$build_type"
+  flags_hash_check="$(vcs_flags_hash "$cfg" "$build_type" build)"
+  vcs_info "project files and Linux build agree"
+  vcs_info "compile flags : $flags_hash_check (single definition: scripts/linux/common.sh, vcs_cl_flags)"
+  vcs_info "profile hashes: build=$flags_hash_check test=$(vcs_flags_hash "$cfg" "$build_type" test) bench=$(vcs_flags_hash "$cfg" "$build_type" bench) probe=$(vcs_flags_hash "$cfg" "$build_type" probe)"
+  exit 0
+fi
 
 # Makes an MSVC log readable. cl.exe/rc.exe/link.exe are localised (CP936 on a
 # Chinese install) while Wine's own diagnostics are ASCII - GBK covers both, and
@@ -181,13 +176,22 @@ if [[ -n $compile_one ]]; then
   log="$log_dir/${src_rel//\//__}.log"
   printf '  CC %s\n' "$src_rel" >&2
   set +e
-  cd "$scratch_dir"
+  # Compile from the repository root and pass the *relative* source path: /FC is
+  # not used, so __FILE__ (asserts, the feature-registration diagnostics) then
+  # records "src/Core/Log.cpp" instead of a Z:\home\... build-machine path.  The
+  # object still goes to the absolute /Fo path, so nothing is written to the
+  # working directory (TOOL-03/TOOL-08).
+  cd "$VCS_ROOT"
   # shellcheck disable=SC2046  # flag list is intentionally word-split
-  wine "$VCS_VC_BIN/cl.exe" /nologo $(vcs_cl_flags "$VCS_CHILD_CFG" "$VCS_CHILD_BT") \
-    "$(vcs_w "$VCS_ROOT/$src_rel")" "/Fo$(vcs_w "$obj_dir/$obj_rel")" >"$log" 2>&1
+  vcs_wine_run "$VCS_COMPILE_TIMEOUT" wine "$VCS_VC_BIN/cl.exe" /c \
+    $(vcs_cl_flags "$VCS_CHILD_CFG" "$VCS_CHILD_BT" build) \
+    "$src_rel" "/Fo$(vcs_w "$obj_dir/$obj_rel")" >"$log" 2>&1
   rc=$?
   set -e
   if (( rc != 0 )); then
+    if (( rc == 124 )); then
+      printf 'fatal error: cl.exe timed out after %ss (VCS_COMPILE_TIMEOUT)\n' "$VCS_COMPILE_TIMEOUT" >>"$log"
+    fi
     mkdir -p "$fail_dir"
     printf '%s\n' "$src_rel" > "$fail_dir/${src_rel//\//__}"
     exit 1
@@ -216,6 +220,12 @@ vcs_lock_toolchain
 
 vcs_wine_env "$gen_dir"
 vcs_wine_ready || vcs_die "Wine prefix '$VCS_WINEPREFIX' is not initialised - run scripts/linux/setup_wineprefix.sh first"
+
+# The project files are the source of truth for what is compiled, but the
+# include path and the batch-A build invariants (no C++ exceptions, NDEBUG in
+# Release) are also mirrored here by hand - refuse to build when they disagree
+# with VentureCore.props (TOOL-10).
+vcs_check_project_sync
 
 if (( do_clean )); then
   vcs_info "cleaning $work_dir"
@@ -248,32 +258,15 @@ if [[ -z $compile_one ]]; then
 fi
 
 # --- 1. generated version header (VentureCore.props' ComputeGitInfo target) ------
-vcs_generate_git_header() {
-  local commit ref dirty tmp
-  commit="$(git -C "$VCS_ROOT" rev-parse --short HEAD 2>/dev/null || true)"
-  ref="$(git -C "$VCS_ROOT" symbolic-ref HEAD 2>/dev/null || true)"
-  if [[ -z $ref && -n $commit ]]; then
-    ref="$(git -C "$VCS_ROOT" for-each-ref --points-at HEAD --format='%(refname)' 2>/dev/null | sed -n '1p')"
-  fi
-  dirty=""
-  if [[ -n $commit ]] && [[ -n $(git -C "$VCS_ROOT" status --porcelain 2>/dev/null) ]]; then
-    dirty="-dirty"
-  fi
-  tmp="$gen_dir/VentureCore.Git.h.tmp"
-  {
-    printf '// Generated by ComputeGitInfo - do not edit.\n'
-    if [[ -n $commit ]]; then printf '#define STR_GIT_COMMIT "%s"\n' "$commit"; fi
-    if [[ -n $ref ]];    then printf '#define STR_GIT_REF "%s"\n' "$ref"; fi
-    if [[ -n $dirty ]];  then printf '#define STR_GIT_DIRTY "%s"\n' "$dirty"; fi
-  } > "$tmp"
-  if [[ -f $gen_dir/VentureCore.Git.h ]] && cmp -s "$tmp" "$gen_dir/VentureCore.Git.h"; then
-    rm -f "$tmp"
-  else
-    mv "$tmp" "$gen_dir/VentureCore.Git.h"
-    vcs_info "generated $gen_dir/VentureCore.Git.h (commit ${commit:-?}${dirty})"
-  fi
-}
-vcs_generate_git_header
+# One generator for every script: common.sh's vcs_generate_git_header (the copy
+# that used to live here had drifted from it, TOOL-10).  It is silent when the
+# header is unchanged; print the same message the old local copy printed.
+git_header_before="$(cat "$gen_dir/VentureCore.Git.h" 2>/dev/null || true)"
+vcs_generate_git_header "$gen_dir"
+git_header_after="$(cat "$gen_dir/VentureCore.Git.h" 2>/dev/null || true)"
+if [[ $git_header_before != "$git_header_after" ]]; then
+  vcs_info "generated $gen_dir/VentureCore.Git.h"
+fi
 
 # --- 2. source list and incremental decision --------------------------------
 mapfile -t sources < <(vcs_list_sources)
@@ -393,6 +386,11 @@ done
 vcs_info "configuration : $cfg${build_type:+ / $build_type}"
 vcs_info "toolchain     : MSVC $VCS_MSVC_VER + Windows SDK $VCS_SDK_VER (via $WINEPREFIX)"
 vcs_info "sources       : ${#sources[@]} total, ${#pending[@]} to compile (jobs: $VCS_JOBS)"
+vcs_info "flags hash    : $flags_hash (incremental invalidation; vcs_cl_flags in scripts/linux/common.sh)"
+vcs_info "profile hash  : $(vcs_flags_hash "$cfg" "$build_type" build) (the tests/benchmark/probes must report the same hash)"
+if [[ ${VCS_WARNINGS_AS_ERRORS:-0} == 1 ]]; then
+  vcs_info "warnings      : fatal (/WX, VCS_WARNINGS_AS_ERRORS=1)"
+fi
 
 build_start=$(date +%s)
 
@@ -444,6 +442,7 @@ esac
 
 link_input=()
 link_input_win=()
+rc_logs=()
 for r in "${resources[@]}"; do
   res="$int_dir/$(basename "${r%.rc}").res"
   # A .res bakes in the preprocessor state of the .rc it came from. Comparing it
@@ -461,9 +460,21 @@ for r in "${resources[@]}"; do
   if (( force_all )) || [[ ! -f $res || $VCS_ROOT/$r -nt $res ]] \
      || [[ -f $gen_dir/VentureCore.Git.h && $gen_dir/VentureCore.Git.h -nt $res ]]; then
     vcs_info "RC ${r}"
-    ( cd "$scratch_dir" && wine "$VCS_SDK_RC" /l0x0409 /nologo "${rc_defs[@]+"${rc_defs[@]}"}" \
-        "/fo$(vcs_w "$res")" "$(vcs_w "$VCS_ROOT/$r")" ) >"$log_dir/rc_$(basename "$r").log" 2>&1 \
-      || { vcs_show_log "$log_dir/rc_$(basename "$r").log" >&2; vcs_die "resource compilation failed for $r"; }
+    rc_log="$log_dir/rc_$(basename "$r").log"
+    set +e
+    ( cd "$scratch_dir" && vcs_wine_run "$VCS_LINK_TIMEOUT" wine "$VCS_SDK_RC" \
+        /l0x0409 /nologo "${rc_defs[@]+"${rc_defs[@]}"}" \
+        "/fo$(vcs_w "$res")" "$(vcs_w "$VCS_ROOT/$r")" ) >"$rc_log" 2>&1
+    rc_rc=$?
+    set -e
+    if (( rc_rc == 124 )); then
+      printf 'fatal error: rc.exe timed out after %ss (VCS_LINK_TIMEOUT)\n' "$VCS_LINK_TIMEOUT" >>"$rc_log"
+    fi
+    if (( rc_rc != 0 )) || [[ ! -f $res ]]; then
+      vcs_show_log "$rc_log" >&2
+      vcs_die "resource compilation failed for $r (exit $rc_rc, see $rc_log)"
+    fi
+    rc_logs+=("$rc_log")
   fi
   link_input+=("$res"); link_input_win+=("$(vcs_w "$res")")
 done
@@ -500,10 +511,13 @@ if (( needs_link )); then
   find "$scratch_dir" -mindepth 1 -delete 2>/dev/null || true
   link_log="$log_dir/link.log"
   set +e
-  ( cd "$scratch_dir" && wine "$VCS_VC_BIN/link.exe" "${link_args[@]}" "${link_input_win[@]}" ) \
-    >"$link_log" 2>&1
+  ( cd "$scratch_dir" && vcs_wine_run "$VCS_LINK_TIMEOUT" wine "$VCS_VC_BIN/link.exe" \
+      "${link_args[@]}" "${link_input_win[@]}" ) >"$link_log" 2>&1
   link_rc=$?
   set -e
+  if (( link_rc == 124 )); then
+    printf 'fatal error: link.exe timed out after %ss (VCS_LINK_TIMEOUT)\n' "$VCS_LINK_TIMEOUT" >>"$link_log"
+  fi
   if (( link_rc != 0 )) || [[ ! -f $dll_path ]]; then
     vcs_show_log "$link_log" >&2
     vcs_die "linking failed (exit $link_rc, see $link_log)"
@@ -511,6 +525,72 @@ if (( needs_link )); then
   if grep -qiE 'warning|error' "$link_log"; then vcs_show_log "$link_log" >&2; fi
 else
   vcs_info "up to date - nothing to link"
+fi
+
+# --- 5b. diagnostics summary and build transcript (TOOL-07) ------------------
+#
+# "0 warnings" used to be a human observation: the script printed the warning
+# lines but never counted them, and /WX- made sure a warning could not fail the
+# build.  Count every diagnostic of *this* run, print a machine-readable summary,
+# archive a transcript next to the per-file logs (copied into the acceptance log
+# set) and fail when VCS_WARNINGS_AS_ERRORS=1.  For an incremental run only the
+# TUs/tools that actually ran are counted; the release acceptance runs --clean.
+compiled_warnings=0
+other_warnings=0
+warning_lines=()
+diagnostic_logs=()
+for s in "${pending[@]}"; do
+  diagnostic_logs+=("$log_dir/${s//\//__}.log")   # compiler output (all TU logs are created)
+done
+diagnostic_logs+=("${rc_logs[@]+"${rc_logs[@]}"}")
+if (( needs_link )) && [[ -f $log_dir/link.log ]]; then
+  diagnostic_logs+=("$log_dir/link.log")
+fi
+for diag_log in "${diagnostic_logs[@]}"; do
+  [[ -f $diag_log ]] || continue
+  tu_warnings="$(grep -acE 'warning C[0-9]+' "$diag_log" 2>/dev/null || true)"
+  compiled_warnings=$((compiled_warnings + ${tu_warnings:-0}))
+  tool_warnings="$(grep -acE 'warning (LNK|RC)[0-9]+' "$diag_log" 2>/dev/null || true)"
+  other_warnings=$((other_warnings + ${tool_warnings:-0}))
+  while IFS= read -r warning_line; do
+    warning_lines+=("$warning_line")
+  done < <(grep -aE 'warning (C|LNK|RC)[0-9]+' "$diag_log" 2>/dev/null | sed -n '1,5p')
+done
+total_warnings=$((compiled_warnings + other_warnings))
+vcs_info "compiler diagnostics: $compiled_warnings warning(s) in ${#pending[@]} compiled translation unit(s)"
+vcs_info "linker/resource diagnostics: $other_warnings warning(s)"
+for warning_line in "${warning_lines[@]+"${warning_lines[@]}"}"; do
+  printf '[linux-build]   %s\n' "$warning_line" >&2
+done
+
+transcript="$log_dir/build-summary.log"
+{
+  printf '# VentureCore Linux build transcript\n'
+  printf 'generated=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  printf 'config=%s\n' "$cfg"
+  printf 'build_type=%s\n' "${build_type:-LOCAL}"
+  printf 'toolchain=MSVC %s, Windows SDK %s\n' "$VCS_MSVC_VER" "$VCS_SDK_VER"
+  printf 'flags_hash=%s\n' "$flags_hash"
+  printf 'profile_flags_hash=%s\n' "$(vcs_flags_hash "$cfg" "$build_type" build)"
+  printf 'cl_flags=%s\n' "${cl_flags_str% }"
+  printf 'warnings_as_errors=%s\n' "${VCS_WARNINGS_AS_ERRORS:-0}"
+  printf 'sources_total=%s\n' "${#sources[@]}"
+  printf 'sources_compiled=%s\n' "${#pending[@]}"
+  printf 'resources_compiled=%s\n' "${#rc_logs[@]}"
+  printf 'warnings_compile=%s\n' "$compiled_warnings"
+  printf 'warnings_linker_resource=%s\n' "$other_warnings"
+  printf 'warnings_total=%s\n' "$total_warnings"
+  for warning_line in "${warning_lines[@]+"${warning_lines[@]}"}"; do
+    printf 'warning=%s\n' "$warning_line"
+  done
+  printf 'dll=%s\n' "$dll_path"
+  if [[ -f $dll_path ]]; then printf 'dll_size=%s\n' "$(stat -c %s "$dll_path")"; fi
+  printf 'result=success\n'
+} >"$transcript"
+vcs_info "build transcript: $transcript"
+
+if (( total_warnings > 0 )) && [[ ${VCS_WARNINGS_AS_ERRORS:-0} == 1 ]]; then
+  vcs_die "$total_warnings toolchain warning(s); VCS_WARNINGS_AS_ERRORS=1 forbids warnings"
 fi
 
 # --- 6. staging (optional) --------------------------------------------------

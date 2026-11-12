@@ -87,7 +87,7 @@ The platform compiles against one exact YRpp revision
 
 | Gate | Where | What it enforces |
 | --- | --- | --- |
-| build time | `scripts/linux/check_yrpp.py`, run by `scripts/linux/build_linux.sh` before compiling | `external/YRpp` matches `VC_YRPP_PIN` (from the checkout's git `HEAD`, or from the `external/YRpp.commit` stamp written by `fetch_yrpp.sh`); a mismatch aborts the build |
+| build time | `scripts/linux/check_yrpp.py`, run by `scripts/linux/build_linux.sh` before compiling | `external/YRpp` matches `VC_YRPP_PIN` (from the checkout's git `HEAD`, or from the `external/YRpp.commit` stamp written by `fetch_yrpp.sh`) **and** its content matches `external/YRpp.sha256` (per-file sha256 plus the exact file set); a mismatch or a dirty checkout aborts the build |
 | compile time | `src/Engine/EngineCompat.h` | 32-bit build and the engine ABI sizes the base actually touches; a moved field or changed layout fails with a `static_assert` message |
 | run time | startup log and `src/version.rc` | the log prints the short and full pin; the version resource records `YrppCommit` |
 

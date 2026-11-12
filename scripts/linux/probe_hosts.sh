@@ -396,18 +396,27 @@ int __cdecl main(int argc, char** argv)
 }
 EOF
 
-cl_flags=(
-  /nologo /W4 /MT /EHsc- /Gz /std:c++20
-  /D_CRT_SECURE_NO_WARNINGS /DNOMINMAX
-  /D_WIN32_WINNT=0x0601 /DNTDDI_VERSION=0x06010000
-)
+# The probe and its stub modules compile with the shipped DLL's flags (TOOL-01):
+# one definition in common.sh, no /EH, _HAS_EXCEPTIONS=0, NDEBUG.
+vcs_assert_flag_parity Release RELEASE
+mapfile -t cl_flags < <(vcs_cl_flags Release RELEASE probe)
+vcs_info "compile flags: release-aligned (hash $(vcs_flags_hash Release RELEASE probe))"
 
 # Builds one stub DLL; $1 = source, $2 = output DLL, $3 = log file.
 build_stub() {
-  local src="$1" dll="$2" log="$3"
-  ( cd "$work_dir" && wine "$VCS_VC_BIN/cl.exe" "${cl_flags[@]}" /LD "$(vcs_w "$src")" \
-      "/Fe$(vcs_w "$dll")" ) >"$log" 2>&1 \
-    || { cat "$log" >&2; vcs_die "host probe: $(basename "$dll") failed to build"; }
+  local src="$1" dll="$2" log="$3" rc
+  set +e
+  ( cd "$work_dir" && vcs_wine_run "$VCS_COMPILE_TIMEOUT" wine "$VCS_VC_BIN/cl.exe" \
+      "${cl_flags[@]}" /LD "$(vcs_w "$src")" "/Fe$(vcs_w "$dll")" ) >"$log" 2>&1
+  rc=$?
+  set -e
+  if (( rc == 124 )); then
+    printf 'fatal error: cl.exe timed out after %ss (VCS_COMPILE_TIMEOUT)\n' "$VCS_COMPILE_TIMEOUT" >>"$log"
+  fi
+  if (( rc != 0 )); then
+    cat "$log" >&2
+    vcs_die "host probe: $(basename "$dll") failed to build (exit $rc)"
+  fi
 }
 
 build_stub "$stub_src" "$stub_dll" "$work_dir/stub-build.log"
@@ -416,22 +425,42 @@ build_stub "$bad_magic_src" "$bad_magic_dll" "$work_dir/bad-magic-build.log"
 build_stub "$null_name_src" "$null_name_dll" "$work_dir/null-name-build.log"
 build_stub "$crash_src" "$crash_dll" "$work_dir/crash-build.log"
 
-# Build the probe executable with the registry sources it exercises.
-( cd "$work_dir" && wine "$VCS_VC_BIN/cl.exe" "${cl_flags[@]}" \
+# Build the probe executable with the registry sources it exercises.  Every Wine
+# invocation is time-limited so a hung tool or probe cannot hold the shared
+# toolchain lock for an hour (TOOL-10).
+set +e
+( cd "$work_dir" && vcs_wine_run "$VCS_COMPILE_TIMEOUT" wine "$VCS_VC_BIN/cl.exe" "${cl_flags[@]}" \
     "$(vcs_w "$registration_src")" "$(vcs_w "$probe_src")" \
     "$(vcs_w "$VCS_ROOT/src/Core/HostRegistry.cpp")" \
     "$(vcs_w "$VCS_ROOT/src/Core/Hosts.Builtin.cpp")" \
     "$(vcs_w "$VCS_ROOT/src/Core/IniRegistry.cpp")" \
     "$(vcs_w "$VCS_ROOT/src/Core/FeatureRegistry.cpp")" \
     "/Fe$(vcs_w "$probe_exe")" /link /SUBSYSTEM:CONSOLE /MACHINE:X86 ) \
-  >"$work_dir/build.log" 2>&1 \
-  || { cat "$work_dir/build.log" >&2; vcs_die "host probe failed to build"; }
+  >"$work_dir/build.log" 2>&1
+probe_build_rc=$?
+set -e
+if (( probe_build_rc == 124 )); then
+  printf 'fatal error: cl.exe timed out after %ss (VCS_COMPILE_TIMEOUT)\n' "$VCS_COMPILE_TIMEOUT" >>"$work_dir/build.log"
+fi
+if (( probe_build_rc != 0 )); then
+  cat "$work_dir/build.log" >&2
+  vcs_die "host probe failed to build (exit $probe_build_rc)"
+fi
 
 echo '--- host probe ---'
-wine "$(vcs_w "$probe_exe")" \
+set +e
+vcs_wine_run "$VCS_PROBE_TIMEOUT" wine "$(vcs_w "$probe_exe")" \
   "$(vcs_w "$stub_dll")" \
   "$(vcs_w "$self_host_dll")" \
   "$(vcs_w "$bad_magic_dll")" \
   "$(vcs_w "$null_name_dll")" \
   "$(vcs_w "$crash_dll")"
+probe_run_rc=$?
+set -e
+if (( probe_run_rc == 124 )); then
+  vcs_die "host probe timed out after ${VCS_PROBE_TIMEOUT}s (VCS_PROBE_TIMEOUT)"
+fi
+if (( probe_run_rc != 0 )); then
+  vcs_die "host probe failed (exit $probe_run_rc)"
+fi
 echo '--- host probe OK ---'

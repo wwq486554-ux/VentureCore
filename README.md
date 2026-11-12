@@ -18,7 +18,7 @@ It is a template, not a mod: it deliberately contains **no gameplay features**.
 > marker, the YRpp binding gate and the verification tooling) is implemented,
 > in-game verified, and the 1.x line was hardened by an independent blind review
 > (`CHANGELOG.md`).  2.0 changes the host model and the INI layer and keeps the
-> same verification suite (13 engine-free tests, 9 static checks, two Wine
+> same verification suite (15 engine-free tests, 12 static checks, two Wine
 > probes); its delta still needs the independent review pass planned in the
 > roadmap.  The automated checks for each layer are named in this README and in
 > `docs/`; they do not replace an in-game check.
@@ -157,13 +157,18 @@ YRpp is not distributed with this repository.  Fetch it into `external/YRpp/`
 once per checkout:
 
 ```bash
-# Linux: copy a local YRpp checkout (the helper also writes external/YRpp.commit)
+# Linux: copy a local YRpp checkout (the helper also writes external/YRpp.commit
+# and verifies the copy against the committed content manifest
+# external/YRpp.sha256 before installing it)
 scripts/linux/fetch_yrpp.sh --from /path/to/YRpp
 ```
 
 On Windows, clone the YRpp repository and check out the commit named by
 `VC_YRPP_PIN` in `src/Core/EnginePin.h` into `external/YRpp` (or run the same
-helper from Git Bash).  The build fails if the revision does not match the pin.
+helper from Git Bash).  The build fails if the revision does not match the pin,
+or if the checkout's content does not match `external/YRpp.sha256`; when the pin
+is intentionally updated, regenerate the manifest with
+`fetch_yrpp.sh --write-manifest`.
 
 ### Linux (MSVC under Wine)
 
@@ -199,8 +204,8 @@ described above.
 These automatic checks cover this machine; the in-game run is a human step:
 
 ```bash
-python3 scripts/verify_build.py         # static: PE image, hook table, exports,
-                                        # version strings, feature id, log policy
+python3 scripts/verify_build.py         # static: PE image, hook table/exports,
+                                        # provenance, sources, hook windows, tools
 scripts/linux/load_probe.sh             # dynamic: LoadLibrary, exports, lineage conflict
 scripts/linux/probe_hosts.sh            # dynamic: host registration/marker discovery/gating
 scripts/linux/run_tests.sh              # engine-free unit tests, same toolchain
@@ -210,19 +215,38 @@ python3 scripts/linux/check_eol.py      # line endings vs .gitattributes
 scripts/linux/abi_probe.sh              # optional: engine ABI sizes pinned by EngineCompat.h
 ```
 
-The v2.0.0 source passes these checks.  `scripts/linux/bench_store.sh` runs the
-extension-store microbenchmark and `scripts/linux/test_fetch_yrpp.sh` /
+The build configuration is verified statically as well:
+`scripts/linux/build_linux.sh Release --build-type RELEASE --check` (no Wine
+needed) cross-checks the project files against the Linux build and prints the
+code-generation flag hash shared by the DLL, the tests, the probes and the
+benchmark.  `scripts/verify_build.py` needs the pinned engine executable for its
+offline hook-window check; pass it explicitly (otherwise that check is an
+explicit SKIP):
+
+```bash
+VCS_GAMEMD_EXE=/path/to/gamemd.exe python3 scripts/verify_build.py
+```
+
+The v2.0.0 source passes the 2.0 acceptance suite; the batch-A hardening adds the
+provenance, binary-assert, offline hook-window and tooling self-check items
+described below.  `scripts/linux/bench_store.sh` runs the extension-store
+microbenchmark and `scripts/linux/test_fetch_yrpp.sh` /
 `scripts/linux/verify_incremental.sh` cover the tooling.  A rebuilt DLL is not
 byte-identical to a released one (embedded timestamp / debug path), so the
 checks - not a file hash - are the provenance.
 
 `verify_build.py` checks the PE format (PE32/i386), the `.syhks00` hook records
-against the catalogue, the distinct hook handler exports, the version strings
-(platform name, the version - required both in the UTF-16LE version resource and
-as the compiled-in ASCII literal - and the YRpp pin), the registered Example
-feature id, the log-policy source hygiene, the absence of the removed 2.0 host
-level API and the absence of the removed closed-source host's name.  It exits 0
-only when every check passes.
+against the catalogue, the hook handler exports (exact match, with stale or
+undocumented exports flagged), the offline correctness of every hook window
+against the pinned `gamemd.exe` (an explicit SKIP, never a PASS, when no engine
+is supplied), the version strings and build provenance (platform name, the
+version - required both in the UTF-16LE version resource and as the compiled-in
+ASCII literal - the YRpp pin, `PlatformBuildType=RELEASE`, and a `GitCommit` that
+matches the working copy), the registered Example feature id, the log-policy
+source hygiene, the absence of the removed 2.0 host level API, the absence of the
+removed closed-source host's name, the absence of live CRT assert machinery from
+the release image, and the offline self-checks of the two in-game INI tools.  It
+exits 0 only when every check passes.
 
 `load_probe.sh` performs `LoadLibrary` -> `GetProcAddress` for the base hook
 handlers and the lineage markers, validates the marker payload and prints the resolved export count, then loads
@@ -245,16 +269,24 @@ built-in hosts, the declaration matrix and the marker validation are covered by
 The 2.0 INI key registry is covered by `tests/test_ini_registry.cpp` (defaults,
 strict integer parsing and ranges, invalid-value warnings, duplicate keys,
 `defaultEnabled`/`[Groups]` gates, the unknown-key scan and the template
-rendering).  After a run with `[Platform] DumpIniTemplate=yes`,
+rendering) and the production adapter (the Win32 profile API behind `Ini.cpp`)
+by `tests/test_ini_adapter.cpp` (missing keys/sections, empty values, case
+insensitivity, the buffer-truncation boundary, enumeration limits).  After a run
+with `[Platform] DumpIniTemplate=yes`,
 `scripts/compare_ini_template.py <generated file> VentureCore.ini.example` checks
-that the shipped example still lists exactly the registered keys.
+that the shipped example still lists exactly the registered keys; duplicate keys
+in either file are a hard failure.
 
 `scripts/check_live_log.py` is the in-game aid: it judges the last process block
 of a live `<Platform>.log` (`--mode normal`: startup shape, host-set line, `ini
 keys:` summary, feature lines, no `[ERROR]`, syringe exit code; `--mode probe`:
-additionally the unknown-key/invalid-value warnings and the generated-template
-comparison).  It is what the 2.0 in-game test uses for the concise PASS/FAIL
-verdict.
+additionally the unknown-key/invalid-value warnings, the freshness of the
+generated template and the generated-template comparison).  The shipped probe
+fixture `scripts/fixtures/probe/VentureCore.ini` is what `--mode probe` expects
+to find installed next to `gamemd.exe`, so the probe verdict cannot be produced
+from a different configuration.  Both tools also have an offline `--self-check`
+(the same cases `verify_build.py` runs as its last check), so a change to their
+parsing or platform-name derivation fails the automatic gate without a game.
 
 The real test - launching the game with SyringeEx and the DLL installed - must be
 done by a human.  See `docs/HookCatalogue.md` for what each hook does and
@@ -335,6 +367,7 @@ reported.  See `VentureCore.ini.example` and `docs/Ini.md`.
 | `tests/` | engine-free unit tests and the store microbenchmark |
 | `docs/` | the documentation set (see below) |
 | `scripts/verify_build.py` | static verification of a built DLL |
+| `scripts/verify_hook_windows.py` | offline hook-window validation against `gamemd.exe` (also run as `verify_build.py` check 10) |
 | `scripts/linux/` | MSVC-under-Wine build, tests, benchmark, YRpp check/fetch, probes |
 | `external/` | external dependencies; `YRpp/` is fetched locally and not committed |
 | `VentureCore.sln`, `VentureCore.vcxproj`, `VentureCore.props` | Windows build |
@@ -379,7 +412,7 @@ VentureCore 是一个 MIT 授权的“起始基座/模板”：复制仓库 → 
 UnitClass 的创建/销毁、读取一个 rules 键，没有任何玩法功能。2.0 的变更：宿主模型改为
 “事实集合 + 功能声明”（删除 tier，改用 `requiredHosts`/`anyOfHosts`，新增自识别宿主
 marker）；`<Platform>.ini` 升级为声明式键注册表（校验/未知键扫描/`[Groups]`/模板 dump）。
-1.x 已经过独立盲审与实机验证；2.0 沿用同一套自动化检查（13 个引擎无关单测、9 项静态检查、
+1.x 已经过独立盲审与实机验证；2.0 沿用同一套自动化检查（15 个引擎无关单测、12 项静态检查、
 两个 Wine 探针），其增量仍待计划中的独立盲审。每层对应的自动化检查写在本 README 与
 `docs/` 里，这些检查不能替代一次实机运行：
 日志分级、`<Platform>.ini`、rules/art INI 读取与同名键接管、宿主集合、血统互斥、
@@ -390,9 +423,12 @@ marker）；`<Platform>.ini` 升级为声明式键注册表（校验/未知键�
 
 ```bash
 scripts/linux/build_linux.sh Release --build-type RELEASE   # Wine 里的真 MSVC
-python3 scripts/verify_build.py                            # 静态自检
+VCS_GAMEMD_EXE=/path/to/gamemd.exe python3 scripts/verify_build.py   # 静态自检
 python3 scripts/linux/check_eol.py                         # 行尾检查
 scripts/linux/load_probe.sh                                # Wine 下 LoadLibrary 探针
 scripts/linux/run_tests.sh                                 # 单元测试（引擎无关）
 scripts/linux/bench_store.sh                               # 扩展存储微基准
 ```
+
+`verify_build.py` 的离线 hook 窗口校验需要钉版 `gamemd.exe`：不传
+`VCS_GAMEMD_EXE`（或 `--gamemd`）时该项显式 SKIP，而不是 PASS。

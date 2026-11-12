@@ -176,10 +176,14 @@ by simply playing a battle and grepping the log for `[Example]`.
 
 ## Release-source assertion (`verify_build.py` check 7)
 
-`python3 scripts/verify_build.py` runs a seventh check, `Log policy (source)`,
-which scans every `src/**/*.cpp` and `src/**/*.h` file and fails when either:
+`python3 scripts/verify_build.py` runs the check `Log policy (source)`, which
+scans every file under `src/` **and** `include/` that can reach the compiler
+(`.c` / `.cc` / `.cpp` / `.cxx` / `.h` / `.hh` / `.hpp` / `.hxx` / `.inl`) and
+recognizes every `OutputDebugString*` spelling (`...A`, `...W`, the bare macro),
+and fails when either:
 
-* a call to the debugger API appears **outside** a `#ifdef DEBUG` /
+* a call to the debugger API (`OutputDebugString` in **every** spelling -
+  `...A`, `...W` and the bare macro) appears **outside** a `#ifdef DEBUG` /
   `#if defined(DEBUG)` region, or
 * the call appears in **any file other than `src/Core/Log.cpp`** - the base owns
   exactly one gated debugger helper, so a second copy is rejected even inside a
@@ -189,10 +193,13 @@ It reports `file:line: <source line>` for each violation, for example:
 
 ```text
 [FAIL] Log policy (source)
-       1 call(s) to OutputDebugStringA outside a #ifdef DEBUG region (14 file(s) scanned)
+       1 call(s) to OutputDebugString* compiled in without a DEBUG gate or
+       the g_debugOutput run-time guard (95 file(s) scanned)
        src/Core/Foo.cpp:42: 	OutputDebugStringA("cheap diagnostic\n");
-       Move the call into the DEBUG-gated helper in src/Core/Log.cpp
-       (or under #ifdef DEBUG); see docs/Logging.md.
+       Move the call into the DEBUG-gated helper in src/Core/Log.cpp (or under
+       #ifdef DEBUG); the helper's release branch must keep the
+       `if (g_debugOutput)` guard.
+       See docs/Logging.md - this is a lexical hygiene check.
 ```
 
 The check is line-based and documented on purpose - it tracks the preprocessor
@@ -201,16 +208,23 @@ conditional nesting, no C++ parsing.  Three consequences:
 * it inspects the **source tree**, not the DLL, so it also catches a violation
   when the DLL in `Release/` was built from an older state (the check is printed
   even when the DLL cannot be found);
-* an `#else` branch keeps the gate of the region it continues, while an `#elif`
-  is re-evaluated from its own condition: `#elif defined(DEBUG)` opens a DEBUG
-  region even when the `#if` before it was not a DEBUG gate.  Keeping `#else`
-  gated is deliberate: the single helper in `src/Core/Log.cpp` uses exactly that
-  shape for its `#else` branch, which is additionally gated on the run-time
-  `DebugOutput` switch;
-* it proves a **lexical** property only: every literal occurrence of the API name
-  in `src/` sits inside a gated region of the one helper.  It cannot prove that
-  the release branch is unreachable (that is the runtime `DebugOutput` switch's
-  job), and it does not see calls hidden behind macros or outside `src/`.
+* the branch gates follow the C preprocessor: `#elif` recomputes its branch from
+  its own condition (`#elif defined(DEBUG)` opens a DEBUG region even when the
+  preceding `#if` was not a DEBUG gate), and `#else` is the **negation** of its
+  conditional - entering it invalidates the DEBUG gate of the region it
+  continues.  The single helper in `src/Core/Log.cpp` uses exactly that shape:
+  its `#else` branch is the run-time `[Platform] DebugOutput=yes` switch, so the
+  helper's release branch must match an explicit whitelist shape.  Three shapes
+  are accepted: the guard on the same line
+  (`if (g_debugOutput) OutputDebugStringA(x);`), the guard on the immediately
+  preceding line, and the early-exit variant (`if (!g_debugOutput) return;`).
+  Removing that run-time guard fails the check; it is the regression this
+  whitelist protects;
+* it proves a **lexical hygiene** property only, not that the release branch is
+  unreachable: every literal occurrence of the API name must sit inside a gated
+  region of the one helper (and that helper's release path behind the run-time
+  `DebugOutput` switch).  It does not see calls hidden behind macros or outside
+  the scanned tree, and reachability remains the run-time switch's job.
   Do not add another debugger call anywhere.
 
 ## Failure behaviour
@@ -229,8 +243,15 @@ The logger is best-effort and must not take the game down with it:
   format is dropped.  The variadic API documents `format` as required
   (`src/Core/Log.h`), but the guard keeps the "cannot crash" promise even if a
   feature passes NULL.
-* The DLL is compiled with `/EHsc-`, so there are no exceptions to escape from
-  the logger in the first place.
+* **C++ exceptions are disabled**, so there are no exceptions to escape from the
+  logger in the first place.  Neither build system passes any `/EH` option
+  (`ExceptionHandling=false` in `VentureCore.props` emits no switch;
+  `scripts/linux/common.sh`'s `vcs_cl_flags` passes none), `_HAS_EXCEPTIONS=0`
+  is defined by both, and `include/platform/BuildGuards.h` - force-included in
+  every translation unit by both build systems - fails the compile if
+  `_CPPUNWIND` becomes defined (`/EH` came back) or `_HAS_EXCEPTIONS` is not 0.
+  This is stricter than the old `/EHsc-` claim: `/EHsc-` only disabled the
+  `c` half of `/EHsc` and left synchronous C++ exception handling *enabled*.
 
 The normal open/write path and the NULL-format guard are covered by
 `tests/test_logging.cpp`.  The write-failure/debugger-report branch cannot be
@@ -248,8 +269,8 @@ every line would cost a disk round trip in the game loop.
 ## Verifying a build
 
 ```bash
-scripts/linux/build_linux.sh Release --build-type RELEASE --clean   # 0 warnings
-python3 scripts/verify_build.py                                     # 7/7 checks
+scripts/linux/build_linux.sh Release --build-type RELEASE --clean   # 0 warnings (machine-checked)
+python3 scripts/verify_build.py                                     # every check PASS
 scripts/linux/run_tests.sh                                          # every test
 scripts/linux/run_tests.sh test_logging                             # log file I/O
 scripts/linux/run_tests.sh log_levels                               # pure policy only

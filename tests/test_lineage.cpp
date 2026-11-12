@@ -1,10 +1,16 @@
 // Unit test: lineage mutual-exclusion decision logic.
 //
-// TEST_DEPS:
-// (header-only test: the pure decision logic and the marker constants live in
-// src/Core/Lineage.h and include/platform/Lineage.h, so no non-test source is
-// linked.  The Windows-side module scan is exercised by scripts/linux/load_probe.sh,
-// which loads two copies of the built DLL into one process.)
+// TEST_DEPS: src/Core/Lineage.cpp
+//
+// The pure decision logic and the marker constants live in src/Core/Lineage.h
+// and include/platform/Lineage.h (header-only); the real translation unit is
+// linked as well, so this test also compiles and runs the Windows-side module
+// scan (TOOL-13: src/Core/Lineage.cpp used to be compiled only into the DLL).
+// The scan runs in a clean process here: the test executable is the only module
+// that exports the lineage marker and the scanner skips the running module on
+// purpose, so the result must be empty.  The two-DLL conflict case stays with
+// scripts/linux/load_probe.sh, which loads two copies of the built DLL into one
+// process.
 //
 // The records below are synthetic: they stand in for loaded modules that
 // answered the lineage probe, so every branch of the decision can be covered
@@ -14,10 +20,12 @@
 // space-separated list of repository-relative sources to link.
 
 #include <cstdio>
+#include <cstring>
 #include <string>
 #include <vector>
 
 #include "Core/Lineage.h"
+#include "Core/PlatformVersion.h"
 
 namespace
 {
@@ -168,6 +176,31 @@ int __cdecl main()
 	Check(!IsPathUnderDirectory("C:\\Windows\\x.dll", nullptr), "path: a null directory does not match");
 	Check(!IsPathUnderDirectory("", "C:\\Windows"), "path: an empty path does not match");
 	Check(!IsPathUnderDirectory("C:\\Windows\\x.dll", ""), "path: an empty directory does not match");
+
+	// -- real marker + module scan (src/Core/Lineage.cpp) ---------------------
+	// Linking the production translation unit gives this test compile coverage
+	// of the Windows-side scanner (TOOL-13) and runs it for real: Toolhelp
+	// enumerates this process, every module outside the Windows directory is
+	// probed for the lineage export, and the module that owns our own
+	// VentureLineage_GetInfo is skipped on purpose.  The test executable is the
+	// only module that exports the marker, so a clean process has no conflict.
+	const VentureLineageInfo* const marker = VentureLineage_GetInfo();
+	Check(marker != nullptr, "scan: the exported lineage marker is readable");
+	if (marker)
+	{
+		Check(marker->magic == VENTURE_LINEAGE_MAGIC, "scan: marker magic matches the header");
+		Check(marker->abiVersion == VENTURE_LINEAGE_ABI_VERSION,
+			"scan: marker ABI version matches the header");
+		Check(marker->name != nullptr && std::strcmp(marker->name, VC_PLATFORM_NAME) == 0,
+			"scan: marker reports the platform name");
+		Check(marker->version != nullptr && std::strcmp(marker->version, VC_VERSION_DISPLAY) == 0,
+			"scan: marker reports the build version");
+		Check(marker->savegameId == VC_SAVEGAME_ID, "scan: marker reports the platform savegame id");
+	}
+	Check(sizeof(VentureLineageInfo) == 20u, "scan: the 32-bit marker layout is 20 bytes");
+	Check(venture::CountForeignLineage() == 0, "scan: no foreign lineage module in a clean process");
+	Check(venture::ScanForeignLineage().empty(), "scan: the foreign-module list is empty");
+	Check(VentureLineage_CountConflicts() == 0, "scan: the diagnostic export reports no conflict");
 
 	std::printf("\n%s (%d failure%s)\n", g_failures == 0 ? "PASS" : "FAILED",
 		g_failures, g_failures == 1 ? "" : "s");

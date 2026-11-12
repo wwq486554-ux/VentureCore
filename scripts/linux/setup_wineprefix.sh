@@ -19,6 +19,12 @@ command -v wine >/dev/null 2>&1 || vcs_die "wine is not installed"
 vcs_locate_toolchain
 vcs_check_prefix_fs
 
+# Creating/updating the prefix runs wineboot and cl.exe in the shared Wine
+# prefix, so it must serialise with builds/tests/probes exactly like they do.
+# The lock file path is fixed (inside the prefix) whether or not the prefix
+# exists yet (TOOL-10).
+vcs_lock_toolchain
+
 vcs_info "Wine prefix : $VCS_WINEPREFIX"
 vcs_info "MSVC        : $VCS_MSVC_DIR"
 vcs_info "Windows SDK : $VCS_SDK_VER ($VCS_SDK_ROOT)"
@@ -29,8 +35,14 @@ else
   vcs_info "creating prefix (this takes a moment) ..."
   mkdir -p "$VCS_WINEPREFIX"
   vcs_wine_env
-  if ! wineboot -u >/dev/null 2>&1; then
-    vcs_warn "wineboot returned non-zero; continuing anyway"
+  set +e
+  vcs_wine_run "$VCS_SETUP_TIMEOUT" wineboot -u >/dev/null 2>&1
+  wineboot_rc=$?
+  set -e
+  if (( wineboot_rc == 124 )); then
+    vcs_die "wineboot timed out after ${VCS_SETUP_TIMEOUT}s (VCS_SETUP_TIMEOUT)"
+  elif (( wineboot_rc != 0 )); then
+    vcs_warn "wineboot returned $wineboot_rc; continuing anyway"
   fi
   vcs_wine_ready || vcs_die "prefix was not created correctly at $VCS_WINEPREFIX"
 fi
@@ -66,7 +78,7 @@ printf 'extern "C" int vcs_probe(void) { return 42; }\n' > "$probe_dir/probe.cpp
 rm -f "$probe_dir/probe.obj"
 
 set +e
-wine "$VCS_VC_BIN/cl.exe" /nologo /c 'C:\venturecore-tmp\probe.cpp' \
+vcs_wine_run "$VCS_COMPILE_TIMEOUT" wine "$VCS_VC_BIN/cl.exe" /nologo /c 'C:\venturecore-tmp\probe.cpp' \
   /Fo'C:\venturecore-tmp\probe.obj' >"$probe_log" 2>&1
 rc=$?
 set -e
@@ -81,6 +93,9 @@ show_log() {
   fi
 }
 
+if (( rc == 124 )); then
+  vcs_die "cl.exe smoke test timed out after ${VCS_COMPILE_TIMEOUT}s (VCS_COMPILE_TIMEOUT)"
+fi
 if [[ $rc -ne 0 || ! -f "$probe_dir/probe.obj" ]]; then
   vcs_warn "cl.exe smoke test failed (exit $rc):"
   show_log "$probe_log" >&2

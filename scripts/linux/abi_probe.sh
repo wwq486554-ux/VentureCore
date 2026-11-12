@@ -67,15 +67,37 @@ int __cdecl main()
 }
 EOF
 
-cl_flags=(
-  /nologo /c /W3 /std:c++20 /permissive- /MT /GR- /GS- /Gz /arch:SSE2 /fp:precise
-  /DSYR_VER=2 /DHAS_EXCEPTIONS=0 /DNOMINMAX /D_CRT_SECURE_NO_WARNINGS
-  /D_WIN32_WINNT=0x0601 /DNTDDI_VERSION=0x06010000
-)
+# The probe compiles with the shipped DLL's flags (TOOL-01): one definition in
+# common.sh, no /EH, _HAS_EXCEPTIONS=0, NDEBUG.  All three Wine invocations are
+# time-limited (TOOL-10) so a hung tool cannot hold the shared toolchain lock.
+vcs_assert_flag_parity Release RELEASE
+mapfile -t cl_flags < <(vcs_cl_flags Release RELEASE probe)
+vcs_info "compile flags: release-aligned (hash $(vcs_flags_hash Release RELEASE probe))"
 
 cd "$work_dir"
-wine "$VCS_VC_BIN/cl.exe" "${cl_flags[@]}" "$(vcs_w "$probe_src")" "/Fo$(vcs_w "$probe_obj")"
-wine "$VCS_VC_BIN/link.exe" /nologo "/OUT:$(vcs_w "$probe_exe")" /SUBSYSTEM:CONSOLE "/MACHINE:X86" "$(vcs_w "$probe_obj")"
+set +e
+vcs_wine_run "$VCS_COMPILE_TIMEOUT" wine "$VCS_VC_BIN/cl.exe" /c "${cl_flags[@]}" \
+  "$(vcs_w "$probe_src")" "/Fo$(vcs_w "$probe_obj")"
+compile_rc=$?
+set -e
+if (( compile_rc != 0 )); then
+  if (( compile_rc == 124 )); then
+    vcs_die "ABI probe compile timed out after ${VCS_COMPILE_TIMEOUT}s (VCS_COMPILE_TIMEOUT)"
+  fi
+  vcs_die "ABI probe failed to compile (exit $compile_rc)"
+fi
+
+set +e
+vcs_wine_run "$VCS_LINK_TIMEOUT" wine "$VCS_VC_BIN/link.exe" /nologo \
+  "/OUT:$(vcs_w "$probe_exe")" /SUBSYSTEM:CONSOLE "/MACHINE:X86" "$(vcs_w "$probe_obj")"
+link_rc=$?
+set -e
+if (( link_rc != 0 )); then
+  if (( link_rc == 124 )); then
+    vcs_die "ABI probe link timed out after ${VCS_LINK_TIMEOUT}s (VCS_LINK_TIMEOUT)"
+  fi
+  vcs_die "ABI probe failed to link (exit $link_rc)"
+fi
 
 echo "--- ABI probe (pinned YRpp) ---"
-wine "$probe_exe"
+vcs_wine_run "$VCS_PROBE_TIMEOUT" wine "$(vcs_w "$probe_exe")"

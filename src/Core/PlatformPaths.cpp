@@ -45,6 +45,16 @@ bool GetGameFilePath(const char* const fileName, char* const buffer, const DWORD
 	if (!GetGameDirectory(directory, static_cast<DWORD>(sizeof(directory))))
 		return false;
 
+	// The header promises "false on a truncated buffer".  The secure CRT's
+	// strcat_s does not merely return an error when the destination is too
+	// small: it reports a runtime constraint violation, and the default invalid
+	// parameter handler terminates the process in a release build (exit code 9,
+	// reproduced by tests/test_ini_adapter.cpp).  Check the required length here
+	// so the contract holds without terminating the game.
+	const std::size_t required = std::strlen(directory) + std::strlen(fileName) + 1;
+	if (required > bufferSize)
+		return false;
+
 	buffer[0] = '\0';
 	const errno_t result = strcat_s(buffer, bufferSize, directory);
 	if (result != 0)

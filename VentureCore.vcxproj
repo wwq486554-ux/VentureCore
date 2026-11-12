@@ -54,6 +54,7 @@
   </ItemGroup>
   <!-- Headers (for IDE navigation only; the build finds them via include paths). -->
   <ItemGroup>
+    <ClInclude Include="include\platform\BuildGuards.h" />
     <ClInclude Include="include\platform\Feature.h" />
     <ClInclude Include="include\platform\HostIds.h" />
     <ClInclude Include="include\platform\HostMarker.h" />

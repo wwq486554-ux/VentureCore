@@ -5,7 +5,11 @@ base installs.  `scripts/verify_build.py` parses the table below at run time and
 requires the hook records embedded in the built DLL to match it exactly - there
 is no second copy of the list in the verify script, and adding a hook to the
 code without adding its row here (or the other way round) makes verification
-fail.
+fail.  When the engine executable is supplied as well (`VCS_GAMEMD_EXE=<path>
+python3 scripts/verify_build.py`, or `--gamemd <path>`), the verifier additionally
+re-decodes `gamemd.exe` and proves that every declared window starts on an
+instruction boundary and covers complete instructions only (see "What size
+means" below).
 
 ## Format rules
 
@@ -82,7 +86,20 @@ the instruction listing and check it against the ecosystem conventions.
 4. Add feature-specific hooks only in feature modules; keep the base hook
    surface small so derived platforms can replace modules without dragging
    unrelated patches along.
-5. Rebuild, then run `python3 scripts/verify_build.py`.
+5. Rebuild, then run `python3 scripts/verify_build.py`.  The table is checked
+   against the DLL's `.syhks00` records, and with the engine executable supplied
+   the windows themselves are validated against `gamemd.exe`'s instructions
+   (offline, read-only - the engine is never executed):
+
+   ```bash
+   VCS_GAMEMD_EXE=/path/to/gamemd.exe python3 scripts/verify_build.py
+   # or, standalone:
+   python3 scripts/verify_hook_windows.py --gamemd /path/to/gamemd.exe
+   ```
+
+   Without an engine path the verify script reports that one check as `[SKIP]`
+   with a warning (a skip, never a silent pass); the rest of the checks still
+   run.
 
 ## Hook sites not used by the base
 
@@ -98,3 +115,5 @@ is implemented it moves into the table.
 * `docs/MakeYourOwnPlatform.md` - how a derived platform adds its own features
   (and hooks) without touching the base.
 * `scripts/verify_build.py` - the checker that enforces this table.
+* `scripts/verify_hook_windows.py` - the offline, read-only validator that decodes
+  `gamemd.exe` and proves every window is a complete-instruction patch site.

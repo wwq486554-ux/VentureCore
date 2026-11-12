@@ -1,7 +1,8 @@
 # external/ - build dependencies, not vendored
 
-Nothing in this directory is committed. It holds the engine bindings the
-platform compiles against.
+Nothing in this directory is committed, except `YRpp.sha256` - the content
+manifest of the pinned YRpp tree (sha256 hashes only, no YRpp content).  It
+holds the engine bindings the platform compiles against.
 
 ## YRpp
 
@@ -20,6 +21,9 @@ scripts/linux/fetch_yrpp.sh --from /path/to/YRpp
 ```
 
 The script copies the headers into `external/YRpp/`, drops the upstream `.git`,
-and writes `external/YRpp.commit` so `scripts/linux/check_yrpp.py` (run by the
-build script) can verify the revision. When the repository is public, switch to
-a git submodule; `check_yrpp.py` accepts both forms.
+writes `external/YRpp.commit` and verifies the copy against
+`external/YRpp.sha256` before swapping it in. `scripts/linux/check_yrpp.py`
+(run by the build script) checks both the commit and the content manifest, and
+refuses a dirty checkout.  When the pin changes, regenerate the manifest with
+`fetch_yrpp.sh --write-manifest` and commit it; a non-git source tree is only
+accepted when its content matches that manifest.

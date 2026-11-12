@@ -3,9 +3,11 @@
   <!--
     VentureCore build settings.
 
-    These options mirror scripts/linux/build_linux.sh, which drives the same
-    MSVC toolchain under Wine. Keep the two in sync when changing compiler
-    flags, preprocessor definitions or linked libraries.
+    These options mirror scripts/linux/common.sh (vcs_cl_flags), which drives
+    the same MSVC toolchain under Wine; that function is the single definition
+    of the Linux-side compiler flags.  Keep the two in sync when changing
+    compiler flags, preprocessor definitions or linked libraries.  The
+    intentional remaining differences are listed in scripts/linux/README.md.
   -->
   <ItemGroup Label="ProjectConfigurations">
     <ProjectConfiguration Include="Debug|Win32">
@@ -42,7 +44,16 @@
       <SDLCheck />
       <ConformanceMode>true</ConformanceMode>
       <AdditionalIncludeDirectories>$(MSBuildThisFileDirectory)src;$(MSBuildThisFileDirectory)include;$(YRppDir);$(IntDir)Generated;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
-      <PreprocessorDefinitions>SYR_VER=2;HAS_EXCEPTIONS=0;NOMINMAX;_CRT_SECURE_NO_WARNINGS;_WIN32_WINNT=0x0601;NTDDI_VERSION=0x06010000;%(PreprocessorDefinitions);%(AdditionalDefinitions)</PreprocessorDefinitions>
+      <!--
+        Exceptions are disabled: no /EH switch is emitted (ExceptionHandling
+        below is false, which maps to an empty switch set) and
+        _HAS_EXCEPTIONS=0 makes the CRT/STL abort instead of throwing.  The
+        force-included guard fails the compile if that policy is ever broken
+        (TOOL-02); the Linux build defines the same macros and force-includes
+        the same header (scripts/linux/common.sh, vcs_cl_flags).
+      -->
+      <PreprocessorDefinitions>SYR_VER=2;_HAS_EXCEPTIONS=0;NOMINMAX;_CRT_SECURE_NO_WARNINGS;_WIN32_WINNT=0x0601;NTDDI_VERSION=0x06010000;%(PreprocessorDefinitions);%(AdditionalDefinitions)</PreprocessorDefinitions>
+      <ForcedIncludeFiles>$(MSBuildThisFileDirectory)include\platform\BuildGuards.h;%(ForcedIncludeFiles)</ForcedIncludeFiles>
       <StringPooling>true</StringPooling>
       <ExceptionHandling>false</ExceptionHandling>
       <RuntimeLibrary>MultiThreaded</RuntimeLibrary>
@@ -74,6 +85,12 @@
     <ClCompile>
       <Optimization>MaxSpeed</Optimization>
       <OmitFramePointers>true</OmitFramePointers>
+      <!--
+        NDEBUG removes the live asserts from the shipped DLL (TOOL-03).  The
+        Linux build adds /DNDEBUG to its Release flags as well; keep both in
+        sync (scripts/linux/common.sh, vcs_cl_flags).
+      -->
+      <PreprocessorDefinitions>NDEBUG;%(PreprocessorDefinitions)</PreprocessorDefinitions>
     </ClCompile>
   </ItemDefinitionGroup>
   <!-- Debug -->
@@ -88,7 +105,7 @@
       <PreprocessorDefinitions>DEBUG;%(PreprocessorDefinitions)</PreprocessorDefinitions>
     </ResourceCompile>
   </ItemDefinitionGroup>
-  <!-- Build types: --build-type RELEASE / NIGHTLY is what produces a release-ready version string. -->
+  <!-- Build types: the build-type RELEASE / NIGHTLY values are what produce a release-ready version string. -->
   <ItemDefinitionGroup Condition="'$(BuildType)' == 'NIGHTLY'">
     <ClCompile>
       <PreprocessorDefinitions>NIGHTLY;%(PreprocessorDefinitions)</PreprocessorDefinitions>
@@ -117,7 +134,13 @@
       Condition="'$(GitCommit)' == ''">
       <Output TaskParameter="ConsoleOutput" PropertyName="GitCommit" />
     </Exec>
-    <Exec Command="git rev-parse --abbrev-ref HEAD 2&gt;nul" WorkingDirectory="$(MSBuildProjectDirectory)"
+    <!--
+      Same command as scripts/linux/common.sh, vcs_generate_git_header: on a
+      branch this prints refs/heads/<name>, on a detached HEAD it prints HEAD
+      (no arbitrary tag is picked), so the Windows and Linux builds stamp the
+      same value for the same checkout (TOOL-10).
+    -->
+    <Exec Command="git rev-parse --symbolic-full-name HEAD 2&gt;nul" WorkingDirectory="$(MSBuildProjectDirectory)"
       ConsoleToMsBuild="true" IgnoreExitCode="true" StandardOutputImportance="Low"
       Condition="'$(GitRef)' == ''">
       <Output TaskParameter="ConsoleOutput" PropertyName="GitRef" />
