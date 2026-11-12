@@ -24,6 +24,7 @@
     <ClCompile Include="src\Core\PlatformPaths.cpp" />
     <ClCompile Include="src\Core\Log.cpp" />
     <ClCompile Include="src\Core\Ini.cpp" />
+    <ClCompile Include="src\Core\IniRegistry.cpp" />
     <ClCompile Include="src\Core\HostRegistry.cpp" />
     <ClCompile Include="src\Core\Hosts.Builtin.cpp" />
     <ClCompile Include="src\Core\Hosts.Custom.cpp" />
@@ -65,6 +66,7 @@
     <ClInclude Include="src\Core\Log.h" />
     <ClInclude Include="src\Core\LogPolicy.h" />
     <ClInclude Include="src\Core\Ini.h" />
+    <ClInclude Include="src\Core\IniRegistry.h" />
     <ClInclude Include="src\Core\HostRegistry.h" />
     <ClInclude Include="src\Core\FeatureRegistry.h" />
     <ClInclude Include="src\Core\SaveTrailer.h" />

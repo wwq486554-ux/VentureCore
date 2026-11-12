@@ -2,6 +2,9 @@
 
 This document describes the platform's INI-facing layer:
 
+* `src/Core/IniRegistry.h` - the 2.0 registry for the platform's own
+  `<Platform>.ini` keys (declaration, validation, [Groups] switches, unknown-key
+  scan, template dump);
 * `src/Core/EngineIni.h` - typed reads over the engine's parsed `rules(md).ini` /
   `art(md).ini`;
 * `src/Core/IniTakeover.h` - the owned-key registry and the takeover purge that
@@ -30,6 +33,85 @@ The middle layer is deliberately coarse: one switch per feature module, not one
 per key.  A module with any number of keys - including none - still has exactly
 one `[Features]` line, and its keys are read by the module (see "One switch per
 feature module, not per key" in `docs/MakeYourOwnPlatform.md`).
+
+## The platform key registry (2.0)
+
+`<Platform>.ini` is both a base configuration file and the place where a feature
+module declares its own keys.  Before 2.0 each module read its keys with a raw
+getter and carried a default in the call; a mis-spelled key or an invalid value
+was invisible.  The registry (`src/Core/IniRegistry.h`) makes the declaration
+explicit:
+
+```cpp
+// Inside FeatureContext, from Initialize() (runs in both switch states):
+bool logEveryUnit = VENTURE_INI_BOOL(context, "MyFeature", "LogEveryUnit", false,
+    "log one line per handled unit");
+int progressEvery = VENTURE_INI_INT(context, "MyFeature", "ProgressEvery", 100, 0, 10000,
+    "log one progress line every N units");
+char mode[32] = {};
+VENTURE_INI_STRING(context, "MyFeature", "Mode", "safe", mode, sizeof(mode),
+    "which strategy to use");
+```
+
+The macros (in `include/platform/Feature.h`) pass `__FILE__` as the registration
+site; the equivalent function-pointer calls take `sourceFile` as the last
+argument.  Every declaration records `section / key / type / default / range /
+description / owning feature / source file` and returns the validated value.
+
+### Registry rules
+
+* **Valid value** - the key is read with the same boolean tokens as before
+  (`yes/no`, `true/false`, `on/off`, `1/0`, whole token, case-insensitive).
+  Integers must be one complete base-10 number (the legacy getter accepted a
+  prefix such as `12abc`; the registry rejects it) inside the declared
+  `[minValue, maxValue]` range (`minValue > maxValue` = no range).
+* **Invalid value** - falls back to the declared default and produces a warning:
+  `key [MyFeature] ProgressEvery: '12abc' is not a valid integer - using the
+  default '100'`.  Invalid values are never silent, and there is no switch to
+  turn the warning off.
+* **Duplicate declaration** - two modules declaring the same `(section, key)`
+  produce a warning naming both and keep the first declaration; a module
+  declaring a base `[Platform]` key is warned that the key is reserved.
+* **Effective values** - each declaration logs one Debug line; the startup block
+  ends with one Info summary: `ini keys: 9 registered, 1 invalid, 2 unknown`.
+* **Missing vs empty** - a missing key keeps the default without a warning; a key
+  present with an empty value is validated like any other token (so an empty
+  bool is invalid).
+
+### Unknown keys at startup
+
+After the feature modules are initialized the base enumerates `<Platform>.ini`
+once and classifies every entry:
+
+| Where | Result |
+| --- | --- |
+| registered key / built-in `[Platform]` key / known `[Groups]` switch | known, no message |
+| unknown `[Features]` name | **Warn** with a suggestion: `unknown feature switch [Features] RaidalIndicator - ignored (did you mean RadialIndicator?)` |
+| unknown key in `[Platform]`, `[Groups]` or a module section | **Warn**: `unknown key [RadialIndicator] LargeRagne - ignored` |
+| a section the platform does not own | Debug only, one line per section: `ignoring user-defined section [User] (...)` |
+
+`[Platform] IniWarnUnknownKeys=no` turns the unknown-**key** warnings off (the
+entries are then Debug-logged instead); invalid values still warn.  The file is
+never rewritten or auto-repaired.
+
+### Feature groups
+
+`FeatureDescriptor::group` (optional trailing field) names a group, and
+`[Groups] <group>=yes|no` (default `yes`) is an explicit master switch for the
+whole group.  A module is enabled when its `[Features]` switch, its group switch
+and its declared host requirements all allow it; the per-module switch is not
+replaced.  The group name is only needed for this gate and for the template
+dump - it does not change the feature API.
+
+### R1 template dump
+
+`[Platform] DumpIniTemplate=yes` (development only) writes
+`<Platform>.ini.generated` next to the log at startup: the registry rendered as
+INI text ([Platform], [Groups], [Features] and one section per module key, with
+type/default/range/description annotations).  Compare it with the shipped
+`VentureCore.ini.example` (or run `python3 scripts/compare_ini_template.py`
+against a generated file) when a key changed.  The dump is the R1 route; the
+build-time manifest route (R2) is deliberately not implemented.
 
 The rest of this document is about the third layer's engine half (typed reads
 over the parsed rules/art INI) and the takeover that keeps our own rules keys
@@ -74,13 +156,15 @@ const bool logUnits = venture::EngineIni::ReadBool(
 here hands the value to the engine's `CCINIClass::ReadBool`, which resolves the
 value from the **first character** of the raw text (`1` / `T` / `Y` → true,
 `0` / `F` / `N` → false, anything else → the supplied default; so `on`/`off` fall
-back to the default).  The platform's own `<Platform>.ini` reader
-(`src/Core/Ini.cpp`) compares the whole token, case-insensitively (`yes`/`no`,
-`true`/`false`, `on`/`off`, `1`/`0`), and its `GetInt` parses the leading decimal
-number and ignores trailing text (`12abc` → 12, no overflow check).  Do not assume
-a spelling accepted by one parser is accepted by the other when documenting a
-key; the full set of `<Platform>.ini` keys is documented in `README.md` and
-`VentureCore.ini.example`.
+back to the default).  The platform's own `<Platform>.ini` registry
+(`src/Core/IniRegistry.cpp`) is stricter: it compares the whole token
+case-insensitively (`yes`/`no`, `true`/`false`, `on`/`off`, `1`/`0`) and rejects
+an invalid value with a warning; a declared integer must be one complete number
+inside its range.  The legacy `Ini::GetInt` still parses a leading decimal number
+and ignores trailing text (`12abc` → 12); do not rely on that - declare the key
+with `VENTURE_INI_INT`.  Do not assume a spelling accepted by one parser is
+accepted by the other when documenting a key; the full set of `<Platform>.ini`
+keys is documented in `README.md` and `VentureCore.ini.example`.
 
 The same functions work for the art INI:
 
@@ -280,6 +364,13 @@ key.
 * `IniTakeover=no` semantics: reads (and observers) still work, nothing is
   purged.
 
+`tests/test_ini_registry.cpp` covers the 2.0 key registry with an in-memory
+"file": bool/int/string reads and defaults, the strict integer parser and the
+range check, invalid values falling back with a warning, duplicate declarations,
+the built-in `[Platform]` keys, `defaultEnabled` and `[Groups]` gates, the
+unknown-key scan (suggestions, known-section keys, Debug-only user sections,
+`IniWarnUnknownKeys=no`) and the R1 template rendering.
+
 The hook boundary itself is verified with `objdump -d -M intel
 --start-address=0x6686C0 --stop-address=0x6686E0 gamemd.exe` (window above), the
 hook table is checked by `scripts/verify_build.py` against
@@ -290,8 +381,11 @@ platform `.syhks00` hook tables used for host compatibility (none uses it).
 
 | Path | Contents |
 | --- | --- |
+| `src/Core/IniRegistry.h` / `.cpp` | 2.0 platform-INI key registry, switches/groups, unknown-key scan, template dump (pure C++, unit-testable) |
+| `src/Core/Ini.h` / `.cpp` | raw `<Platform>.ini` access (getters + entry enumeration for the scan) |
 | `src/Core/EngineIni.h` / `.cpp` | typed reads over a `CCINIClass` |
 | `src/Core/IniTakeover.h` / `.cpp` | owned-key registry, observers, purge, `[Platform] IniTakeover` gating (pure C++, unit-testable) |
 | `src/Engine/Hooks.Ini.cpp` | engine adapter over `CCINIClass` and the `0x6686C0` hook |
 | `src/Features/Example/ExampleIniDemo.cpp` | example module: read + register an owned key |
 | `tests/test_engine_ini.cpp` | unit test of the takeover core |
+| `tests/test_ini_registry.cpp` | unit test of the 2.0 key registry |

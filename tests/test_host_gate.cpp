@@ -1,6 +1,6 @@
 // Unit test: the 2.0 host gate of the feature registry.
 //
-// TEST_DEPS: src/Core/HostRegistry.cpp src/Core/FeatureRegistry.cpp src/Core/Hosts.Builtin.cpp
+// TEST_DEPS: src/Core/HostRegistry.cpp src/Core/FeatureRegistry.cpp src/Core/Hosts.Builtin.cpp src/Core/IniRegistry.cpp
 //
 // Covers both layers of the host model:
 //   * the pure gate rules (requiredHosts AND, anyOfHosts OR, 0 = no constraint)
@@ -18,6 +18,7 @@
 
 #include "Core/FeatureRegistry.h"
 #include "Core/HostRegistry.h"
+#include "Core/IniRegistry.h"
 
 namespace
 {
@@ -67,29 +68,27 @@ void CaptureLog(const char* const format, ...)
 	}
 }
 
-// Fake [Features] switch table: only the keys listed here are "in the INI";
-// every other switch falls back to the default passed by the registry.
-struct SwitchEntry
+// Fake <Platform>.ini raw reader for the INI registry: [Features] SwitchOff is
+// "no", every other key is absent (the provider echoes the sentinel default).
+void FakeIniRawValue(
+	const char* const section,
+	const char* const key,
+	const char* const defaultValue,
+	char* const buffer,
+	const unsigned long bufferSize)
 {
-	const char* key;
-	bool value;
-};
-
-const SwitchEntry kSwitchTable[] = {
-	{ "SwitchOff", false },
-};
-
-bool FakeIniGetBool(const char* const section, const char* const key, const bool defaultValue)
-{
-	if (std::strcmp(section, "Features") != 0)
-		return defaultValue;
-
-	for (const SwitchEntry& entry : kSwitchTable)
+	if (std::strcmp(section, "Features") == 0 && std::strcmp(key, "SwitchOff") == 0)
 	{
-		if (std::strcmp(entry.key, key) == 0)
-			return entry.value;
+		strcpy_s(buffer, static_cast<std::size_t>(bufferSize), "no");
+		return;
 	}
-	return defaultValue;
+	strcpy_s(buffer, static_cast<std::size_t>(bufferSize), defaultValue);
+}
+
+void IniSink(const bool warning, const char* const message)
+{
+	(void)warning;
+	(void)message;
 }
 
 // Injected host probes.
@@ -212,6 +211,11 @@ void TestFeatureGateEndToEnd()
 	venture::RegisterFeature(&kAnyOfKratos);
 	venture::RegisterFeature(&kSwitchOff);
 
+	venture::IniRegistry& ini = venture::IniRegistry::Instance();
+	ini.SetRawReader(&FakeIniRawValue);
+	ini.SetEnumerator(nullptr);
+	ini.SetLogSink(&IniSink);
+
 	venture::FeatureContext context{};
 	context.platformName = "VentureCore";
 	context.iniPath = "Z:\\game\\VentureCore.ini";
@@ -219,7 +223,6 @@ void TestFeatureGateEndToEnd()
 	context.HasHost = &venture::HasHost;
 	context.HasHostBit = &venture::HasHostBit;
 	context.HasHostName = &venture::HasHostName;
-	context.IniGetBool = &FakeIniGetBool;
 	context.IniGetInt = nullptr;
 	context.IniGetString = nullptr;
 	context.Log = &CaptureLog;

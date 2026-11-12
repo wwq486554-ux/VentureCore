@@ -237,6 +237,7 @@ cl_flags=(
     "$(vcs_w "$registration_src")" "$(vcs_w "$probe_src")" \
     "$(vcs_w "$VCS_ROOT/src/Core/HostRegistry.cpp")" \
     "$(vcs_w "$VCS_ROOT/src/Core/Hosts.Builtin.cpp")" \
+    "$(vcs_w "$VCS_ROOT/src/Core/IniRegistry.cpp")" \
     "$(vcs_w "$VCS_ROOT/src/Core/FeatureRegistry.cpp")" \
     "/Fe$(vcs_w "$probe_exe")" /link /SUBSYSTEM:CONSOLE /MACHINE:X86 ) \
   >"$work_dir/build.log" 2>&1 \

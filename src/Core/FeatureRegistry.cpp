@@ -3,6 +3,7 @@
 #include "Core/PlatformConfig.h"
 
 #include "Core/HostRegistry.h"
+#include "Core/IniRegistry.h"
 
 #include <cstring>
 
@@ -37,19 +38,40 @@ void RegisterFeature(const FeatureDescriptor* const descriptor)
 
 void InitializeFeatures(const FeatureContext& context)
 {
+	IniRegistry& ini = IniRegistry::Instance();
+
+	// Publish the [Features] switch set before reading anything: the unknown-key
+	// scan and the R1 template dump both need the complete list.  The switch
+	// values themselves are read through the registry, so an invalid value is
+	// warned about instead of silently falling back.
+	std::vector<IniFeatureSwitch> switches;
+	switches.reserve(Registry().size());
 	for (const FeatureDescriptor* const descriptor : Registry())
 	{
-		const bool switchOn = context.IniGetBool
-			? context.IniGetBool(VC_SECTION_FEATURES, descriptor->iniKey, VC_DEFAULT_FEATURE_ENABLED)
-			: VC_DEFAULT_FEATURE_ENABLED;
+		IniFeatureSwitch featureSwitch{};
+		featureSwitch.iniKey = descriptor->iniKey;
+		featureSwitch.name = descriptor->name;
+		featureSwitch.group = descriptor->group;
+		featureSwitch.defaultEnabled = descriptor->defaultEnabled;
+		switches.push_back(featureSwitch);
+	}
+	ini.SetFeatureSwitches(switches.data(), static_cast<int>(switches.size()));
 
-		// Host gate (2.0, replacing the removed support tier): requiredHosts is
-		// AND, anyOfHosts is OR, and 0 in either field means "no constraint".
-		// The descriptor may only reference compile-time known bits; a host
-		// discovered at run time is queried by name by the feature itself.
+	for (const FeatureDescriptor* const descriptor : Registry())
+	{
+		const bool switchOn = ini.ReadFeatureSwitch(descriptor->iniKey, descriptor->defaultEnabled);
+		const bool groupOn = (descriptor->group && descriptor->group[0] != '\0')
+			? ini.ReadGroupSwitch(descriptor->group)
+			: true;
+
+		// Host gate (2.0, replacing the removed support-level scalar):
+		// requiredHosts is AND, anyOfHosts is OR, and 0 in either field means
+		// "no constraint".  The descriptor may only reference compile-time known
+		// bits; a host discovered at run time is queried by name by the feature
+		// itself.
 		const bool requiredOk = RequiredHostsPresent(context.hostMask, descriptor->requiredHosts);
 		const bool anyOfOk = AnyOfHostsPresent(context.hostMask, descriptor->anyOfHosts);
-		const bool enabled = switchOn && requiredOk && anyOfOk;
+		const bool enabled = switchOn && groupOn && requiredOk && anyOfOk;
 
 		*descriptor->enabled = enabled;
 
@@ -68,6 +90,11 @@ void InitializeFeatures(const FeatureContext& context)
 				context.Log("[Features] %s (%s): disabled by %s [%s] %s",
 					descriptor->id, descriptor->name, VC_PLATFORM_INI_NAME, VC_SECTION_FEATURES, descriptor->iniKey);
 			}
+			else if (!groupOn)
+			{
+				context.Log("[Features] %s (%s): disabled by %s [%s] %s",
+					descriptor->id, descriptor->name, VC_PLATFORM_INI_NAME, VC_SECTION_GROUPS, descriptor->group);
+			}
 			else if (!requiredOk)
 			{
 				const unsigned missing = descriptor->requiredHosts & ~context.hostMask;
@@ -85,7 +112,11 @@ void InitializeFeatures(const FeatureContext& context)
 			}
 		}
 
+		// Tag every key the module registers during Initialize() with its id, so
+		// duplicate/invalid diagnostics can name the owner.
+		ini.BeginFeature(descriptor->id);
 		descriptor->Initialize(context);
+		ini.EndFeature();
 	}
 }
 

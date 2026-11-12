@@ -121,15 +121,24 @@ Checklist for a version bump:
 
 * A feature's INI switch lives under `[Features]`, keyed by its
   `FeatureDescriptor.iniKey`; its internal id is not the switch key.
-* New switches default to **on** (`VC_DEFAULT_FEATURE_ENABLED`), so a platform
-  keeps working when a user drops in a new DLL without editing the INI.
-* Do not rename an existing `iniKey` without a migration note in
+* Switches default to **on** unless the descriptor declares
+  `defaultEnabled = false`; an explicit user value wins.  The optional
+  `descriptor.group` adds a `[Groups] <group>=yes|no` master switch (default on).
+* A module's own `<Platform>.ini` keys are declared at the read site with
+  `FeatureContext::IniBool` / `IniInt` / `IniString` (or the `VENTURE_INI_*`
+  macros).  The registry validates them and logs effective values; do not add new
+  reads through the legacy `IniGet*` getters (they bypass the registry, so an
+  invalid value or unknown key stays invisible).
+* Do not rename an existing `iniKey` or feature key without a migration note in
   `CHANGELOG.md`: old user INIs would silently fall back to the default.
-* `[Platform]` currently has five keys (see `README.md` / `VentureCore.ini.example`):
-  `LogLevel`, the legacy `VerboseLogging` alias, `DebugOutput`, `LineagePolicy`
-  and `IniTakeover`.
+* `[Platform]` currently has seven keys (see `README.md` /
+  `VentureCore.ini.example`): `LogLevel`, the legacy `VerboseLogging` alias,
+  `DebugOutput`, `LineagePolicy`, `IniTakeover`, `IniWarnUnknownKeys` and
+  `DumpIniTemplate`.
 * Keep `VentureCore.ini.example` and `docs/MakeYourOwnPlatform.md` in sync with
-  any schema change.
+  any schema change.  After a run with `[Platform] DumpIniTemplate=yes`,
+  `scripts/compare_ini_template.py <generated> VentureCore.ini.example` reports
+  keys that exist in only one of the two files.
 
 ## 5. Updating host detection
 

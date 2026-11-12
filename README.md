@@ -40,10 +40,12 @@ named with it (an in-game run is still the only end-to-end check - see
   line dropped.  `tests/test_logging.cpp` covers the file I/O and
   `scripts/verify_build.py`'s source check covers where the debugger API may be
   called; neither is a game run (see `docs/Logging.md`).
-* **INI layer** - typed getters over `<Platform>.ini`, typed reads over the
-  engine-parsed `rules(md).ini` / `art(md).ini`, and a **rules-INI takeover**: when
-  a feature switch is on, the platform-owned keys are removed from the parsed
-  rules INI so a host platform loaded next to us (Phobos) cannot read them too
+* **INI layer** - a declarative key registry for `<Platform>.ini` (2.0): a
+  module declares each key where it reads it, the base validates the value,
+  warns about invalid values and unknown keys, exposes `[Groups]` master
+  switches and can dump the registry as a template; plus typed reads over the
+  engine-parsed `rules(md).ini` / `art(md).ini` and a **rules-INI takeover** that
+  hides the platform-owned keys from a host platform loaded next to us (Phobos)
   (see `docs/Ini.md`).
 * **Host detection (2.0 model)** - the optional hosts built into the base (Ares,
   Phobos, Kratos) are detected by loaded module and logged as a **set**; a
@@ -227,6 +229,13 @@ the `requiredHosts` gate track the module being loaded and unloaded.  The built-
 hosts and the declaration matrix are covered by `tests/test_host_registry.cpp`
 and `tests/test_host_gate.cpp`.
 
+The 2.0 INI key registry is covered by `tests/test_ini_registry.cpp` (defaults,
+strict integer parsing and ranges, invalid-value warnings, duplicate keys,
+`defaultEnabled`/`[Groups]` gates, the unknown-key scan and the template
+rendering).  After a run with `[Platform] DumpIniTemplate=yes`,
+`scripts/compare_ini_template.py <generated file> VentureCore.ini.example` checks
+that the shipped example still lists exactly the registered keys.
+
 The real test - launching the game with SyringeEx and the DLL installed - must be
 done by a human.  See `docs/HookCatalogue.md` for what each hook does and
 `docs/HostMatrix.md` for the host combinations.
@@ -238,8 +247,8 @@ done by a human.  See `docs/HookCatalogue.md` for what each hook does and
 3. Optionally copy `VentureCore.ini.example` to `VentureCore.ini` and edit it.
 4. Start the game.  `<Platform>.log` appears next to `rules.ini` and records the
    startup sequence: process header, platform/version, git revision, YRpp pin, INI
-   status, log level, hosts, lineage, feature switches, registered
-   commands and event types, then `startup complete`.
+   status, log level, hosts, lineage, feature switches, the `ini keys:` summary,
+   registered commands and event types, then `startup complete`.
 
 Upgrading from `0.4.0-experimental` is a drop-in replacement: 1.0.0 contains no
 hook, savegame, event, command or INI changes (only the version string and the
@@ -253,7 +262,8 @@ which a normal exit flushes, and only a power loss / blue screen can drop it.
 
 ## Configuration
 
-`VentureCore.ini` (next to `rules.ini`) has two sections:
+`VentureCore.ini` (next to `rules.ini`) has three sections the base itself
+reads (a feature module may add its own sections):
 
 * `[Platform]` - platform-wide options:
   * `LogLevel=error|warn|info|debug` (default `info`); the legacy
@@ -263,26 +273,37 @@ which a normal exit flushes, and only a power loss / blue screen can drop it.
   * `LineagePolicy=refuse|warn` (default `refuse`: a second DLL of the same
     lineage is detected and the later one stays disabled; `warn` only logs);
   * `IniTakeover=yes|no` (default `yes`: hide platform-owned `rules(md).ini` keys
-    from other platforms loaded next to us).
+    from other platforms loaded next to us);
+  * `IniWarnUnknownKeys=yes|no` (default `yes`: warn about unknown
+    `[Platform]`/`[Groups]`/feature keys and unknown `[Features]` switches at
+    startup; `no` downgrades them to Debug lines);
+  * `DumpIniTemplate=yes|no` (default `no`, development only: write
+    `<Platform>.ini.generated` next to the log from the key registry, for
+    comparing it with `VentureCore.ini.example`).
+* `[Groups]` - optional `yes|no` master switch per feature group (a group is
+  declared by `FeatureDescriptor::group`; default `yes`).  A group switch
+  disables every module of the group but does not replace the per-module switch.
 * `[Features]` - **one switch per feature module**, keyed by the module's
-  `FeatureDescriptor.iniKey`, value `yes`/`no`; features default to on.  The
-  internal feature id is not the switch key, and the module's own keys are not
-  `[Features]` entries (they live in the module's own section or in
-  `rules(md).ini`, and the module reads them itself).  A module that adds no
-  keys - a pure vanilla behaviour change - still has its switch.  A feature
-  that declares host requirements (`requiredHosts` all-of and/or `anyOfHosts`
-  any-of, `include/platform/HostIds.h`) is disabled when the detected host set
-  does not satisfy them; the startup log names the missing host(s).
+  `FeatureDescriptor.iniKey`, value `yes`/`no`; features default to on unless the
+  descriptor declares `defaultEnabled = false`.  The internal feature id is not
+  the switch key, and the module's own keys are not `[Features]` entries (they
+  live in the module's own section or in `rules(md).ini`, and the module
+  declares/reads them itself - see `docs/Ini.md`).  A module that adds no keys -
+  a pure vanilla behaviour change - still has its switch.  A feature that
+  declares host requirements (`requiredHosts` all-of and/or `anyOfHosts` any-of,
+  `include/platform/HostIds.h`) is disabled when the detected host set does not
+  satisfy them; the startup log names the missing host(s).
 
-Booleans accept `yes/no`, `true/false`, `on/off` and `1/0`.  See
-`VentureCore.ini.example`.
+Booleans accept `yes/no`, `true/false`, `on/off` and `1/0` (whole token,
+case-insensitive).  Invalid values fall back to the declared default and are
+reported.  See `VentureCore.ini.example` and `docs/Ini.md`.
 
 ## Repository layout
 
 | Path | Contents |
 | --- | --- |
 | `include/platform/` | public source-level API: `Feature.h`, `HostIds.h`, `Lineage.h` |
-| `src/Core/` | identity/version, log, INI, rules-INI takeover, host detection, lineage scan, feature registry, save trailer, startup |
+| `src/Core/` | identity/version, log, INI + key registry, rules-INI takeover, host registry, lineage scan, feature registry, save trailer, startup |
 | `src/Engine/` | engine ABI assertions and the base hooks (lifecycle, INI, savegame) |
 | `src/Ext/` | extension storage (`AbstractExt`, `ExtHierarchy`, `ExtensionStore`, `ExtensionIndex`, savegame streams) |
 | `src/Event/` | the platform event channel |
@@ -306,7 +327,7 @@ Booleans accept `yes/no`, `true/false`, `on/off` and `1/0`.  See
 | `docs/HookCatalogue.md` | every installed hook: address, window size, purpose |
 | `docs/HostMatrix.md` | optional hosts, detection, `requiredHosts`/`anyOfHosts` declarations, custom hosts, mixed-client constraints |
 | `docs/SaveFormat.md` | the savegame frame: stream layout, payload, load sequence |
-| `docs/Ini.md` | rules/art INI reads and the rules-INI takeover |
+| `docs/Ini.md` | the 2.0 `<Platform>.ini` key registry (declaration/validation/unknown keys/groups/template dump), rules/art INI reads and the rules-INI takeover |
 | `docs/EventChannel.md` | event type range, payload format, responders, mixed-client risk |
 | `docs/Commands.md` | registering player commands and binding hotkeys |
 | `docs/Lineage.md` | the lineage marker and the mutual-exclusion check |

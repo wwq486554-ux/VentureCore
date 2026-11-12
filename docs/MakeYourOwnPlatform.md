@@ -153,6 +153,8 @@ const FeatureDescriptor kDescriptor{
     0,                  // anyOfHosts (OR): no host dependency
     &g_enabled,         // the base writes the resolved switch here
     &Initialize,        // called from Startup(), on or off
+    nullptr,            // group: optional [Groups] master switch (default: none)
+    true,               // defaultEnabled: optional [Features] default (default: true)
 };
 }
 
@@ -207,12 +209,12 @@ list of the module's keys and it does not grow with them:
   what makes an A/B test or a bug report reproducible;
 * the module's own keys are not in `[Features]`.  They live in the module's own
   section of `<Platform>.ini` (for example `[MyFeature]`) or in
-  `rules(md).ini` / `art(md).ini`, and the **module** reads and defaults them:
-  `FeatureContext::IniGetBool/IniGetInt/IniGetString` for `<Platform>.ini`,
-  `Core/EngineIni.h` for the engine-parsed INI.  The base does not enumerate,
-  default or gate them, so a mis-spelled key or an invalid value silently falls
-  back to the default the module passed in (there is no unknown-key warning
-  yet).
+  `rules(md).ini` / `art(md).ini`.  In `<Platform>.ini` the module declares them
+  at the read site with the 2.0 INI registry (next subsection); for the
+  engine-parsed INI use `Core/EngineIni.h`.  A declared key gets its value
+  validated and logged, and a mis-spelled key is reported by the startup
+  unknown-key scan; an undeclared read through the legacy getters is invisible
+  to both.
 
 `[Features]` exists to give the user one uniform kill switch per feature system,
 with the same spelling and the same log line for every module.  If a
@@ -220,10 +222,52 @@ sub-behaviour needs its own visible switch, make it a separate feature module
 with its own descriptor and `[Features]` key - do not expect the base to
 discover keys by itself.
 
-Every `[Features]` switch defaults to **on** (`VC_DEFAULT_FEATURE_ENABLED`);
-there is no per-feature default.  A feature that should be off unless the user
-opts in reads its own key with an explicit `false` default (or uses its own key
-instead of the `[Features]` switch).
+A `[Features]` switch defaults to **on** unless the descriptor sets the optional
+trailing field `defaultEnabled = false`; an explicit `[Features] <iniKey>=yes|no`
+always wins.  The optional `group` field names a feature group whose
+`[Groups] <group>=yes|no` master switch disables every module of the group (the
+per-module switch still exists; the group is an extra, explicit gate).
+
+### Declaring keys: the INI registry (2.0)
+
+Declare each `<Platform>.ini` key where the module reads it.  The base reads,
+validates, records and logs it, and returns the effective value:
+
+```cpp
+#include <platform/Feature.h>
+
+bool g_logEveryUnit = false;
+int g_progressEvery = 100;
+
+void Initialize(const venture::FeatureContext& context)
+{
+    // Read the key regardless of `g_enabled` (Initialize runs in both switch
+    // states) - the declaration is what makes the key known to the base.
+    g_logEveryUnit = VENTURE_INI_BOOL(context, "MyFeature", "LogEveryUnit", false,
+        "log one line per handled unit");
+    g_progressEvery = VENTURE_INI_INT(context, "MyFeature", "ProgressEvery", 100, 0, 10000,
+        "log one progress line every N units (0 = every unit)");
+}
+```
+
+* an invalid bool / non-integer / out-of-range integer falls back to the
+  declared default and produces a **warning** (never silently);
+* a duplicate `(section, key)` declaration by two modules warns and keeps the
+  first declaration;
+* every effective value is logged at Debug level, and the startup block ends
+  with `ini keys: N registered, M invalid, K unknown`;
+* an unknown `[Platform]`/`[Groups]` key, an unknown key in a module section and
+  an unknown `[Features]` switch produce a warning (with a "did you mean ...?"
+  suggestion for switches); `[Platform] IniWarnUnknownKeys=no` turns the
+  unknown-key warnings off.  User-defined sections are only Debug-logged;
+* `[Platform] DumpIniTemplate=yes` (development only) writes
+  `<Platform>.ini.generated` next to the log from the registry, for comparing a
+  shipped `.ini.example` with what the code really reads;
+* the legacy `FeatureContext::IniGetBool/IniGetInt/IniGetString` functions still
+  exist for existing modules but bypass all of the above - do not use them in
+  new code.
+
+See `docs/Ini.md` for the full contract.
 
 A feature that **only changes vanilla behaviour** is an ordinary feature: no new
 keys, no new extension, just hooks that alter what the engine does.  Declare the

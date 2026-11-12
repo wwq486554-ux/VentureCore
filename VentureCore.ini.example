@@ -8,8 +8,10 @@
 ;
 ; Format: standard Windows INI (the game's GetPrivateProfileString semantics).
 ; Section and key names are case-insensitive.  Booleans accept
-; yes/no, true/false, on/off and 1/0.  An unreadable value falls back to the
-; default.
+; yes/no, true/false, on/off and 1/0 (case-insensitive, whole token).  A value
+; that cannot be parsed falls back to the declared default and is reported as a
+; warning in the log; unknown keys are reported at startup too (see
+; IniWarnUnknownKeys below and docs/Ini.md).
 ;
 ; The platform is a starter base: this base contains no gameplay features, so
 ; turning switches on or off does not change the game yet.  The [Features]
@@ -54,6 +56,26 @@ LineagePolicy=refuse
 ; affected.  See docs/Ini.md.
 IniTakeover=yes
 
+; IniWarnUnknownKeys: yes (default) warns about unknown keys in [Platform],
+; [Groups] and feature sections, and about unknown [Features] switches (with a
+; "did you mean ...?" suggestion).  no downgrades those lines to debug.  Keys of
+; user-defined/third-party sections are only logged at debug level either way.
+IniWarnUnknownKeys=yes
+
+; DumpIniTemplate: development aid, default no.  yes writes
+; VentureCore.ini.generated next to the log at startup: the key registry as an
+; INI file (with type/default/range/description comments), for comparing this
+; example with what the code really reads.  Not needed by players.
+DumpIniTemplate=no
+
+[Groups]
+; Optional master switch per feature group: <group>=yes|no, default yes.  A
+; group is declared by FeatureDescriptor::group; no disables every module of the
+; group (the per-module [Features] switch still exists).  The base declares no
+; group, so this section is normally empty; a derived platform adds its groups
+; here.  Example:
+; Combat=yes
+
 [Features]
 ; One switch per feature MODULE (one FeatureDescriptor, one directory under
 ; src/Features/), not one per key: a module with any number of keys - or with
@@ -62,10 +84,14 @@ IniTakeover=yes
 ; internal FeatureDescriptor.id is not the switch key; it is used for logs and
 ; lookup.)  The module's own keys do not belong in this section: put them in the
 ; module's own section (see the Example modules below) or in rules(md).ini; the
-; module reads them itself.  A feature that declares host requirements
-; (FeatureDescriptor::requiredHosts / anyOfHosts) is additionally gated by the
-; detected host set: every required host must be present, and at least one any-of
-; host when that list is not empty (see docs/HostMatrix.md).
+; module declares and reads them itself with the INI key registry (see
+; docs/Ini.md); the base validates them and warns about invalid values and
+; unknown keys.  A switch is on by default; a module can set the optional
+; descriptor field defaultEnabled=false to be off unless opted in.  A feature
+; that declares host requirements (FeatureDescriptor::requiredHosts / anyOfHosts)
+; is additionally gated by the detected host set: every required host must be
+; present, and at least one any-of host when that list is not empty (see
+; docs/HostMatrix.md).
 
 ; Example module (id: example_unit_counter): counts UnitClass create/destroy
 ; transitions, logs one INFO progress line every 100 units (per-unit transitions
@@ -80,3 +106,19 @@ Example=yes
 ; rules(md).ini and registers the pair as owned, to demonstrate the rules/art INI
 ; read API and the takeover.  It has no gameplay effect.  See docs/Ini.md.
 ExampleIniKey=yes
+
+; ---------------------------------------------------------------------------
+; Module-owned keys
+; ---------------------------------------------------------------------------
+; If a feature module has its own <Platform>.ini keys they live in the module's
+; own section - NOT in [Features].  A declared key looks like:
+;
+; [MyFeature]
+; ; description, type, default and range are taken from the declaration
+; LogEveryUnit=no
+; ProgressEvery=100
+;
+; The module declares each key at its read site with VENTURE_INI_BOOL /
+; VENTURE_INI_INT / VENTURE_INI_STRING (platform/Feature.h); the base validates
+; the value, logs the effective value, feeds the unknown-key scan and includes
+; the key in the DumpIniTemplate output.  The base ships no such keys.

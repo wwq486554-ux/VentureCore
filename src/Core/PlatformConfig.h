@@ -31,9 +31,12 @@
 // INI sections.
 #define VC_SECTION_PLATFORM "Platform"
 #define VC_SECTION_FEATURES "Features"
+#define VC_SECTION_GROUPS "Groups"
 
-// Feature switches default to on: the platform is meant to be usable by
-// dropping the DLL in and changing nothing else.
+// Historical name of the "feature switches are on by default" policy.  The
+// effective default is FeatureDescriptor::defaultEnabled (on unless a module
+// overrides it); see include/platform/Feature.h.  Kept so existing derived
+// platforms that reference the policy name keep compiling.
 #define VC_DEFAULT_FEATURE_ENABLED true
 
 // Directory of the running gamemd.exe is detected at run time; the INI and the

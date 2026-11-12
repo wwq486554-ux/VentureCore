@@ -18,6 +18,26 @@ first stable release** and the stable contracts are listed in `README.md`.
   name or display name is rejected at load time and reported once in the startup
   log.  `scripts/linux/probe_hosts.sh` exercises the whole path under Wine (stub
   host module + generated source-level registration + detection + gate log).
+- `<Platform>.ini` key registry (2.0): a module declares each key at its read
+  site with `FeatureContext::IniBool` / `IniInt` / `IniString` (or the
+  `VENTURE_INI_*` macros) and the base validates it.  An invalid bool, a
+  non-integer or an out-of-range integer falls back to the declared default with
+  a warning; a duplicate `(section, key)` declaration warns and keeps the first;
+  every effective value is logged (Debug) and the startup block ends with
+  `ini keys: N registered, M invalid, K unknown`.
+- startup unknown-key scan: an unknown `[Features]` switch warns with a "did you
+  mean ...?" suggestion, an unknown `[Platform]`/`[Groups]`/feature key warns, a
+  user-defined section is Debug-logged only; `[Platform] IniWarnUnknownKeys=no`
+  downgrades the warnings to Debug.  The scan never rewrites the file.
+- `FeatureDescriptor::defaultEnabled` (optional trailing field) lets a module be
+  off unless the user opts in; `FeatureDescriptor::group` plus
+  `[Groups] <group>=yes|no` adds an explicit per-group master switch.
+- `[Platform] DumpIniTemplate=yes` (development only) renders the registry as
+  `<Platform>.ini.generated` next to the log (R1 route), and the new
+  `scripts/compare_ini_template.py` diffs such a template against
+  `VentureCore.ini.example` so the shipped example and the code cannot drift
+  silently.  The legacy `IniGetBool/IniGetInt/IniGetString` getters are kept for
+  existing modules but bypass the registry (docs mark them legacy).
 
 ### Changed (breaking - 2.0 feature API)
 

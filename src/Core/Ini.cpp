@@ -110,4 +110,49 @@ void Ini::GetString(
 
 	GetPrivateProfileStringA(section, key, defaultValue ? defaultValue : "", buffer, bufferSize, g_iniPath);
 }
+
+void Ini::EnumerateEntries(
+	void (*visitor)(const char* section, const char* key, void* userData),
+	void* const userData)
+{
+	if (!visitor || g_iniPath[0] == '\0' || !Exists())
+		return;
+
+	char sectionNames[16384] = {};
+	const DWORD sectionBytes = GetPrivateProfileSectionNamesA(
+		sectionNames, static_cast<DWORD>(sizeof(sectionNames)), g_iniPath);
+	if (sectionBytes == 0)
+		return;
+
+	for (const char* section = sectionNames; *section != '\0'; section += std::strlen(section) + 1)
+	{
+		char entries[32768] = {};
+		const DWORD entryBytes = GetPrivateProfileSectionA(
+			section, entries, static_cast<DWORD>(sizeof(entries)), g_iniPath);
+		if (entryBytes == 0)
+			continue;
+
+		for (const char* entry = entries; *entry != '\0'; entry += std::strlen(entry) + 1)
+		{
+			const char* const equals = std::strchr(entry, '=');
+			const char* const keyEnd = equals ? equals : entry + std::strlen(entry);
+
+			// Trim the key; the registry compares trimmed keys case-insensitively.
+			const char* keyBegin = entry;
+			while (keyBegin < keyEnd && (*keyBegin == ' ' || *keyBegin == '\t'))
+				++keyBegin;
+			const char* trimmedEnd = keyEnd;
+			while (trimmedEnd > keyBegin && (trimmedEnd[-1] == ' ' || trimmedEnd[-1] == '\t'))
+				--trimmedEnd;
+
+			char key[256] = {};
+			const std::size_t keyLength = static_cast<std::size_t>(trimmedEnd - keyBegin);
+			if (keyLength == 0 || keyLength >= sizeof(key))
+				continue;
+			std::memcpy(key, keyBegin, keyLength);
+			key[keyLength] = '\0';
+			visitor(section, key, userData);
+		}
+	}
+}
 }

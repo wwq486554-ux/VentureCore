@@ -3,6 +3,7 @@
 
 #include "Core/EngineIni.h"
 #include "Core/Ini.h"
+#include "Core/IniRegistry.h"
 #include "Core/IniTakeover.h"
 #include "Core/Log.h"
 #include "Core/Platform.h"
@@ -178,7 +179,9 @@ void ResolveTakeoverSwitch()
 
 	g_takeoverSwitchResolved = true;
 
-	const bool enabled = venture::Ini::GetBool(VC_SECTION_PLATFORM, "IniTakeover", true);
+	const bool enabled = venture::IniRegistry::Instance().ReadBaseBool(
+		VC_SECTION_PLATFORM, "IniTakeover", true,
+		"hide platform-owned rules(md).ini keys from host platforms loaded next to us");
 	venture::IniTakeover::SetEnabled(enabled);
 	venture::Log::Info(
 		"[IniTakeover] [%s] IniTakeover=%s (%zu owned key(s) registered, %zu refused by the deny-list)",
