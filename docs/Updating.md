@@ -96,10 +96,10 @@ Version metadata lives in `src/Core/PlatformVersion.h`:
 * `VC_VERSION_MAJOR`, `VC_VERSION_MINOR`, `VC_VERSION_REVISION`,
   `VC_VERSION_PATCH`,
 * `VC_PRERELEASE_SUFFIX` - a non-stable suffix (`"experimental"`, `"alpha"`, ...);
-  **commented out for a stable release** (as in 1.0.0: the display has no suffix and
+  **commented out for a stable release** (as in 2.0.0: the display has no suffix and
   the version resource does not set `VS_FF_PRERELEASE`).
 
-Everything else is derived: the log banner (`v1.0.0.0`), the version
+Everything else is derived: the log banner (`v2.0.0.0`), the version
 resource strings, the build-type string (`LOCAL` / `NIGHTLY` / `RELEASE`, set by
 `--build-type`).  Do not edit the generated strings by hand.
 
@@ -110,7 +110,7 @@ Checklist for a version bump:
 2. Add a `CHANGELOG.md` section for the new version, dated.
 3. Rebuild with `--build-type RELEASE` for a release artefact and run
    `python3 scripts/verify_build.py` (it expects the `VERSION_STRINGS` at the top
-   of that file - currently `1.0.0.0` / `1.0.0`; update them in the
+   of that file - currently `2.0.0.0` / `2.0.0`; update them in the
    same change as the version bump).
 4. Run `scripts/linux/load_probe.sh`.
 5. Verify the version resource of the produced DLL, e.g.
@@ -193,7 +193,7 @@ Every layer has automated checks on this machine (named in `README.md` and the
 per-layer document), but those checks load the DLL or drive engine-free code;
 they do not replace an in-game run.
 
-**T1-T3 host-specific features, Phobos interop and AE are not part of the base.**
+**Host-specific feature packages, Phobos interop and AE are not part of the base.**
 If any of them is added, this document must gain the sections it needs first
 (host-specific hook selection and AE handling in particular) before a release
 ships it.
@@ -206,3 +206,46 @@ Adding, removing or reordering a saveable store is also a format change because
 the payload signature covers the store set.  The frame format version
 (`src/Core/SaveTrailer.h`) and the payload version (`src/Ext/ExtSave.h`) change
 only when the on-stream layout itself changes.
+
+
+## 8. Migrating a 1.x platform to 2.0
+
+2.0 is a **breaking** base release: the host model and the platform INI layer
+changed, so a derived platform must be updated and everything recompiled against
+the new `include/platform/` headers.  Contracts that did **not** change: the
+savegame frame/payload, the event channel, the command registry and the hook
+table; a 1.x save keeps loading and its extension state is preserved.
+
+1. **Feature API** - remove the old host support-level field and the per-feature
+   minimum level from the descriptor/context (the `[2.0.0]` changelog entry
+   names the removed API).  Set `requiredHosts` (AND) and `anyOfHosts` (OR)
+   instead; `0, 0` means "no host dependency".  Use `FeatureContext::HasHost` /
+   `HasHostBit` / `HasHostName` for run-time checks.
+2. **Descriptor defaults/groups** - the optional trailing fields `group` and
+   `defaultEnabled` may be omitted.  A module that should be off unless the user
+   opts in sets `defaultEnabled = false`; a group master switch is
+   `[Groups] <group>=yes|no` in `<Platform>.ini`.
+3. **Host registration** - the built-in table now lives in
+   `src/Core/Hosts.Builtin.cpp` with the public bits in
+   `include/platform/HostIds.h`.  A private host is registered in
+   `src/Core/Hosts.Custom.cpp` with `VENTURE_REGISTER_HOST` and an explicit bit
+   `>= 1u<<3`, or an independent platform exports the `VentureHost_GetInfo`
+   marker (`include/platform/HostMarker.h`) and is discovered at startup on the
+   lowest free custom bit.
+4. **Platform INI reads** - replace `IniGetBool/IniGetInt/IniGetString` with
+   `IniBool/IniInt/IniString` (or the `VENTURE_INI_*` macros) and pass the
+   description/default/range.  The base then validates the value, warns about
+   invalid values and unknown keys, and includes the key in the
+   `DumpIniTemplate` output.  The legacy getters still compile but bypass the
+   registry.
+5. **New `[Platform]` keys** are optional: `IniWarnUnknownKeys` and
+   `DumpIniTemplate`.  Existing user INIs keep working; a mis-spelled key now
+   produces a startup warning (that is the point of the registry).
+6. **Removed closed-source host** - remove any dependency on its bit or module;
+   the base no longer detects it.
+7. **Recompile everything** - the `FeatureDescriptor` / `FeatureContext` layouts
+   changed, so a stale object file is an ABI mismatch rather than a warning.
+8. **Re-run the checklist**: `--clean` build, `python3 scripts/verify_build.py`,
+   `scripts/linux/run_tests.sh`, `scripts/linux/load_probe.sh`,
+   `scripts/linux/probe_hosts.sh`, then the in-game smoke test from your own
+   documentation.

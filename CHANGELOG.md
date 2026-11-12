@@ -7,7 +7,18 @@ The project uses semantic versioning.  The pre-1.0 samples carried an
 `-experimental` suffix in the DLL version resource; **`1.0.0` (2026-11-11) is the
 first stable release** and the stable contracts are listed in `README.md`.
 
-## [Unreleased]
+## [2.0.0] - 2026-11-12
+
+**Breaking host-model release, plus the INI key registry and the host marker
+protocol.**  The feature API in `include/platform/` changed: the host
+support-level scalar is removed and replaced by per-feature
+`requiredHosts`/`anyOfHosts` declarations plus `HasHost`/`HasHostBit`/
+`HasHostName`.  `<Platform>.ini` became a declarative key registry (validation,
+unknown-key scan, `[Groups]`, template dump), and an independent platform can
+now be detected through the `VentureHost_GetInfo` marker without editing the
+base.  The savegame frame/payload, event channel, command registry and hook
+table are unchanged - a 1.x save keeps loading and its extension state is
+preserved.  See `docs/Updating.md` for the migration checklist.
 
 ### Added
 

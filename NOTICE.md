@@ -69,8 +69,8 @@ not part of the base.
 
 ## No Phobos code
 
-All source code in this repository was written for VentureCore.  v1.0.0 contains
-no Phobos source code and does not call Phobos extensions.
+All source code in this repository was written for VentureCore.  The base
+contains no Phobos source code and does not call Phobos extensions.
 
 ## Game and trademarks
 

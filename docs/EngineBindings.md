@@ -436,14 +436,14 @@ the level semantics, the measured cost and the hot-path rules.  The binding side
    instructions and `address + size` must be the next instruction.
 5. When the YRpp pin changes, follow `docs/Updating.md`.
 
-## Limits in v1.0.0
+## Limits in 2.0.0
 
 * The savegame trailer persists extension state (see `docs/SaveFormat.md`); it is
   not a general savegame fork - the engine's own object format is untouched.
 * Event channel and command registration are implemented; their protocol (event
   numbers/payload sizes, command names) is a same-build contract (see
   `docs/HostMatrix.md` and `docs/Commands.md`).
-* No host-specific (T1-T3) bindings, no Phobos interop, no AE.
+* No host-specific feature packages, no Phobos interop, no AE.
 * The lineage marker detects this platform's own lineage only (same magic); a
   DLL loaded after startup is not detected (see `docs/Lineage.md`).
 * No runtime plugin ABI: features are compiled into the single platform DLL.

@@ -11,14 +11,17 @@ scripts).
 
 It is a template, not a mod: it deliberately contains **no gameplay features**.
 
-> **Status: v1.0.0 (stable, 2026-11-11)** - a feature-complete starter base plus two
-> Example modules.  The base machinery (startup, logging, config, extension
-> storage with savegame persistence, event channel, command registration, lineage
-> detection, host detection, the YRpp binding gate and the verification tooling)
-> is implemented, in-game verified, and was hardened by an independent blind
-> review before this release: every blocking and recommended finding was fixed
-> (`CHANGELOG.md`).  The automated checks for each layer are named in this README
-> and in `docs/`; they do not replace an in-game check.
+> **Status: v2.0.0 (stable, 2026-11-12)** - a feature-complete starter base plus
+> two Example modules.  The base machinery (startup, logging, config, the INI key
+> registry, extension storage with savegame persistence, event channel, command
+> registration, lineage detection, the host registry + self-identifying host
+> marker, the YRpp binding gate and the verification tooling) is implemented,
+> in-game verified, and the 1.x line was hardened by an independent blind review
+> (`CHANGELOG.md`).  2.0 changes the host model and the INI layer and keeps the
+> same verification suite (13 engine-free tests, 9 static checks, two Wine
+> probes); its delta still needs the independent review pass planned in the
+> roadmap.  The automated checks for each layer are named in this README and in
+> `docs/`; they do not replace an in-game check.
 
 ## What this base provides
 
@@ -112,19 +115,23 @@ named with it (an in-game run is still the only end-to-end check - see
 
 ## Stability and versioning
 
-`v1.0.0` is the first stable release of the base.  Within 1.x the following are
+`v2.0.0` is the current stable release of the base.  Within 2.x the following are
 **stable contracts** (changing one requires a major release or a documented
 migration):
 
-* the source-level feature API in `include/platform/` (`FeatureDescriptor`,
-  `FeatureContext`, `VENTURE_REGISTER_FEATURE`, and the lineage marker ABI);
+* the source-level feature API in `include/platform/` (`FeatureDescriptor` with
+  `requiredHosts`/`anyOfHosts`/`group`/`defaultEnabled`, `FeatureContext` with
+  the `HasHost*`/`Ini*` readers, `VENTURE_REGISTER_FEATURE`, `VENTURE_INI_*`),
+  the public host bits (`HostIds.h`), the host marker ABI (`HostMarker.h`) and
+  the lineage marker ABI;
 * the savegame frame layout `[magic][formatVersion=2][size][crc32][payload]` and
   the payload's store-set signature (bumping one store's `dataVersion` is a
   *store* change, not a base change);
 * the event type range `0x70-0x7F` and the event record layout (this is a
   same-build contract - every peer must run a build that agrees with it);
 * the hook table in `docs/HookCatalogue.md` for the supported `gamemd.exe` build;
-* the `<Platform>.ini` keys documented below.
+* the `<Platform>.ini` keys documented below, including the key-registry
+  behaviour (validation warnings, the startup unknown-key scan, `[Groups]`).
 
 Changing a contract above requires a major release or a documented migration.
 
@@ -201,7 +208,7 @@ python3 scripts/linux/check_eol.py      # line endings vs .gitattributes
 scripts/linux/abi_probe.sh              # optional: engine ABI sizes pinned by EngineCompat.h
 ```
 
-The v1.0.0 source passes these checks.  `scripts/linux/bench_store.sh` runs the
+The v2.0.0 source passes these checks.  `scripts/linux/bench_store.sh` runs the
 extension-store microbenchmark and `scripts/linux/test_fetch_yrpp.sh` /
 `scripts/linux/verify_incremental.sh` cover the tooling.  A rebuilt DLL is not
 byte-identical to a released one (embedded timestamp / debug path), so the
@@ -254,10 +261,12 @@ done by a human.  See `docs/HookCatalogue.md` for what each hook does and
    status, log level, hosts, lineage, feature switches, the `ini keys:` summary,
    registered commands and event types, then `startup complete`.
 
-Upgrading from `0.4.0-experimental` is a drop-in replacement: 1.0.0 contains no
-hook, savegame, event, command or INI changes (only the version string and the
-documentation were finalised).  Saves written by 0.3.0+ keep their extension
-state.
+Upgrading from a 1.x build: 2.0 changes the feature API and the host model, but
+the savegame frame, event protocol, command registry and hook table are
+unchanged - a 1.x save keeps loading and its extension state is preserved.  The
+`<Platform>.ini` keys stay backward compatible (an old file keeps working;
+unknown keys are warnings only).  See `docs/Updating.md` for the 2.0 migration
+checklist.
 
 The base has no unload hook; every line is written immediately with a synchronous
 `WriteFile` (no user-mode buffering), so a normal process exit does not lose
@@ -357,11 +366,14 @@ VentureCore 是一个 MIT 授权的“起始基座/模板”：复制仓库 → 
 编译成你自己的单一平台 DLL，不需要改 Ares / Phobos / Kratos，也不用重复造
 启动、日志、INI、宿主检测、功能开关、扩展存储、存档、事件、命令这些基础设施。
 
-当前版本 **`v1.0.0`（首个正式版，2026-11-11）** 是**空基座 + 两个示例模块**：示例只统计
-UnitClass 的创建/销毁、读取一个 rules 键，没有任何玩法功能。基座各层均已实现，并经独立盲审
-（全部阻塞/建议项已修）与实机验证；每层对应的自动化检查写在本 README 与 `docs/` 里，
-这些检查不能替代一次实机运行：
-日志分级、`<Platform>.ini`、rules/art INI 读取与同名键接管、宿主矩阵、血统互斥、
+当前版本 **`v2.0.0`（2026-11-12）** 是**空基座 + 两个示例模块**：示例只统计
+UnitClass 的创建/销毁、读取一个 rules 键，没有任何玩法功能。2.0 的变更：宿主模型改为
+“事实集合 + 功能声明”（删除 tier，改用 `requiredHosts`/`anyOfHosts`，新增自识别宿主
+marker）；`<Platform>.ini` 升级为声明式键注册表（校验/未知键扫描/`[Groups]`/模板 dump）。
+1.x 已经过独立盲审与实机验证；2.0 沿用同一套自动化检查（13 个引擎无关单测、9 项静态检查、
+两个 Wine 探针），其增量仍待计划中的独立盲审。每层对应的自动化检查写在本 README 与
+`docs/` 里，这些检查不能替代一次实机运行：
+日志分级、`<Platform>.ini`、rules/art INI 读取与同名键接管、宿主集合、血统互斥、
 扩展存储（继承链 + 存档持久化，顺序帧 + store 集签名）、事件通道 `0x70–0x7F`、
 玩家命令注册。指针失效通知目前只有计数/清理，没有订阅 API。
 硬依赖只有 `gamemd.exe` + SyringeEx；Ares / Phobos / Kratos 只做检测和日志（派生平台可注册自己的私有宿主）。

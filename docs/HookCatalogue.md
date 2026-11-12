@@ -25,7 +25,7 @@ The table is machine-read.  Keep these rules when editing it:
   `gamemd.exe` build (Yuri's Revenge 1.001, as pinned by the build target).  A
   different executable build will not match these addresses.
 
-## v1.0.0 hook table
+## 2.0.0 hook table
 
 | 地址 | size | 名称 | 用途 | 备注 |
 | --- | --- | --- | --- | --- |
@@ -84,13 +84,13 @@ the instruction listing and check it against the ecosystem conventions.
    unrelated patches along.
 5. Rebuild, then run `python3 scripts/verify_build.py`.
 
-## Hook sites not used by v1.0.0
+## Hook sites not used by the base
 
 The following sites are **not** in the table above and **not** in the DLL.  If one
 is implemented it moves into the table.
 
-* Host-specific (T1-T3) feature hooks for Ares / Phobos / Kratos environments
-  (v1.0.0 only detects and logs the host matrix).
+* Host-specific feature hooks for Ares / Phobos / Kratos environments (the base
+  only detects hosts and exposes the set; it installs no host-specific hook).
 
 ## See also
 

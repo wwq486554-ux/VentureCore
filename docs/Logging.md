@@ -34,7 +34,7 @@ Every successful open writes one header line first, before any of the historic
 startup lines:
 
 ```text
-=== VentureCore v1.0.0.0 (RELEASE) process 1234 started 2026-11-09 23:59:59 ===
+=== VentureCore v2.0.0.0 (RELEASE) process 1234 started 2026-11-12 23:59:59 ===
 ```
 
 It carries the platform name, the full version display string, the build type
