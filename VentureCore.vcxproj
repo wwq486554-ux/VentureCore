@@ -24,7 +24,9 @@
     <ClCompile Include="src\Core\PlatformPaths.cpp" />
     <ClCompile Include="src\Core\Log.cpp" />
     <ClCompile Include="src\Core\Ini.cpp" />
-    <ClCompile Include="src\Core\HostDetect.cpp" />
+    <ClCompile Include="src\Core\HostRegistry.cpp" />
+    <ClCompile Include="src\Core\Hosts.Builtin.cpp" />
+    <ClCompile Include="src\Core\Hosts.Custom.cpp" />
     <ClCompile Include="src\Core\FeatureRegistry.cpp" />
     <ClCompile Include="src\Core\EngineIni.cpp" />
     <ClCompile Include="src\Core\IniTakeover.cpp" />
@@ -52,6 +54,7 @@
   <!-- Headers (for IDE navigation only; the build finds them via include paths). -->
   <ItemGroup>
     <ClInclude Include="include\platform\Feature.h" />
+    <ClInclude Include="include\platform\HostIds.h" />
     <ClInclude Include="include\platform\Lineage.h" />
     <ClInclude Include="src\Core\EnginePin.h" />
     <ClInclude Include="src\Core\PlatformConfig.h" />
@@ -62,7 +65,7 @@
     <ClInclude Include="src\Core\Log.h" />
     <ClInclude Include="src\Core\LogPolicy.h" />
     <ClInclude Include="src\Core\Ini.h" />
-    <ClInclude Include="src\Core\HostDetect.h" />
+    <ClInclude Include="src\Core\HostRegistry.h" />
     <ClInclude Include="src\Core\FeatureRegistry.h" />
     <ClInclude Include="src\Core\SaveTrailer.h" />
     <ClInclude Include="src\Engine\EngineCompat.h" />

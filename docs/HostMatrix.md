@@ -1,57 +1,114 @@
 # Host Matrix
 
 VentureCore is designed to sit *next to* existing platform DLLs rather than
-replace or extend them.  This document defines which hosts are required, how each
-one is detected, what v1.0.0 does with it, and which support tier the
-detection resolves to.
+replace or extend them.  This document defines which hosts the base knows about,
+how each one is detected, how a feature declares the hosts it needs, and what the
+startup log reports.
 
-Source of truth: `src/Core/HostDetect.h`, `src/Core/HostDetect.cpp` and the
-`Tier` enum in `include/platform/Feature.h`.
+Source of truth: `include/platform/HostIds.h` (public built-in bits),
+`src/Core/HostRegistry.h` (registry and gate), `src/Core/Hosts.Builtin.cpp`
+(built-in registrations) and `src/Core/Hosts.Custom.cpp` (a derived platform's
+private hosts).
 
-## Matrix
+## The model: facts + declarations (no support tier)
 
-| Host | Module checked | Requirement | Detected by | v1.0.0 behaviour | Tier |
-| --- | --- | --- | --- | --- | --- |
-| `gamemd.exe` (Yuri's Revenge 1.001) | - | **required** | the process itself; hook addresses are tied to this build | host executable; the platform runs inside it | - |
-| SyringeEx | `Syringe.exe` | **required** | the `SyringeFeatures` flags (`ESPModification`, `ZFPreservation`, `ReladdrInstructionFixup`) set by SyringeEx at injection | **gate**: if the flags are not all set, the platform shows a message box and terminates the game - it refuses to run under an older Syringe | T0 base |
-| Ares | `Ares.dll` | optional | loaded module (`GetModuleHandleA`) | detected and logged; no functional dependency | T1 |
-| Phobos | `Phobos.dll` | optional | loaded module | detected and logged; no functional dependency | T2 |
-| Kratos | `Kratos.dll` | optional | loaded module | detected and logged; no functional dependency | T3 |
-| Kaleidoscope | `Kaleidoscope.dll` | optional | loaded module | detected and logged; no functional dependency | T3 |
+2.0 removed the old level model: it compressed a *set* of loaded hosts into a
+single scalar and produced false positives (a Kratos-only environment resolved to
+the highest level, so an Ares-dependent feature was let through).  The removed
+level enum and its per-feature minimum field must not come back; the model is
+now:
 
-Detection is by **loaded module**, not by file presence: a DLL sitting in the game
-directory is not necessarily injected.  SyringeEx loads every DLL that carries a
-`.syhks00` section, so for the supported hosts a loaded module means an active
-host.
+| Layer | Content |
+| --- | --- |
+| facts | `HostRegistry` detects which registered hosts are loaded; the result is a **set** (`hostMask` plus the per-host details).  It answers "who is present", never "what environment level is this". |
+| declaration | `FeatureDescriptor::requiredHosts` (AND: every bit must be present) and `anyOfHosts` (OR: at least one bit; `0` = no constraint).  A feature is enabled when its `[Features]` switch is on **and** both host conditions hold. |
+| queries | `FeatureContext::hostMask` plus `HasHost(Host)` / `HasHostBit(unsigned)` / `HasHostName(const char*)`; see `include/platform/Feature.h`. |
 
-## Support tiers
+Do not reintroduce an environment ranking: the base records only *which* hosts
+are loaded, and each feature states the hosts it actually needs.  "Any known
+host" is expressed as an OR list, for example
+`anyOfHosts = HostBit(Host::Ares) | HostBit(Host::Phobos) | HostBit(Host::Kratos)`.
 
-The detected host set is resolved to one tier, and every feature declares the
-lowest tier it can run at (`FeatureDescriptor::minTier`):
+## Built-in hosts
 
-| Tier | Resolved when | Meaning |
-| --- | --- | --- |
-| T0 | SyringeEx only | plain YR + SyringeEx environment |
-| T1 | Ares loaded | Ares host available |
-| T2 | Phobos loaded | Phobos host available |
-| T3 | Kratos or Kaleidoscope loaded | the "best effort" host set |
+| Host | Bit | Module checked | Detection |
+| --- | --- | --- | --- |
+| `gamemd.exe` (Yuri's Revenge 1.001) | - | the process itself | **required** host executable; the hook addresses are tied to this build |
+| SyringeEx | `Syringe.exe` | the `SyringeFeatures` flags (`ESPModification`, `ZFPreservation`, `ReladdrInstructionFixup`) set at injection | **required**: if the flags are not all set, the platform shows a message box and terminates the game |
+| Ares | `1u << 0` (`Host::Ares`) | `Ares.dll` | loaded module (`GetModuleHandleA`) |
+| Phobos | `1u << 1` (`Host::Phobos`) | `Phobos.dll` | loaded module |
+| Kratos | `1u << 2` (`Host::Kratos`) | `Kratos.dll` | loaded module |
 
-Resolution is by presence, highest wins: T3 if Kratos or Kaleidoscope is loaded,
-otherwise T2 if Phobos is, otherwise T1 if Ares is, otherwise T0.  The resolved
-tier is a **single highest-host label, not an accumulating set**: a T3 result
-(Kratos/Kaleidoscope) does not mean Ares or Phobos are present as well, so a
-feature that genuinely needs Ares (T1) or Phobos (T2) must also inspect
-`FeatureContext::hostMask` rather than trusting `minTier` alone.  A feature is
-enabled only when its INI switch is on **and** the resolved tier is at least its
-`minTier`; if the tier is too low the log records why the feature was disabled.
-The switch itself comes from `<Platform>.ini` `[Features] <iniKey>` (`yes` by
-default).
+Detection is by **loaded module**, not by file presence: a DLL sitting in the
+game directory is not necessarily injected.  SyringeEx loads every DLL that
+carries a `.syhks00` section, so for the supported hosts a loaded module means an
+active host.  A host that fails to inject looks exactly like a host that is not
+installed.
 
-Startup logs the whole picture in one line, for example:
+Ares is not implied by Phobos: the bits are set only by the modules actually
+loaded, so an "only Phobos" environment has `hostMask == Phobos` and a feature
+with `requiredHosts = Ares` stays disabled.  (That is exactly the case the removed
+tier gate used to get wrong.)
+
+## Custom (private) hosts
+
+A platform built from this base can register its own optional platform without
+editing the base's built-in table.  Add the host to
+`src/Core/Hosts.Custom.cpp` with an explicit bit in the custom range:
+
+```cpp
+VENTURE_REGISTER_HOST(MyPlatform, 1u << 3, "MyPlatform.dll", "MyPlatform");
+```
+
+* the bit must be `>= 1u << 3`; bits 0-2 belong to the built-in hosts, and a
+  custom registration below that range is rejected;
+* the custom range is `1u << 3` .. `1u << 31` - 29 slots, shared with any future
+  run-time discovery;
+* the first definition wins; a duplicate bit, module name or display name is
+  rejected at load time and reported once in `<Platform>.log` as an error
+  (`hosts   : host registration rejected: ...`);
+* `moduleName` / `displayName` must be static-lifetime strings (literals);
+* the base registers no custom host itself, and this file is separate from
+  `Hosts.Builtin.cpp`, so a base sync does not overwrite a platform's entries.
+
+A feature of that platform declares the dependency with the same bit:
+
+```cpp
+requiredHosts = 1u << 3;   // compile-time known custom host
+```
+
+A host discovered at run time (the later self-identification protocol) has no
+compile-time bit; a feature queries it by name in `Initialize()` with
+`FeatureContext::HasHostName`.  Run-time discovery is **not** implemented in 2.0.
+
+## Gate semantics
 
 ```text
-hosts   : Ares, Phobos (tier T2)
+enabled = [Features] switch
+        && (requiredHosts == 0 || (hostMask & requiredHosts) == requiredHosts)   // AND
+        && (anyOfHosts   == 0 || (hostMask & anyOfHosts)   != 0)                 // OR
 ```
+
+`requiredHosts` / `anyOfHosts` may only reference compile-time known bits (the
+built-in hosts plus the platform's own custom hosts).  A host discovered at run
+time has no compile-time bit; the feature checks it by name in its own body and
+logs the consequence itself.
+
+Startup log examples:
+
+```text
+hosts   : Ares, Phobos (2 host(s))
+hosts   : Ares, MyPlatform (custom) (2 host(s))
+hosts   : <none>
+[Features] rof_curve (ROF curve): enabled
+[Features] kratos_hooks (Kratos hooks): disabled - requires host Kratos (present: Ares, Phobos)
+[Features] phobos_interop (Phobos interop): disabled - requires any of [Phobos, Kratos] (present: Ares)
+[Features] example_unit_counter (Example: UnitClass counter): disabled by VentureCore.ini [Features] Example
+```
+
+With `[Platform] LogLevel=debug` every detected host also gets a line with the
+resolved module path (`hosts   : Ares -> Z:\game\Ares.dll`) - the first thing to
+check when a host does not seem to inject.
 
 ## Lineage mutual exclusion
 
@@ -71,14 +128,18 @@ without our features - while `warn` only logs the conflict.  A refused copy is
 types, purges no rules-INI keys and does not touch the savegame stream.  See
 `docs/Lineage.md` for the marker, the scan and the exact log lines.
 
-## v1.0.0 limitations
+Host detection and lineage detection are independent: a host is another platform
+the base runs next to (optional, possibly several), a lineage conflict is another
+DLL built from this source tree (never allowed).
 
-* No functional dependency on any optional host: the base starts at T0 and does
-  nothing host-specific.  Host detection exists so derived platforms can gate
-  their own features.
-* No host-specific (T1-T3) features are implemented.
-* No Phobos interop and no AE handling.
-* The extension-storage layer deliberately does not use the engine's unused
+## Limitations and what is not in the base
+
+* no functional dependency on any optional host: the base itself enables no
+  host-specific behaviour, and there are no host-specific feature packages;
+* no Phobos interop and no AE handling;
+* run-time host discovery (self-identifying DLLs, the `VentureHost_GetInfo`
+  protocol) is not implemented yet; only source-level custom hosts are supported;
+* the extension-storage layer deliberately does not use the engine's unused
   `AbstractClass` extension slot, because DLLs in the Phobos lineage own it.
 
 ## Testing a host combination
@@ -86,8 +147,8 @@ types, purges no rules-INI keys and does not touch the savegame stream.  See
 1. Install the desired host DLLs into the game directory as you normally would.
 2. Install VentureCore as described in `README.md`.
 3. Launch the game and open `<Platform>.log`.
-4. Check the `hosts : ... (tier Tn)` line and the per-feature
-   `[Features] ... disabled - requires tier ...` lines.
+4. Check the `hosts   : ...` line and the per-feature
+   `[Features] ... disabled - requires ...` lines.
 
 Only loaded modules count, so a host that fails to inject looks exactly like a
 host that is not installed.
@@ -108,11 +169,3 @@ The platform's event channel (`0x70-0x7F`, see `docs/EventChannel.md`) is a
   platform on only one side of a network game is misconfigured;
 * single-player is unaffected (the event path still runs and is logged, which is
   how the platform's own user test verifies it).
-
-## Not part of this base
-
-* T1-T3 host-specific feature packages (Ares-only, Phobos-aware, ...).
-* Phobos interop (opt-in calls into Phobos extensions).
-* AE (Ares extensions) support.
-
-None of these are implemented in v1.0.0.

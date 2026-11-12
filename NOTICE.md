@@ -53,13 +53,13 @@ section layout is used as a documented interface fact:
 ## Ares, Phobos, Kratos, Kaleidoscope
 
 These are optional host platforms.  VentureCore detects whether their modules
-are loaded in the game process and logs the result, and then resolves a support
-tier from that (see `docs/HostMatrix.md`).  In v1.0.0 there is:
+are loaded in the game process and logs the detected set (see
+`docs/HostMatrix.md`).  In v1.0.0 there is:
 
 * no code copied or vendored from any of them;
 * no link dependency on any of them;
 * no functional dependency - they can be absent, present, or in any combination,
-  and the base still runs (tier T0).
+  and the base still runs.
 
 The extension-storage layer deliberately does **not** use the engine's unused
 `AbstractClass` extension slot, because DLLs in the Phobos lineage own that slot.

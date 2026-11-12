@@ -171,7 +171,8 @@ const FeatureDescriptor kDescriptor{
 	"example_unit_counter", // id: internal identifier
 	"Example",              // iniKey: switch in [Features]
 	"Example: UnitClass counter",
-	Tier::T0,
+	0,                      // requiredHosts (AND): no host dependency
+	0,                      // anyOfHosts (OR): no host dependency
 	&g_enabled,
 	&Initialize,
 };

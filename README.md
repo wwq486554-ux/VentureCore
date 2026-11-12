@@ -31,8 +31,8 @@ named with it (an in-game run is still the only end-to-end check - see
   resource follow it.  `src/version.rc` carries name, version, build type and the
   YRpp pin, and the build stamps in the git commit/ref.
 * **Startup pipeline** - the `Venture_ExeRun` hook verifies SyringeEx, opens the
-  log, loads `<Platform>.ini`, detects optional hosts, resolves the support tier,
-  applies the lineage check and initializes every registered feature.
+  log, loads `<Platform>.ini`, detects the optional hosts, applies the lineage
+  check and initializes every registered feature.
 * **File logging** - `<Platform>.log` next to `rules.ini`, level-filtered
   (`[Platform] LogLevel=error|warn|info|debug`), one per-process separator header,
   no unconditional `OutputDebugString` in release builds; a failed open falls
@@ -45,9 +45,13 @@ named with it (an in-game run is still the only end-to-end check - see
   a feature switch is on, the platform-owned keys are removed from the parsed
   rules INI so a host platform loaded next to us (Phobos) cannot read them too
   (see `docs/Ini.md`).
-* **Host detection matrix** - optional hosts (Ares, Phobos, Kratos,
-  Kaleidoscope) are detected by loaded module, logged, and mapped to support
-  tiers T0-T3.  No functional dependency on any of them in this base.
+* **Host detection (2.0 model)** - the optional hosts built into the base (Ares,
+  Phobos, Kratos) are detected by loaded module and logged as a **set**; a
+  feature declares `requiredHosts` (all must be present) and/or `anyOfHosts` (at
+  least one), and queries the detected set with `HasHost` / `HasHostBit` /
+  `HasHostName`.  There is no support tier.  A derived platform can register a
+  private host with an explicit bit (see `docs/HostMatrix.md`); the base has no
+  functional dependency on any host.
 * **Lineage mutual exclusion** - the DLL exports a lineage marker; a second DLL of
   the same lineage is detected at startup, named in the log and (by default)
   refused, so the second copy never initializes features and there is no second
@@ -57,7 +61,8 @@ named with it (an in-game run is still the only end-to-end check - see
   touch the stream (see `docs/Lineage.md`).
 * **Compile-time feature registry** - `FeatureDescriptor`, `FeatureContext`,
   `FeatureRegistrar`, `VENTURE_REGISTER_FEATURE` (`include/platform/Feature.h`);
-  one `[Features]` switch per feature (`iniKey`, default on) plus `minTier`
+  one `[Features]` switch per feature module (`iniKey`, default on; a module's
+  own keys are not switch entries) plus `requiredHosts` / `anyOfHosts` host
   gating.
 * **Extension storage** - an extension hierarchy (`AbstractExt ->
   TechnoExt -> FootExt -> UnitExt`, mirroring the Phobos call shape), one
@@ -224,7 +229,7 @@ done by a human.  See `docs/HookCatalogue.md` for what each hook does and
 3. Optionally copy `VentureCore.ini.example` to `VentureCore.ini` and edit it.
 4. Start the game.  `<Platform>.log` appears next to `rules.ini` and records the
    startup sequence: process header, platform/version, git revision, YRpp pin, INI
-   status, log level, hosts and tier, lineage, feature switches, registered
+   status, log level, hosts, lineage, feature switches, registered
    commands and event types, then `startup complete`.
 
 Upgrading from `0.4.0-experimental` is a drop-in replacement: 1.0.0 contains no
@@ -250,10 +255,15 @@ which a normal exit flushes, and only a power loss / blue screen can drop it.
     lineage is detected and the later one stays disabled; `warn` only logs);
   * `IniTakeover=yes|no` (default `yes`: hide platform-owned `rules(md).ini` keys
     from other platforms loaded next to us).
-* `[Features]` - one switch per feature, keyed by the feature's
+* `[Features]` - **one switch per feature module**, keyed by the module's
   `FeatureDescriptor.iniKey`, value `yes`/`no`; features default to on.  The
-  internal feature id is not the switch key.  A feature with a higher `minTier`
-  is disabled when the detected host set does not reach that tier.
+  internal feature id is not the switch key, and the module's own keys are not
+  `[Features]` entries (they live in the module's own section or in
+  `rules(md).ini`, and the module reads them itself).  A module that adds no
+  keys - a pure vanilla behaviour change - still has its switch.  A feature
+  that declares host requirements (`requiredHosts` all-of and/or `anyOfHosts`
+  any-of, `include/platform/HostIds.h`) is disabled when the detected host set
+  does not satisfy them; the startup log names the missing host(s).
 
 Booleans accept `yes/no`, `true/false`, `on/off` and `1/0`.  See
 `VentureCore.ini.example`.
@@ -262,7 +272,7 @@ Booleans accept `yes/no`, `true/false`, `on/off` and `1/0`.  See
 
 | Path | Contents |
 | --- | --- |
-| `include/platform/` | public source-level API: `Feature.h`, `Lineage.h` |
+| `include/platform/` | public source-level API: `Feature.h`, `HostIds.h`, `Lineage.h` |
 | `src/Core/` | identity/version, log, INI, rules-INI takeover, host detection, lineage scan, feature registry, save trailer, startup |
 | `src/Engine/` | engine ABI assertions and the base hooks (lifecycle, INI, savegame) |
 | `src/Ext/` | extension storage (`AbstractExt`, `ExtHierarchy`, `ExtensionStore`, `ExtensionIndex`, savegame streams) |
@@ -285,7 +295,7 @@ Booleans accept `yes/no`, `true/false`, `on/off` and `1/0`.  See
 | `docs/Renaming.md` | rename the platform (DLL/INI/log/version/savegame id) safely |
 | `docs/EngineBindings.md` | how the base binds to gamemd / SyringeEx / YRpp; storage, INI, savegame, event, command, lineage and logging layers |
 | `docs/HookCatalogue.md` | every installed hook: address, window size, purpose |
-| `docs/HostMatrix.md` | required vs optional hosts, detection, support tiers, mixed-client constraints |
+| `docs/HostMatrix.md` | optional hosts, detection, `requiredHosts`/`anyOfHosts` declarations, custom hosts, mixed-client constraints |
 | `docs/SaveFormat.md` | the savegame frame: stream layout, payload, load sequence |
 | `docs/Ini.md` | rules/art INI reads and the rules-INI takeover |
 | `docs/EventChannel.md` | event type range, payload format, responders, mixed-client risk |

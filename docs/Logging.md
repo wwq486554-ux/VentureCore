@@ -15,7 +15,7 @@ tested by `tests/test_logging.cpp`.  Neither test replaces an in-game run.
 ## Line format
 
 ```text
-[23:59:59.123] [INFO ] hosts   : Ares, Phobos (tier T2)
+[23:59:59.123] [INFO ] hosts   : Ares, Phobos (2 host(s))
 ```
 
 `[local time to the millisecond] [level] message`.  The label width is fixed

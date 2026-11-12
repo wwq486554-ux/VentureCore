@@ -133,14 +133,24 @@ Checklist for a version bump:
 
 ## 5. Updating host detection
 
-When an optional host changes its module name, or a new host is added:
+Host detection is a registry, not a hard-coded table:
 
-1. Edit the `g_hosts[]` table in `src/Core/HostDetect.cpp`.
-2. Update the `Host` enum in `src/Core/HostDetect.h` and, if the tier mapping
-   changes, `ResolveTier()` and the `Tier` enum in `include/platform/Feature.h`.
-3. Update `docs/HostMatrix.md` and any feature that gates on `minTier`.
-4. Add a run-time check to the in-game test: the startup line
-   `hosts : ... (tier Tn)` must list the expected hosts.
+1. Built-in hosts live in `src/Core/Hosts.Builtin.cpp` (registration) with their
+   public bits in `include/platform/HostIds.h`.  Changing a module name or adding
+   a built-in host means editing both, plus `docs/HostMatrix.md`.
+2. A derived platform's private hosts are registered in
+   `src/Core/Hosts.Custom.cpp` with
+   `VENTURE_REGISTER_HOST(uniqueId, bit, "Module.dll", "Display")`.  The bit must
+   be >= 1<<3 and must not collide; the first definition wins and a conflict is
+   logged at startup.
+3. Detection is by loaded module only: a host that fails to inject looks exactly
+   like one that is not installed.  There is no environment ranking - features
+   declare what they need with `requiredHosts` / `anyOfHosts`.
+4. Re-check the declared host requirements of every feature when a host's
+   presence semantics change.
+5. Add a run-time check to the in-game test: the startup line
+   `hosts   : Ares, Phobos (2 host(s))` must list the expected hosts, and the
+   per-feature `disabled - requires ...` lines must name the missing ones.
 
 ## 6. Repository hygiene
 

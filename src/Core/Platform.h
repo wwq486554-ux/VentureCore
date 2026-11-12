@@ -7,8 +7,8 @@ class AbstractClass;
 namespace venture
 {
 // Starts the platform from the ExeRun hook: verifies SyringeEx, opens the log,
-// loads <Platform>.ini, detects optional hosts, resolves the support tier, runs
-// the lineage mutual-exclusion check and initializes every registered feature.
+// loads <Platform>.ini, detects the optional hosts, runs the lineage
+// mutual-exclusion check and initializes every registered feature.
 //
 // Returns false when the platform refused to start.  An unsupported Syringe
 // terminates the game (see Platform.cpp); a lineage conflict under
@@ -30,6 +30,6 @@ bool IsStarted();
 void OnScenarioClear();
 void OnInvalidatePointer(AbstractClass* pInvalid, bool removed);
 
+// Detected optional hosts as a bit set (platform/HostIds.h + custom hosts).
 unsigned HostMask();
-Tier CurrentTier();
 }

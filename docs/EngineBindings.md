@@ -171,14 +171,15 @@ SyringeEx installs the hooks before `Startup()` runs (startup itself runs from t
   paths (removing an extension that was allocated while the feature was on) must
   still run after the switch is turned off;
 * the base resolves the switch (INI `[Features] <iniKey>`, default on) and the
-  `minTier` gate, writes the result to `*descriptor.enabled`, and only then calls
-  the feature's `Initialize()`;
+  declared host requirements (`requiredHosts` / `anyOfHosts`), writes the result
+  to `*descriptor.enabled`, and only then calls the feature's `Initialize()`;
 * `Initialize()` runs in both switch states, so a feature creates its stores and
   cleanup hooks regardless of the switch.
 
 See `include/platform/Feature.h` for the exact `FeatureDescriptor` /
 `FeatureContext` fields (`id` is the internal identifier, `iniKey` is the INI
-switch key, `minTier`, `enabled`, `Initialize`).
+switch key, `requiredHosts` / `anyOfHosts` host declarations, `enabled`,
+`Initialize`).
 
 ## Extension storage binding
 

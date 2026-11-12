@@ -1,7 +1,7 @@
 #include "Core/Platform.h"
 
 #include "Core/FeatureRegistry.h"
-#include "Core/HostDetect.h"
+#include "Core/HostRegistry.h"
 #include "Core/Ini.h"
 #include "Core/IniTakeover.h"
 #include "Core/Lineage.h"
@@ -21,7 +21,6 @@
 namespace
 {
 unsigned g_hostMask = 0;
-venture::Tier g_tier = venture::Tier::T0;
 // Whether the platform may act lives in the pure, header-only PlatformGate
 // (Pending / Running / Refused), so engine-free registries can check it too.
 
@@ -137,12 +136,32 @@ bool Startup()
 	Log::SetMinLevel(logLevel);
 	Log::SetDebugOutput(Ini::GetBool(VC_SECTION_PLATFORM, "DebugOutput", false));
 
-	g_hostMask = DetectHostMask();
-	g_tier = ResolveTier(g_hostMask);
+	// Host registration problems (an invalid or duplicate entry in
+	// Hosts.Custom.cpp) are recorded at load time and reported here, once,
+	// before the detected set is used.
+	for (int problem = 0, problems = Hosts().ProblemCount(); problem < problems; ++problem)
+		Log::Error("hosts   : %s", Hosts().ProblemAt(problem));
 
-	char hostNames[256] = {};
-	HostMaskToString(g_hostMask, hostNames, static_cast<DWORD>(sizeof(hostNames)));
-	Log::Info("hosts   : %s (tier %s)", hostNames, TierName(g_tier));
+	g_hostMask = Hosts().Detect(&IsModuleLoaded);
+	if (Hosts().DetectedCount() == 0)
+	{
+		Log::Info("hosts   : <none>");
+	}
+	else
+	{
+		char hostNames[256] = {};
+		Hosts().FormatDetected(hostNames, sizeof(hostNames));
+		Log::Info("hosts   : %s (%d host(s))", hostNames, Hosts().DetectedCount());
+	}
+
+	// Debug level only: the resolved module path of every detected host makes a
+	// "host did not inject" report diagnosable.
+	for (int host = 0, hosts = Hosts().DetectedCount(); host < hosts; ++host)
+	{
+		const DetectedHost* const detected = Hosts().DetectedAt(host);
+		if (detected && detected->modulePath[0] != '\0')
+			Log::Debug("hosts   : %s -> %s", detected->definition->displayName, detected->modulePath);
+	}
 
 	// Lineage mutual exclusion: only one DLL of the VentureCore lineage may run
 	// in this process (two would each build their own extension table and
@@ -196,7 +215,9 @@ bool Startup()
 	context.platformName = VC_PLATFORM_NAME;
 	context.iniPath = Ini::Path();
 	context.hostMask = g_hostMask;
-	context.tier = g_tier;
+	context.HasHost = &HasHost;
+	context.HasHostBit = &HasHostBit;
+	context.HasHostName = &HasHostName;
 	context.IniGetBool = &Ini::GetBool;
 	context.IniGetInt = &Ini::GetInt;
 	context.IniGetString = &Ini::GetString;
@@ -273,10 +294,5 @@ bool IsStarted()
 unsigned HostMask()
 {
 	return g_hostMask;
-}
-
-Tier CurrentTier()
-{
-	return g_tier;
 }
 }

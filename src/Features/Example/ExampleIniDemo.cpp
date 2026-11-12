@@ -102,7 +102,8 @@ const FeatureDescriptor kDescriptor{
 	"example_ini_key",       // id: internal identifier
 	"ExampleIniKey",         // iniKey: switch in [Features]
 	"Example: rules INI read + owned-key takeover",
-	Tier::T0,
+	0,                       // requiredHosts (AND): no host dependency
+	0,                       // anyOfHosts (OR): no host dependency
 	&g_enabled,
 	&Initialize,
 };

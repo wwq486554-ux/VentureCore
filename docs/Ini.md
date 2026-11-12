@@ -15,6 +15,26 @@ Related documents: `docs/HookCatalogue.md` (hook address table),
 a feature module). The `[Platform] IniTakeover` switch is documented in
 `README.md` and `VentureCore.ini.example`.
 
+## The three INI layers a feature sees
+
+A platform build touches three different INI layers; keep them apart when
+designing a feature:
+
+| Layer | File | Read by | Purpose |
+| --- | --- | --- | --- |
+| `[Platform]` configuration | `<Platform>.ini` | the base | platform-wide options (`LogLevel`, `LineagePolicy`, `IniTakeover`, ...) |
+| `[Features]` switches | `<Platform>.ini` | the base, one line per feature module | turn a whole feature module on/off; defaults to on |
+| feature keys | `<Platform>.ini` (the module's own section) or `rules(md).ini` / `art(md).ini` | the feature itself | the module's parameters; the module supplies the defaults |
+
+The middle layer is deliberately coarse: one switch per feature module, not one
+per key.  A module with any number of keys - including none - still has exactly
+one `[Features]` line, and its keys are read by the module (see "One switch per
+feature module, not per key" in `docs/MakeYourOwnPlatform.md`).
+
+The rest of this document is about the third layer's engine half (typed reads
+over the parsed rules/art INI) and the takeover that keeps our own rules keys
+away from a host platform.
+
 ## Why read through the engine
 
 `rules(md).ini` and `art(md).ini` are parsed by the engine into `CCINIClass`

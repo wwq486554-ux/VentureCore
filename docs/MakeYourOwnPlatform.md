@@ -52,9 +52,12 @@ A platform built from this base is a set of feature modules.  For each feature,
 write down before coding:
 
 * a unique internal `id` (lower_snake_case) - used in logs and lookups;
-* an INI `iniKey` for the `[Features]` switch (human-friendly, e.g. `MyFeature`);
-* the lowest host tier it can run at (`Tier::T0` for plain YR+SyringeEx, T1-T3 for
-  Ares/Phobos/Kratos/Kaleidoscope-dependent behaviour);
+* an INI `iniKey` for the `[Features]` switch (human-friendly, e.g.
+  `MyFeature`; one switch per feature module, however many keys it owns);
+* which optional hosts it needs, if any: `requiredHosts` (all of) and/or
+  `anyOfHosts` (any of) over the compile-time known host bits
+  (`include/platform/HostIds.h` plus your own custom hosts); `0` means "runs
+  anywhere";
 * the engine objects it needs to extend, and therefore the extension type(s);
 * the engine hooks it needs (every hook must also get a row in
   `docs/HookCatalogue.md`).
@@ -146,7 +149,8 @@ const FeatureDescriptor kDescriptor{
     "my_feature",       // id: unique internal identifier (logs, lookup)
     "MyFeature",        // iniKey: switch under [Features] in <Platform>.ini
     "My feature",       // human-readable name for logs
-    Tier::T0,           // lowest support tier that can run this feature
+    0,                  // requiredHosts (AND): no host dependency
+    0,                  // anyOfHosts (OR): no host dependency
     &g_enabled,         // the base writes the resolved switch here
     &Initialize,        // called from Startup(), on or off
 };
@@ -171,6 +175,8 @@ Then:
    The Linux build derives its file list from the project file.
 2. **Add the switch** to `VentureCore.ini.example` (or your platform's own
    example) under `[Features] MyFeature=yes`, and document it for your users.
+   The module's own keys (if any) go in the module's own section, not in
+   `[Features]` - see "One switch per feature module, not per key" below.
 3. **Add every new hook row** to `docs/HookCatalogue.md` (address, size, handler
    name, purpose, notes).  `scripts/verify_build.py` fails if the built DLL and
    the table disagree, and it is the only place hook windows are recorded.
@@ -188,22 +194,73 @@ Then:
    second store - otherwise the second `Allocate` returns `nullptr` and logs the
    composition error.
 
-### Optional: use the tier gate
+### One switch per feature module, not per key
 
-If the feature only makes sense with a host platform, set `minTier`
-(T0 = SyringeEx only, T1 = Ares, T2 = Phobos, T3 = Kratos/Kaleidoscope).  The base
-enables the feature only when the switch is on **and** the detected tier is at
-least `minTier`; the startup log explains why it was disabled.  The switch key and
-the internal id stay independent, so the user-facing name can be nice while the
-id stays stable.
+`[Features]` holds **exactly one switch per feature module** - one
+`FeatureDescriptor`, i.e. one module under `src/Features/<Name>/`.  A module may
+span several source files; they all share that one switch.  The switch is not a
+list of the module's keys and it does not grow with them:
 
-**The tier is a single highest-host label, not an accumulating capability set**:
-`Tier::T3` is resolved when Kratos or Kaleidoscope is loaded, whether or not Ares
-or Phobos are also present, and the `minTier` comparison is numeric.  A feature
-that really needs Ares (`T1`) or Phobos (`T2`) must therefore also check the host
-mask itself (`FeatureContext::hostMask`) - `minTier` alone is only a coarse
-"there is at least one known host" gate.  See `docs/HostMatrix.md` for the
-resolution rule.
+* a module that owns twenty keys still has **one** `[Features]` line;
+* a module that owns **no** keys at all still has its switch - and should have
+  one: it is how a user turns the behaviour off without deleting the DLL, and
+  what makes an A/B test or a bug report reproducible;
+* the module's own keys are not in `[Features]`.  They live in the module's own
+  section of `<Platform>.ini` (for example `[MyFeature]`) or in
+  `rules(md).ini` / `art(md).ini`, and the **module** reads and defaults them:
+  `FeatureContext::IniGetBool/IniGetInt/IniGetString` for `<Platform>.ini`,
+  `Core/EngineIni.h` for the engine-parsed INI.  The base does not enumerate,
+  default or gate them, so a mis-spelled key or an invalid value silently falls
+  back to the default the module passed in (there is no unknown-key warning
+  yet).
+
+`[Features]` exists to give the user one uniform kill switch per feature system,
+with the same spelling and the same log line for every module.  If a
+sub-behaviour needs its own visible switch, make it a separate feature module
+with its own descriptor and `[Features]` key - do not expect the base to
+discover keys by itself.
+
+Every `[Features]` switch defaults to **on** (`VC_DEFAULT_FEATURE_ENABLED`);
+there is no per-feature default.  A feature that should be off unless the user
+opts in reads its own key with an explicit `false` default (or uses its own key
+instead of the `[Features]` switch).
+
+A feature that **only changes vanilla behaviour** is an ordinary feature: no new
+keys, no new extension, just hooks that alter what the engine does.  Declare the
+descriptor, give it a switch, gate every hook on `enabled`, and it works exactly
+like a feature with keys.  Reading or reinterpreting an existing
+`rules(md).ini` key needs no INI entry either - read it through
+`Core/EngineIni.h` (from a rules-INI observer when the engine parses the file
+after `Startup()`) and act on it.  Do **not** register a vanilla key as
+platform-owned to "take it over": the takeover hides *our* keys from a host
+platform, and registering an engine key only makes the engine lose it (see
+`docs/Ini.md`).
+
+### Optional: declare host dependencies
+
+If the feature only makes sense with an optional host platform, declare it in the
+descriptor instead of checking at run time:
+
+* `requiredHosts` - AND: every bit must be present.  Ares only:
+  `venture::HostBit(venture::Host::Ares)`.
+* `anyOfHosts` - OR: at least one bit must be present; `0` means "no
+  constraint".  Phobos or Kratos:
+  `HostBit(Host::Phobos) | HostBit(Host::Kratos)`.
+
+The base enables the feature only when the `[Features]` switch is on **and** the
+declarations are satisfied by the detected host set; otherwise it disables the
+feature and logs which host is missing and which hosts are present (for example
+`disabled - requires host Kratos (present: Ares, Phobos)`).  Declarations may only
+reference compile-time known bits - the built-in hosts in
+`include/platform/HostIds.h` plus your platform's own custom hosts
+(`src/Core/Hosts.Custom.cpp`).  For a host known only by name, or when the host
+set should be checked inside the feature, use `FeatureContext::HasHost` /
+`HasHostBit` / `HasHostName` in `Initialize()`.
+
+There is **no** environment-level scalar any more (2.0 removed the old support
+levels): a set of hosts is a set, and "Phobos is present" never implies "Ares is
+present" - the bits come from the modules actually loaded.  See
+`docs/HostMatrix.md`.
 
 ## 4a. Feature-author conventions (enforced by the base)
 

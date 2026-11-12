@@ -7,6 +7,35 @@ The project uses semantic versioning.  The pre-1.0 samples carried an
 `-experimental` suffix in the DLL version resource; **`1.0.0` (2026-11-11) is the
 first stable release** and the stable contracts are listed in `README.md`.
 
+## [Unreleased]
+
+### Changed (breaking - 2.0 feature API)
+
+- host model: the support-level scalar is gone.  The `Tier` enum/`TierName()` and
+  `FeatureDescriptor::minTier` are removed; `FeatureContext::tier` is replaced by
+  `hostMask` plus `HasHost(Host)` / `HasHostBit(unsigned)` / `HasHostName(const
+  char*)` (public bits in `include/platform/HostIds.h`, registry in
+  `src/Core/HostRegistry.*`).  A feature now declares what it needs with
+  `FeatureDescriptor::requiredHosts` (AND) and `anyOfHosts` (OR); the startup log
+  reports the detected set and the missing hosts instead of a level name.
+- host detection is a registry: the built-in hosts are registered in
+  `src/Core/Hosts.Builtin.cpp`, and a derived platform registers private hosts in
+  `src/Core/Hosts.Custom.cpp` with an explicit custom bit (>= 1<<3, 29 slots).
+  The closed-source platform that the 1.x table also probed is no longer detected
+  and its bit is unused.
+- the startup host line is now `hosts   : Ares, Phobos (2 host(s))` or
+  `hosts   : <none>` (no level suffix); the feature lines are `enabled`,
+  `disabled by ... [Features] ...` or `disabled - requires host ...`.
+
+### Documentation
+
+- documented the feature-switch contract: `[Features]` has exactly **one switch
+  per feature module**, no matter how many keys the module owns (or whether it
+  owns any at all); a module's own keys live outside `[Features]` and are read by
+  the module.  Clarified in `README.md`, `docs/MakeYourOwnPlatform.md` (new
+  section), `docs/Ini.md` (three INI layers), `VentureCore.ini.example` and the
+  `FeatureDescriptor::iniKey` comment.  No behaviour change.
+
 ## [1.0.0] - 2026-11-11
 
 **First stable release of the base.**  No functional change from

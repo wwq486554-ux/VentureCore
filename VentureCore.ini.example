@@ -55,11 +55,17 @@ LineagePolicy=refuse
 IniTakeover=yes
 
 [Features]
-; One switch per feature system: key = FeatureDescriptor.iniKey, value = yes/no.
-; Features default to on when a key is missing or invalid.  (The internal
-; FeatureDescriptor.id is not the switch key; it is used for logs and lookup.)
-; A feature that requires an optional host platform is additionally gated by the
-; resolved support tier (see docs/HostMatrix.md).
+; One switch per feature MODULE (one FeatureDescriptor, one directory under
+; src/Features/), not one per key: a module with any number of keys - or with
+; no keys at all - still has exactly one line here.  key = FeatureDescriptor.iniKey,
+; value = yes/no; features default to on when a key is missing or invalid.  (The
+; internal FeatureDescriptor.id is not the switch key; it is used for logs and
+; lookup.)  The module's own keys do not belong in this section: put them in the
+; module's own section (see the Example modules below) or in rules(md).ini; the
+; module reads them itself.  A feature that declares host requirements
+; (FeatureDescriptor::requiredHosts / anyOfHosts) is additionally gated by the
+; detected host set: every required host must be present, and at least one any-of
+; host when that list is not empty (see docs/HostMatrix.md).
 
 ; Example module (id: example_unit_counter): counts UnitClass create/destroy
 ; transitions, logs one INFO progress line every 100 units (per-unit transitions

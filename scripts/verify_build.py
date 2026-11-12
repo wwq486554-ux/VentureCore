@@ -80,6 +80,15 @@ What is checked
        which line to move.  It is a lexical hygiene check, not a proof that the
        release branch is unreachable (see docs/Logging.md).
 
+8. Legacy tier gate removed (source)
+       ``2.0`` replaced the host support-level scalar with per-feature
+       ``requiredHosts`` / ``anyOfHosts`` declarations.  The removed API
+       spellings (``Tier``, ``TierName``, ``minTier``, ``ResolveTier``,
+       ``CurrentTier``, and a ``tier`` field access) may no longer appear
+       anywhere in the repository that describes the current state: sources,
+       docs, examples, project files.  ``CHANGELOG.md`` is exempt because it
+       records the 1.x history verbatim.
+
 Exit status is 0 when every check passes and 1 otherwise.  The expected strings
 and ids live in the constants below; when the platform is renamed (see
 docs/Renaming.md) update them together with the rest of the rename.
@@ -117,6 +126,17 @@ YRPP_PIN = "c6c522f77b58508588d9a8652c53356e4aef7a96"
 
 # Feature registry id of the Example module (src/Features/).
 FEATURE_ID = "example_unit_counter"
+
+# The 2.0 removal of the legacy host "support tier" (see docs/HostMatrix.md).
+# These spellings must not appear anywhere in the repository that describes the
+# current state; CHANGELOG.md keeps the 1.x history verbatim, and this verifier
+# of course contains the token list itself.
+TIER_TOKENS_RE = re.compile(
+    r"\b(?:Tier|TierName|minTier|ResolveTier|CurrentTier)\b|(?:\.|::)tier\b")
+TIER_SCAN_SKIP_DIRS = {".git", "external", "Release", "Debug"}
+TIER_SCAN_SKIP_FILES = {"CHANGELOG.md", "scripts/verify_build.py"}
+TIER_SCAN_EXTENSIONS = (
+    ".cpp", ".h", ".md", ".py", ".sh", ".example", ".rc", ".vcxproj", ".props", ".sln")
 
 # PE / SyringeEx layout facts.
 HOOK_SECTION_NAME = ".syhks00"
@@ -799,6 +819,56 @@ def check_log_policy_source() -> Check:
 
 
 # ---------------------------------------------------------------------------
+# Check 8: the 2.0 removal of the host support tier (source)
+# ---------------------------------------------------------------------------
+
+
+def check_legacy_tier_removed() -> Check:
+    """The 2.0 feature API has no host support tier: no tier token may survive."""
+    title = "Legacy tier gate removed (source)"
+    hits: List[str] = []
+    scanned = 0
+
+    for dirpath, dirnames, filenames in os.walk(REPO_ROOT):
+        dirnames[:] = sorted(
+            directory for directory in dirnames
+            if directory not in TIER_SCAN_SKIP_DIRS)
+        for filename in sorted(filenames):
+            if not filename.endswith(TIER_SCAN_EXTENSIONS):
+                continue
+            path = os.path.join(dirpath, filename)
+            rel_path = os.path.relpath(path, REPO_ROOT).replace(os.sep, "/")
+            if rel_path in TIER_SCAN_SKIP_FILES:
+                continue
+            try:
+                with open(path, "r", encoding="utf-8", errors="replace") as handle:
+                    lines = handle.read().splitlines()
+            except OSError as exc:
+                return Check(False, title, "cannot read %s: %s" % (rel_path, exc))
+            scanned += 1
+            for line_number, line in enumerate(lines, 1):
+                if TIER_TOKENS_RE.search(line):
+                    hits.append("%s:%d: %s"
+                                % (rel_path, line_number, line.strip()[:140]))
+
+    if hits:
+        extra = hits[:10]
+        if len(hits) > 10:
+            extra.append("... and %d more" % (len(hits) - 10))
+        extra.append("2.0 replaced the tier gate with requiredHosts/anyOfHosts - "
+                     "see docs/HostMatrix.md")
+        return Check(
+            False, title,
+            "%d occurrence(s) of the removed tier gate (%d file(s) scanned)"
+            % (len(hits), scanned), extra)
+
+    return Check(
+        True, title,
+        "%d file(s) scanned; no tier-gate token left (CHANGELOG.md history is exempt)"
+        % scanned)
+
+
+# ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
 
@@ -904,6 +974,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     # -- check 7 ---------------------------------------------------------
     checks.append(check_log_policy_source())
+
+    # -- check 8 ---------------------------------------------------------
+    checks.append(check_legacy_tier_removed())
 
     print_report(checks)
     return 0 if all(check.ok for check in checks) else 1
