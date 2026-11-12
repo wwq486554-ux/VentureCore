@@ -237,13 +237,14 @@ bool Startup()
 	Log::SetDebugOutput(ini.ReadBaseBool(VC_SECTION_PLATFORM, "DebugOutput", false,
 		"RELEASE builds: also write the log to the attached debugger"));
 
-	// Host registration problems (an invalid or duplicate entry in
-	// Hosts.Custom.cpp) are recorded at load time and reported here, once,
-	// before the detected set is used.
+	g_hostMask = Hosts().Detect(&IsModuleLoaded);
+
+	// Host problems are recorded while the set is built: an invalid/duplicate
+	// source-level registration (Hosts.Custom.cpp) or a rejected/invalid host
+	// marker found during the second-phase scan.  Report them once.
 	for (int problem = 0, problems = Hosts().ProblemCount(); problem < problems; ++problem)
 		Log::Error("hosts   : %s", Hosts().ProblemAt(problem));
 
-	g_hostMask = Hosts().Detect(&IsModuleLoaded);
 	if (Hosts().DetectedCount() == 0)
 	{
 		Log::Info("hosts   : <none>");
@@ -260,7 +261,12 @@ bool Startup()
 	for (int host = 0, hosts = Hosts().DetectedCount(); host < hosts; ++host)
 	{
 		const DetectedHost* const detected = Hosts().DetectedAt(host);
-		if (detected && detected->modulePath[0] != '\0')
+		if (!detected || detected->modulePath[0] == '\0')
+			continue;
+		const char* const version = detected->definition->version;
+		if (version && version[0] != '\0')
+			Log::Debug("hosts   : %s -> %s (marker version %s)", detected->definition->displayName, detected->modulePath, version);
+		else
 			Log::Debug("hosts   : %s -> %s", detected->definition->displayName, detected->modulePath);
 	}
 

@@ -2,10 +2,12 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <string>
 #include <vector>
 
 #include <platform/HostIds.h>
+#include <platform/HostMarker.h>
 
 namespace venture
 {
@@ -23,7 +25,10 @@ namespace venture
 //      built-in three, a derived platform's Hosts.Custom.cpp registers private
 //      hosts with an explicit bit;
 //   2. detection once in Platform::Startup(): every registered host is probed
-//      by module name and the present set is frozen;
+//      by module name, then the loaded modules are scanned for the
+//      VentureHost_GetInfo marker (platform/HostMarker.h), which registers
+//      independent platforms as dynamic custom hosts; the present set is then
+//      frozen;
 //   3. queries: FeatureContext::HasHost/HasHostBit/HasHostName and the
 //      FeatureRegistry gate read the frozen set.
 //
@@ -33,14 +38,16 @@ namespace venture
 //     that; a late registration is rejected and reported as a problem;
 //   * the detected set is written once on the game's main thread and then only
 //     read, like the rest of the startup state;
-//   * this unit is engine-free apart from the two Win32 calls in Detect()
-//     (GetModuleHandleA / GetModuleFileNameA), so tests drive it directly.
+//   * this unit is engine-free apart from the Win32 calls in Detect()
+//     (module probing, module enumeration, the SEH-protected marker call), so
+//     tests drive the pure parts directly.
 // ---------------------------------------------------------------------------
 
 enum class HostKind : std::uint8_t
 {
 	Builtin, // compiled into the base: Ares / Phobos / Kratos (bits 1<<0..1<<2)
 	Custom,  // registered by a derived platform with an explicit bit >= 1<<3
+	Dynamic, // discovered at run time through the VentureHost_GetInfo marker
 };
 
 struct HostDefinition
@@ -49,6 +56,7 @@ struct HostDefinition
 	const char* moduleName;  // file name probed with GetModuleHandleA ("Ares.dll")
 	const char* displayName; // spelling used in logs and HasHostName()
 	HostKind kind;
+	const char* version = nullptr; // dynamic hosts: the marker version (logs only)
 };
 
 // One host found at startup: its definition plus the resolved module path (for
@@ -102,12 +110,32 @@ public:
 	int ProblemCount() const;
 	const char* ProblemAt(int index) const;
 
+	// Registers a host discovered through the VentureHost_GetInfo marker (2.0
+	// second phase): allocates the lowest free custom bit, rejects a duplicate
+	// display name (first definition wins) and the exhausted 29-slot limit, and
+	// records the marker version.  Returns the allocated bit, or 0 when the host
+	// is rejected (the problem is recorded for the startup log).  Called by
+	// Detect() for real modules; the unit test calls it directly.
+	unsigned RegisterDynamicHost(
+		const char* moduleName,
+		const char* displayName,
+		const char* version,
+		const char* modulePath);
+
 private:
 	void AddProblem(const char* format, ...);
+	const char* OwnString(const char* text);
+	const HostDefinition* FindByModuleName(const char* moduleName) const;
+	unsigned AllocateCustomBit() const;
+	void SortDetected();
+	void DiscoverSelfIdentifyingHosts();
 
 	std::vector<HostDefinition> definitions_;
 	std::vector<DetectedHost> detected_;
 	std::vector<std::string> problems_;
+	// Stable backing storage for the strings of dynamically discovered hosts
+	// (definitions_ and detected_ only keep raw pointers to them).
+	std::vector<std::unique_ptr<std::string>> ownedStrings_;
 	unsigned knownMask_;
 	unsigned mask_;
 	bool detectionRan_;
@@ -134,6 +162,13 @@ struct HostRegistrar
 
 // Win32 probe used by Platform::Startup(): GetModuleHandleA(moduleName) != 0.
 bool IsModuleLoaded(const char* moduleName);
+
+// Validates a marker returned by a module's VentureHost_GetInfo() export (2.0
+// second phase).  Pure: magic/ABI must match, name non-null/1..63 chars and
+// NUL-terminated, version null-or-<=63 chars and NUL-terminated.  The scanner
+// calls it before registering a discovered host; the unit test drives it with
+// synthetic markers.
+bool IsValidHostMarker(const VentureHostInfo* info);
 
 // FeatureContext callbacks: queries against the detected set.
 bool HasHost(Host host);

@@ -152,6 +152,12 @@ Host detection is a registry, not a hard-coded table:
    `VENTURE_REGISTER_HOST(uniqueId, bit, "Module.dll", "Display")`.  The bit must
    be >= 1<<3 and must not collide; the first definition wins and a conflict is
    logged at startup.
+3. A platform that identifies itself at run time exports the
+   `VentureHost_GetInfo` marker from `include/platform/HostMarker.h`; it is
+   discovered by the startup scan and gets the lowest free custom bit.  Changing
+   the marker layout or the validation rules requires bumping
+   `VENTURE_HOST_MARKER_ABI_VERSION` and updating the producer and
+   `docs/HostMatrix.md`; the scanner's SEH wrapper and length caps must stay.
 3. Detection is by loaded module only: a host that fails to inject looks exactly
    like one that is not installed.  There is no environment ranking - features
    declare what they need with `requiredHosts` / `anyOfHosts`.

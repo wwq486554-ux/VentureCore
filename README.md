@@ -52,8 +52,9 @@ named with it (an in-game run is still the only end-to-end check - see
   feature declares `requiredHosts` (all must be present) and/or `anyOfHosts` (at
   least one), and queries the detected set with `HasHost` / `HasHostBit` /
   `HasHostName`.  There is no support tier.  A derived platform can register a
-  private host with an explicit bit (see `docs/HostMatrix.md`); the base has no
-  functional dependency on any host.
+  private host with an explicit bit, or export the `VentureHost_GetInfo` marker
+  (`include/platform/HostMarker.h`) and be discovered at startup (see
+  `docs/HostMatrix.md`); the base has no functional dependency on any host.
 * **Lineage mutual exclusion** - the DLL exports a lineage marker; a second DLL of
   the same lineage is detected at startup, named in the log and (by default)
   refused, so the second copy never initializes features and there is no second
@@ -222,12 +223,15 @@ imports and CRT constructors run) but does **not** run `Startup`, so the engine
 hooks, logging, INI and savegame code paths are not exercised by it; an in-game
 run is still required for those.
 
-`probe_hosts.sh` covers the custom-host extension point (`Hosts.Custom.cpp`): it
-builds a stub host module plus a generated source-level registration with an
-explicit bit, and checks that detection, `HasHostName`, `(custom)` formatting and
-the `requiredHosts` gate track the module being loaded and unloaded.  The built-in
-hosts and the declaration matrix are covered by `tests/test_host_registry.cpp`
-and `tests/test_host_gate.cpp`.
+`probe_hosts.sh` covers both host phases: it builds a stub host module plus a
+generated source-level registration with an explicit bit, and checks that
+detection, `HasHostName`, `(custom)` formatting and the `requiredHosts` gate
+track the module being loaded and unloaded; it also builds a platform DLL that
+exports the 2.0 `VentureHost_GetInfo` marker and verifies automatic discovery,
+bit allocation and the recorded version, plus three malformed markers (wrong
+magic, null name, crashing export) that must be rejected without crashing.  The
+built-in hosts, the declaration matrix and the marker validation are covered by
+`tests/test_host_registry.cpp` and `tests/test_host_gate.cpp`.
 
 The 2.0 INI key registry is covered by `tests/test_ini_registry.cpp` (defaults,
 strict integer parsing and ranges, invalid-value warnings, duplicate keys,
@@ -302,7 +306,7 @@ reported.  See `VentureCore.ini.example` and `docs/Ini.md`.
 
 | Path | Contents |
 | --- | --- |
-| `include/platform/` | public source-level API: `Feature.h`, `HostIds.h`, `Lineage.h` |
+| `include/platform/` | public source-level API: `Feature.h`, `HostIds.h`, `HostMarker.h`, `Lineage.h` |
 | `src/Core/` | identity/version, log, INI + key registry, rules-INI takeover, host registry, lineage scan, feature registry, save trailer, startup |
 | `src/Engine/` | engine ABI assertions and the base hooks (lifecycle, INI, savegame) |
 | `src/Ext/` | extension storage (`AbstractExt`, `ExtHierarchy`, `ExtensionStore`, `ExtensionIndex`, savegame streams) |

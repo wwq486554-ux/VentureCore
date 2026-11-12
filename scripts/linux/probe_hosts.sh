@@ -1,25 +1,25 @@
 #!/usr/bin/env bash
-# Probe the custom-host extension point (VentureCore 2.0) under Wine.
+# Probe both phases of the VentureCore 2.0 host model under Wine.
 #
 #   scripts/linux/probe_hosts.sh
 #
-# The base ships no custom host, so this probe builds a throwaway one along the
-# documented path and verifies the whole chain with the real Win32 module probe:
+# Phase 1 - source-level custom host (Hosts.Custom.cpp + VENTURE_REGISTER_HOST):
+#   builds a stub host module plus a generated registration TU with an explicit
+#   custom bit (1u << 3) and checks that detection, HasHostName, "(custom)"
+#   formatting and the requiredHosts gate follow the module being loaded.
 #
-#   1. build a stub host DLL (StubCustomHost.dll);
-#   2. build a generated source-level registration TU that calls
-#      VENTURE_REGISTER_HOST with an explicit custom bit (1u << 3);
-#   3. build a small console probe that links HostRegistry.cpp, Hosts.Builtin.cpp,
-#      FeatureRegistry.cpp and that registration;
-#   4. run it: no host is detected before LoadLibraryA; after loading the stub the
-#      custom host is detected and formatted as "StubCustomHost (custom)", and a
-#      feature declaring requiredHosts = 1u << 3 is enabled; after FreeLibrary it
-#      is disabled again and the feature log names the missing host.
+# Phase 2 - self-identifying host (VentureHost_GetInfo marker):
+#   builds a stub platform DLL that exports a valid marker, loads it and checks
+#   that the startup scan discovers it, allocates the lowest free custom bit,
+#   records the marker version and exposes it to features through HasHostName.
+#   Three malformed stub DLLs (wrong magic, null name, crashing export) must be
+#   rejected without taking the probe process down and must be reported.
 #
-# This covers the custom-host half of the 2.0 host model.  The built-in hosts and
-# the declaration matrix are covered by the unit tests, and the built DLL plus
-# the lineage conflict by load_probe.sh.  Like the other probes it takes the
-# shared toolchain lock: only one MSVC run at a time in the shared Wine prefix.
+# The probe links the real registry sources (HostRegistry.cpp, Hosts.Builtin.cpp,
+# IniRegistry.cpp, FeatureRegistry.cpp), so this is the dynamic half of the host
+# model; the pure rules are covered by tests/test_host_registry.cpp and
+# tests/test_host_gate.cpp.  Like the other probes it takes the shared toolchain
+# lock: only one MSVC run at a time in the shared Wine prefix.
 
 set -euo pipefail
 
@@ -38,20 +38,137 @@ mkdir -p "$work_dir"
 
 stub_src="$work_dir/stub_host.cpp"
 stub_dll="$work_dir/StubCustomHost.dll"
+self_host_src="$work_dir/self_marker_host.cpp"
+self_host_dll="$work_dir/SelfHostMarker.dll"
+bad_magic_src="$work_dir/bad_magic_host.cpp"
+bad_magic_dll="$work_dir/BadMagicHost.dll"
+null_name_src="$work_dir/null_name_host.cpp"
+null_name_dll="$work_dir/NullNameHost.dll"
+crash_src="$work_dir/crash_host.cpp"
+crash_dll="$work_dir/CrashHost.dll"
 registration_src="$work_dir/custom_host_registration.cpp"
 probe_src="$work_dir/host_probe.cpp"
 probe_exe="$work_dir/host_probe.exe"
 
-# --- the stub custom host module -------------------------------------------
-# A plain loadable DLL.  The base's host registry only looks at the loaded module
-# name, so the stub needs no .syhks00 section and no engine interaction; the
-# exported symbol just makes the DLL obviously non-trivial.
+# --- stub host modules ------------------------------------------------------
+# A plain loadable DLL for the source-level registration: the base's host probe
+# only looks at the loaded module name.
 cat > "$stub_src" <<'EOF'
 #include <windows.h>
 
 extern "C" __declspec(dllexport) int __cdecl VentureHostProbe_Stub()
 {
 	return 1;
+}
+
+BOOL WINAPI DllMain(HINSTANCE, DWORD, LPVOID)
+{
+	return TRUE;
+}
+EOF
+
+# A platform DLL that identifies itself through the 2.0 marker protocol.
+cat > "$self_host_src" <<'EOF'
+#include <windows.h>
+
+#include <platform/HostMarker.h>
+
+namespace
+{
+// Static storage inside the exporting module: the pointer stays valid while the
+// module is loaded; the base copies the strings immediately.
+const VentureHostInfo g_hostInfo{
+	VENTURE_HOST_MARKER_MAGIC,
+	VENTURE_HOST_MARKER_ABI_VERSION,
+	"SelfHost",   // name
+	"v1.2.3",     // version (logged only, no gating)
+	0u,           // capabilities (reserved)
+	0u,           // flags (reserved)
+};
+}
+
+extern "C" __declspec(dllexport) const VentureHostInfo* __cdecl VentureHost_GetInfo()
+{
+	return &g_hostInfo;
+}
+
+BOOL WINAPI DllMain(HINSTANCE, DWORD, LPVOID)
+{
+	return TRUE;
+}
+EOF
+
+# Wrong magic: the marker must be rejected, not crash.
+cat > "$bad_magic_src" <<'EOF'
+#include <windows.h>
+
+#include <platform/HostMarker.h>
+
+namespace
+{
+const VentureHostInfo g_hostInfo{
+	0xDEADBEEFu, // deliberately wrong magic
+	VENTURE_HOST_MARKER_ABI_VERSION,
+	"BadMagicHost",
+	"v0.0",
+	0u,
+	0u,
+};
+}
+
+extern "C" __declspec(dllexport) const VentureHostInfo* __cdecl VentureHost_GetInfo()
+{
+	return &g_hostInfo;
+}
+
+BOOL WINAPI DllMain(HINSTANCE, DWORD, LPVOID)
+{
+	return TRUE;
+}
+EOF
+
+# A null name: the marker must be rejected.
+cat > "$null_name_src" <<'EOF'
+#include <windows.h>
+
+#include <platform/HostMarker.h>
+
+namespace
+{
+const VentureHostInfo g_hostInfo{
+	VENTURE_HOST_MARKER_MAGIC,
+	VENTURE_HOST_MARKER_ABI_VERSION,
+	nullptr, // deliberately missing name
+	"v0.0",
+	0u,
+	0u,
+};
+}
+
+extern "C" __declspec(dllexport) const VentureHostInfo* __cdecl VentureHost_GetInfo()
+{
+	return &g_hostInfo;
+}
+
+BOOL WINAPI DllMain(HINSTANCE, DWORD, LPVOID)
+{
+	return TRUE;
+}
+EOF
+
+# An export that crashes: the scan's SEH wrapper must contain the fault.
+cat > "$crash_src" <<'EOF'
+#include <windows.h>
+
+#include <platform/HostMarker.h>
+
+extern "C" __declspec(dllexport) const VentureHostInfo* __cdecl VentureHost_GetInfo()
+{
+	// Write to an unmapped user address: raises an access violation that the
+	// scanner's __try/__except must turn into "not a valid host".
+	volatile int* pBadPointer = reinterpret_cast<volatile int*>(0x10);
+	*pBadPointer = 1;
+	return nullptr;
 }
 
 BOOL WINAPI DllMain(HINSTANCE, DWORD, LPVOID)
@@ -86,6 +203,7 @@ namespace
 {
 int g_failures = 0;
 char g_log[8192] = {};
+bool g_markerSeen = false;
 
 void Check(const bool ok, const char* const what)
 {
@@ -103,6 +221,16 @@ void Check(const bool ok, const char* const what)
 bool LogContains(const char* const needle)
 {
 	return needle && std::strstr(g_log, needle) != nullptr;
+}
+
+bool ProblemContains(const char* const needle)
+{
+	for (int index = 0; index < venture::Hosts().ProblemCount(); ++index)
+	{
+		if (std::strstr(venture::Hosts().ProblemAt(index), needle) != nullptr)
+			return true;
+	}
+	return false;
 }
 
 void CaptureLog(const char* const format, ...)
@@ -129,30 +257,37 @@ bool FakeIniGetBool(const char* const section, const char* const key, const bool
 	return defaultValue;
 }
 
-bool g_enabled = false;
-
 void NoopInitialize(const venture::FeatureContext& context)
 {
 	(void)context;
 }
 
-// A feature that requires the custom host: compile-time known bit 1u << 3.
-const venture::FeatureDescriptor kDescriptor{
-	"host_probe_custom",    // id
-	"HostProbe",            // iniKey
-	"Host probe custom host",
-	1u << 3,                // requiredHosts
-	0u,                     // anyOfHosts
-	&g_enabled,
-	&NoopInitialize,
-};
+bool g_enabledCustom = false;
+bool g_enabledMarker = false;
+
+// Phase 1 feature: requires the source-level custom host bit.
+const venture::FeatureDescriptor kCustomHostFeature{
+	"host_probe_custom", "HostProbe", "Host probe custom host",
+	1u << 3, 0u, &g_enabledCustom, &NoopInitialize };
+
+// Phase 2 feature: a discovered host has a run-time-allocated bit, so it is
+// queried by name - the documented pattern for feature code.
+void MarkerInitialize(const venture::FeatureContext& context)
+{
+	g_markerSeen = context.HasHostName ? context.HasHostName("SelfHost") : false;
+}
+
+const venture::FeatureDescriptor kMarkerHostFeature{
+	"host_probe_marker", "HostProbeMarker", "Host probe marker host",
+	0u, 0u, &g_enabledMarker, &MarkerInitialize };
 }
 
 int __cdecl main(int argc, char** argv)
 {
-	if (argc < 2)
+	if (argc < 6)
 	{
-		std::printf("usage: host_probe <stub-host.dll>\n");
+		std::printf("usage: host_probe <static-host.dll> <self-marker-host.dll> "
+			"<bad-magic.dll> <null-name.dll> <crash.dll>\n");
 		return 2;
 	}
 
@@ -161,32 +296,60 @@ int __cdecl main(int argc, char** argv)
 		"the registry holds the three built-in hosts and the generated custom host");
 	Check(venture::Hosts().ProblemCount() == 0, "no host registration problem");
 
-	// Detection phase, before the stub host module is loaded.
+	// Detection phase, before any game-side module is loaded.
 	char buffer[256] = {};
 	unsigned mask = venture::Hosts().Detect(&venture::IsModuleLoaded);
-	Check(mask == 0u, "no host is detected before the stub module is loaded");
+	Check(mask == 0u, "no host is detected before the stub modules are loaded");
 	Check(std::strcmp(venture::Hosts().FormatDetected(buffer, sizeof(buffer)), "<none>") == 0,
 		"the empty detected set formats as <none>");
 
-	// Load the stub host module and detect again.
-	HMODULE stub = LoadLibraryA(argv[1]);
-	std::printf("LoadLibraryA(\"%s\") = %p (GetLastError=%lu)\n",
-		argv[1], static_cast<void*>(stub), GetLastError());
-	Check(stub != nullptr, "the stub custom host module loads");
-	if (!stub)
+	// Load the two real stubs and the three malformed ones.
+	const HMODULE staticHost = LoadLibraryA(argv[1]);
+	const HMODULE selfHost = LoadLibraryA(argv[2]);
+	const HMODULE badMagic = LoadLibraryA(argv[3]);
+	const HMODULE nullName = LoadLibraryA(argv[4]);
+	const HMODULE crashHost = LoadLibraryA(argv[5]);
+	std::printf("LoadLibraryA: static=%p marker=%p bad-magic=%p null-name=%p crash=%p\n",
+		static_cast<void*>(staticHost), static_cast<void*>(selfHost),
+		static_cast<void*>(badMagic), static_cast<void*>(nullName),
+		static_cast<void*>(crashHost));
+	Check(staticHost && selfHost && badMagic && nullName && crashHost,
+		"all probe stub modules load");
+	if (!staticHost || !selfHost || !badMagic || !nullName || !crashHost)
 	{
 		std::printf("host probe: FAIL\n");
 		return 1;
 	}
 
 	mask = venture::Hosts().Detect(&venture::IsModuleLoaded);
-	Check(mask == (1u << 3), "the registered custom host is detected by loaded module");
-	Check(venture::Hosts().HasName("stubcustomhost"),
-		"HasHostName() matches the custom host case-insensitively");
-	Check(std::strcmp(venture::Hosts().FormatDetected(buffer, sizeof(buffer)), "StubCustomHost (custom)") == 0,
-		"the detected custom host is formatted with a (custom) suffix");
+	Check(mask == ((1u << 3) | (1u << 4)),
+		"the static custom host and the discovered host take the two lowest custom bits");
+	Check(venture::Hosts().DetectedCount() == 2, "exactly two hosts are detected");
+	Check(venture::Hosts().HasName("StubCustomHost"), "the source-level custom host is detected");
+	Check(venture::Hosts().HasName("SELFHOST"), "the self-identifying host is detected by name");
+	Check(!venture::Hosts().HasName("BadMagicHost"), "a marker with a wrong magic is not registered");
+	Check(std::strcmp(venture::Hosts().FormatDetected(buffer, sizeof(buffer)),
+		"StubCustomHost (custom), SelfHost (custom)") == 0,
+		"the detected set lists both custom hosts in bit order");
 
-	venture::RegisterFeature(&kDescriptor);
+	const venture::DetectedHost* const discovered = venture::Hosts().DetectedAt(1);
+	Check(discovered && discovered->definition->version
+		&& std::strcmp(discovered->definition->version, "v1.2.3") == 0,
+		"the marker version is recorded");
+	Check(discovered && std::strstr(discovered->modulePath, "SelfHostMarker.dll") != nullptr,
+		"the discovered module path is recorded");
+
+	Check(venture::Hosts().ProblemCount() == 3,
+		"the three malformed markers are reported as problems");
+	Check(ProblemContains("BadMagicHost.dll") && ProblemContains("is invalid"),
+		"the wrong-magic marker is reported as invalid");
+	Check(ProblemContains("NullNameHost.dll"), "the null-name marker is reported");
+	Check(ProblemContains("CrashHost.dll") && ProblemContains("raised an exception"),
+		"the crashing marker is contained by SEH and reported");
+
+	// Feature gates: the custom bit via requiredHosts, the discovered host by name.
+	venture::RegisterFeature(&kCustomHostFeature);
+	venture::RegisterFeature(&kMarkerHostFeature);
 
 	venture::FeatureContext context{};
 	context.platformName = "HostProbe";
@@ -201,20 +364,32 @@ int __cdecl main(int argc, char** argv)
 	context.Log = &CaptureLog;
 
 	venture::InitializeFeatures(context);
-	Check(g_enabled, "requiredHosts = custom bit is enabled while the stub host is loaded");
+	Check(g_enabledCustom, "requiredHosts = static custom bit is enabled while the module is loaded");
+	Check(g_enabledMarker && g_markerSeen,
+		"a feature sees the discovered host through HasHostName()");
 	Check(LogContains("[Features] host_probe_custom (Host probe custom host): enabled"),
-		"the feature log reports the enabled feature");
+		"the static host feature log line is present");
 
-	// Unload the stub host: detection and the gate must follow.
-	FreeLibrary(stub);
+	// Unload everything: detection and the gates must follow, without touching
+	// the copied marker strings (the registry owns them).
+	FreeLibrary(crashHost);
+	FreeLibrary(nullName);
+	FreeLibrary(badMagic);
+	FreeLibrary(selfHost);
+	FreeLibrary(staticHost);
+
 	g_log[0] = '\0';
 	context.hostMask = venture::Hosts().Detect(&venture::IsModuleLoaded);
-	Check(context.hostMask == 0u, "FreeLibrary removes the custom host from the detected set");
+	Check(context.hostMask == 0u, "unloading the modules removes both hosts from the detected set");
+	Check(std::strcmp(venture::Hosts().FormatDetected(buffer, sizeof(buffer)), "<none>") == 0,
+		"the detected set formats as <none> again");
+
 	venture::InitializeFeatures(context);
-	Check(!g_enabled, "the feature is disabled again once the custom host is gone");
+	Check(!g_enabledCustom, "the static host feature is disabled again");
+	Check(!g_markerSeen, "the discovered host is gone from HasHostName() as well");
 	Check(LogContains(
 		"[Features] host_probe_custom (Host probe custom host): disabled - requires host StubCustomHost (present: <none>)"),
-		"the feature log names the missing custom host");
+		"the disabled feature names the missing static host");
 
 	std::printf("host probe: %s\n", g_failures == 0 ? "PASS" : "FAIL");
 	return g_failures == 0 ? 0 : 1;
@@ -227,10 +402,19 @@ cl_flags=(
   /D_WIN32_WINNT=0x0601 /DNTDDI_VERSION=0x06010000
 )
 
-# Build the stub host DLL.
-( cd "$work_dir" && wine "$VCS_VC_BIN/cl.exe" "${cl_flags[@]}" /LD "$(vcs_w "$stub_src")" \
-    "/Fe$(vcs_w "$stub_dll")" ) >"$work_dir/stub-build.log" 2>&1 \
-  || { cat "$work_dir/stub-build.log" >&2; vcs_die "host probe: the stub host DLL failed to build"; }
+# Builds one stub DLL; $1 = source, $2 = output DLL, $3 = log file.
+build_stub() {
+  local src="$1" dll="$2" log="$3"
+  ( cd "$work_dir" && wine "$VCS_VC_BIN/cl.exe" "${cl_flags[@]}" /LD "$(vcs_w "$src")" \
+      "/Fe$(vcs_w "$dll")" ) >"$log" 2>&1 \
+    || { cat "$log" >&2; vcs_die "host probe: $(basename "$dll") failed to build"; }
+}
+
+build_stub "$stub_src" "$stub_dll" "$work_dir/stub-build.log"
+build_stub "$self_host_src" "$self_host_dll" "$work_dir/self-host-build.log"
+build_stub "$bad_magic_src" "$bad_magic_dll" "$work_dir/bad-magic-build.log"
+build_stub "$null_name_src" "$null_name_dll" "$work_dir/null-name-build.log"
+build_stub "$crash_src" "$crash_dll" "$work_dir/crash-build.log"
 
 # Build the probe executable with the registry sources it exercises.
 ( cd "$work_dir" && wine "$VCS_VC_BIN/cl.exe" "${cl_flags[@]}" \
@@ -244,5 +428,10 @@ cl_flags=(
   || { cat "$work_dir/build.log" >&2; vcs_die "host probe failed to build"; }
 
 echo '--- host probe ---'
-wine "$(vcs_w "$probe_exe")" "$(vcs_w "$stub_dll")"
+wine "$(vcs_w "$probe_exe")" \
+  "$(vcs_w "$stub_dll")" \
+  "$(vcs_w "$self_host_dll")" \
+  "$(vcs_w "$bad_magic_dll")" \
+  "$(vcs_w "$null_name_dll")" \
+  "$(vcs_w "$crash_dll")"
 echo '--- host probe OK ---'

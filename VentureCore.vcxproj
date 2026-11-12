@@ -56,6 +56,7 @@
   <ItemGroup>
     <ClInclude Include="include\platform\Feature.h" />
     <ClInclude Include="include\platform\HostIds.h" />
+    <ClInclude Include="include\platform\HostMarker.h" />
     <ClInclude Include="include\platform\Lineage.h" />
     <ClInclude Include="src\Core\EnginePin.h" />
     <ClInclude Include="src\Core\PlatformConfig.h" />

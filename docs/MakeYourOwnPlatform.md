@@ -306,6 +306,39 @@ levels): a set of hosts is a set, and "Phobos is present" never implies "Ares is
 present" - the bits come from the modules actually loaded.  See
 `docs/HostMatrix.md`.
 
+### Optional: get detected without editing the base (host marker)
+
+If your platform must be detected by an unmodified base build, do not edit
+`Hosts.Custom.cpp`; export the marker instead (`include/platform/HostMarker.h`,
+ABI documented in `docs/HostMatrix.md`):
+
+```cpp
+#include <platform/HostMarker.h>
+
+static const VentureHostInfo g_info{
+    VENTURE_HOST_MARKER_MAGIC, VENTURE_HOST_MARKER_ABI_VERSION,
+    "MyPlatform",  // name: static lifetime, 1..63 characters
+    "v1.2.0",      // version: null or <= 63 characters; logged only
+    0u, 0u,        // capabilities / flags: reserved
+};
+
+extern "C" __declspec(dllexport) const VentureHostInfo* __cdecl
+VentureHost_GetInfo()
+{
+    return &g_info;
+}
+```
+
+The base scans the loaded modules once at startup and registers the platform as a
+dynamic custom host (lowest free bit of the shared custom range); the name and
+version are recorded for the log only - there is no version gating, and the
+`capabilities`/`flags` words are reserved.  A feature of the base then checks it
+by name (`FeatureContext::HasHostName("MyPlatform")`).  A DLL built from this
+base is a lineage copy, not an independent host: it is refused by the lineage
+mutual-exclusion check and cannot masquerade as a host through this protocol.
+`scripts/linux/probe_hosts.sh` is the working example (valid marker plus three
+malformed markers that must be rejected without crashing).
+
 ## 4a. Feature-author conventions (enforced by the base)
 
 * **Command names** are compared case-insensitively and must carry the platform

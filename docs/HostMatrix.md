@@ -6,9 +6,10 @@ how each one is detected, how a feature declares the hosts it needs, and what th
 startup log reports.
 
 Source of truth: `include/platform/HostIds.h` (public built-in bits),
-`src/Core/HostRegistry.h` (registry and gate), `src/Core/Hosts.Builtin.cpp`
-(built-in registrations) and `src/Core/Hosts.Custom.cpp` (a derived platform's
-private hosts).
+`include/platform/HostMarker.h` (the self-identification ABI),
+`src/Core/HostRegistry.h` (registry, discovery and gate),
+`src/Core/Hosts.Builtin.cpp` (built-in registrations) and
+`src/Core/Hosts.Custom.cpp` (a derived platform's source-level private hosts).
 
 ## The model: facts + declarations (no support tier)
 
@@ -71,20 +72,85 @@ VENTURE_REGISTER_HOST(MyPlatform, 1u << 3, "MyPlatform.dll", "MyPlatform");
 * the base registers no custom host itself, and this file is separate from
   `Hosts.Builtin.cpp`, so a base sync does not overwrite a platform's entries.
 
-The whole custom-host path has an automated check: `scripts/linux/probe_hosts.sh`
-builds a stub host module plus a generated source-level registration and
-verifies detection, `HasHostName()`, the `(custom)` formatting and the
-`requiredHosts` gate while the module is loaded and after it is unloaded.
-
 A feature of that platform declares the dependency with the same bit:
 
 ```cpp
 requiredHosts = 1u << 3;   // compile-time known custom host
 ```
 
-A host discovered at run time (the later self-identification protocol) has no
-compile-time bit; a feature queries it by name in `Initialize()` with
-`FeatureContext::HasHostName`.  Run-time discovery is **not** implemented in 2.0.
+The whole source-level custom-host path has an automated check:
+`scripts/linux/probe_hosts.sh` builds a stub host module plus a generated
+registration and verifies detection, `HasHostName()`, the `(custom)` formatting
+and the `requiredHosts` gate while the module is loaded and after it is
+unloaded.
+
+## Self-identifying hosts (marker protocol, second phase)
+
+A platform that does **not** want to edit the base source can identify itself at
+run time: export one function from the platform DLL and the base discovers it
+during startup.  The ABI is in `include/platform/HostMarker.h`:
+
+```cpp
+#include <platform/HostMarker.h>
+
+static const VentureHostInfo g_info{
+    VENTURE_HOST_MARKER_MAGIC,        // 0x54534856 ('VHST', little endian)
+    VENTURE_HOST_MARKER_ABI_VERSION,  // 1
+    "MyPlatform",                     // name: static lifetime, 1..63 chars
+    "v1.2.0",                         // version: null or <= 63 chars (log only)
+    0u, 0u,                           // capabilities / flags: reserved (P3)
+};
+
+extern "C" __declspec(dllexport) const VentureHostInfo* __cdecl
+VentureHost_GetInfo()
+{
+    return &g_info;
+}
+```
+
+How the base handles it (all at startup, once):
+
+* enumerates the process modules (`Toolhelp32`), skips the modules in the Windows
+  directory, the DLLs of this lineage (they are refused by the lineage check,
+  see below) and our own DLL, then resolves
+  `VENTURE_HOST_MARKER_EXPORT_GET_INFO` (`VentureHost_GetInfo`) on the rest;
+* calls the export inside `__try/__except`: a marker export that crashes is
+  contained, logged as a problem and skipped - it never takes the game down;
+* validates the marker: `magic` and `abiVersion` must match, `name` must be
+  NUL-terminated within 1..63 characters, `version` null or NUL-terminated within
+  63 characters.  Anything else is logged as a problem and skipped;
+* registers the platform as a **dynamic custom host**: the bit is the lowest free
+  bit of the shared custom range (`1u << 3` .. `1u << 31`, 29 slots; source-level
+  custom hosts and discovered hosts share it).  Candidates are sorted by module
+  file name first, so allocation and the "first definition wins" rule are
+  deterministic; a duplicate name (ASCII case-insensitive) or an exhausted range
+  is logged and the host is ignored;
+* copies the name/version strings immediately (the exporting module may be
+  unloaded later), records the marker version and logs it at Debug level
+  (`hosts   : SelfHost -> ...SelfHostMarker.dll (marker version v1.2.3)`).
+
+A discovered host has **no compile-time bit**, so `requiredHosts` / `anyOfHosts`
+cannot name it; a feature queries it by name:
+
+```cpp
+void Initialize(const venture::FeatureContext& context)
+{
+    const bool selfHost = context.HasHostName("MyPlatform");   // case-insensitive
+    Log::Info("[MyFeature] MyPlatform present: %s", selfHost ? "yes" : "no");
+}
+```
+
+Reserved for a later phase (P3): the `capabilities`/`flags` words and any version
+negotiation - 2.0 records the version for logs only and never gates on it.  A
+marker is **not** a license to impersonate a host: a DLL derived from this base
+is a lineage copy, not an independent host, and the lineage mutual-exclusion
+check refuses it (the scan skips modules that export the lineage marker).
+
+`scripts/linux/probe_hosts.sh` builds a marker-exporting stub DLL and exercises
+the whole path under Wine, including malformed markers (wrong magic, null name)
+and a marker export that raises an access violation; all three must be rejected
+without a crash, while the valid host is detected, gets the next custom bit and
+is visible through `HasHostName()` to a feature.
 
 ## Gate semantics
 
@@ -142,8 +208,8 @@ DLL built from this source tree (never allowed).
 * no functional dependency on any optional host: the base itself enables no
   host-specific behaviour, and there are no host-specific feature packages;
 * no Phobos interop and no AE handling;
-* run-time host discovery (self-identifying DLLs, the `VentureHost_GetInfo`
-  protocol) is not implemented yet; only source-level custom hosts are supported;
+* run-time host discovery reads name/version only: no version gating, no
+  capabilities negotiation (those are reserved for a later phase);
 * the extension-storage layer deliberately does not use the engine's unused
   `AbstractClass` extension slot, because DLLs in the Phobos lineage own it.
 

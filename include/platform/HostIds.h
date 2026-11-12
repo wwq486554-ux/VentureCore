@@ -12,10 +12,11 @@
 // The bits below are compile-time known and stable: use them in a feature
 // descriptor (`requiredHosts` / `anyOfHosts`) and to mask `FeatureContext::
 // hostMask`.  A derived platform's own private hosts use the custom range
-// (bit 3 and up, an explicit bit per host, registered in
-// src/Core/Hosts.Custom.cpp); they are not part of this header because they are
-// unknown to the base.  Dynamic (runtime-discovered) hosts are a later phase and
-// are queried by name - see FeatureContext::HasHostName.
+// (bit 3 and up): either an explicit bit registered in
+// src/Core/Hosts.Custom.cpp, or the run-time marker protocol in
+// platform/HostMarker.h, where the base allocates the lowest free bit.  Neither
+// is part of this header because the base does not know the names at compile
+// time; a discovered host is queried by name - see FeatureContext::HasHostName.
 //
 // The values must match the registrations in src/Core/Hosts.Builtin.cpp.
 // ---------------------------------------------------------------------------

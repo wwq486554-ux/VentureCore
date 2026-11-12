@@ -25,6 +25,16 @@ first stable release** and the stable contracts are listed in `README.md`.
   a warning; a duplicate `(section, key)` declaration warns and keeps the first;
   every effective value is logged (Debug) and the startup block ends with
   `ini keys: N registered, M invalid, K unknown`.
+- self-identifying hosts (2.0 second phase): a platform DLL can export the
+  `VentureHost_GetInfo` marker (`include/platform/HostMarker.h`) and be
+  discovered at startup without editing the base.  The scan skips Windows
+  modules and lineage copies, calls the export under SEH, validates
+  magic/ABI/name/version and registers the platform as a dynamic custom host on
+  the lowest free bit of the shared 29-slot custom range; malformed or crashing
+  markers are logged and ignored.  Name and version are recorded for the log
+  only (no version gating; capabilities/flags reserved); features query the host
+  by name with `HasHostName`.  `scripts/linux/probe_hosts.sh` exercises the path
+  with a valid marker plus wrong-magic, null-name and crashing stubs.
 - startup unknown-key scan: an unknown `[Features]` switch warns with a "did you
   mean ...?" suggestion, an unknown `[Platform]`/`[Groups]`/feature key warns, a
   user-defined section is Debug-logged only; `[Platform] IniWarnUnknownKeys=no`

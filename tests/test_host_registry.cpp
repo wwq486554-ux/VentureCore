@@ -12,6 +12,8 @@
 
 #include "Core/HostRegistry.h"
 
+#include <platform/HostMarker.h>
+
 namespace
 {
 int g_failures = 0;
@@ -74,6 +76,12 @@ bool LoadEverything(const char* const moduleName)
 {
 	(void)moduleName;
 	return true;
+}
+
+bool LoadStaticAndSelf(const char* const moduleName)
+{
+	return std::strcmp(moduleName, "StaticHost.dll") == 0
+		|| std::strcmp(moduleName, "SelfHost.dll") == 0;
 }
 
 // Static-lifetime names for the generated custom hosts of the capacity tests.
@@ -246,12 +254,130 @@ void TestFormattingEdgeCases()
 }
 }
 
+void TestMarkerValidation()
+{
+	VentureHostInfo valid{};
+	valid.magic = VENTURE_HOST_MARKER_MAGIC;
+	valid.abiVersion = VENTURE_HOST_MARKER_ABI_VERSION;
+	valid.name = "MyPlatform";
+	valid.version = "v1.2.0";
+	Check(venture::IsValidHostMarker(&valid), "a well-formed host marker is accepted");
+
+	VentureHostInfo badMagic = valid;
+	badMagic.magic = 0;
+	Check(!venture::IsValidHostMarker(&badMagic), "a wrong marker magic is rejected");
+
+	VentureHostInfo badAbi = valid;
+	badAbi.abiVersion = VENTURE_HOST_MARKER_ABI_VERSION + 1u;
+	Check(!venture::IsValidHostMarker(&badAbi), "a different marker ABI version is rejected");
+
+	Check(!venture::IsValidHostMarker(nullptr), "a null marker is rejected");
+
+	VentureHostInfo nullName = valid;
+	nullName.name = nullptr;
+	Check(!venture::IsValidHostMarker(&nullName), "a null name is rejected");
+
+	VentureHostInfo emptyName = valid;
+	emptyName.name = "";
+	Check(!venture::IsValidHostMarker(&emptyName), "an empty name is rejected");
+
+	char maxName[64] = {};
+	std::memset(maxName, 'n', sizeof(maxName) - 1);
+	VentureHostInfo maxInfo = valid;
+	maxInfo.name = maxName;
+	Check(venture::IsValidHostMarker(&maxInfo), "a 63-character name is accepted");
+
+	char longName[128] = {};
+	std::memset(longName, 'n', sizeof(longName) - 1);
+	VentureHostInfo tooLong = valid;
+	tooLong.name = longName;
+	Check(!venture::IsValidHostMarker(&tooLong), "a name longer than 63 characters is rejected");
+
+	VentureHostInfo noVersion = valid;
+	noVersion.version = nullptr;
+	Check(venture::IsValidHostMarker(&noVersion), "a null version is accepted");
+
+	char longVersion[128] = {};
+	std::memset(longVersion, 'v', sizeof(longVersion) - 1);
+	VentureHostInfo badVersion = valid;
+	badVersion.version = longVersion;
+	Check(!venture::IsValidHostMarker(&badVersion), "a version longer than 63 characters is rejected");
+}
+
+void TestDynamicRegistration()
+{
+	venture::HostRegistry registry;
+	registry.Register(MakeHost(Bit(venture::Host::Ares), "Ares.dll", "Ares", venture::HostKind::Builtin));
+	registry.Register(MakeHost(Bit(venture::Host::Phobos), "Phobos.dll", "Phobos", venture::HostKind::Builtin));
+	registry.Register(MakeHost(Bit(venture::Host::Kratos), "Kratos.dll", "Kratos", venture::HostKind::Builtin));
+	Check(registry.Register(MakeHost(1u << 3, "StaticHost.dll", "StaticHost", venture::HostKind::Custom)),
+		"the source-level custom host registers");
+	Check(registry.Detect(&LoadStaticAndSelf) == (1u << 3),
+		"the source-level custom host is detected by the module probe");
+
+	const unsigned dynamicBit = registry.RegisterDynamicHost(
+		"SelfHost.dll", "SelfHost", "v1.2.3", "Z:\\game\\SelfHost.dll");
+	Check(dynamicBit == (1u << 4), "a discovered host takes the lowest free custom bit");
+	Check(registry.Mask() == ((1u << 3) | (1u << 4)), "the discovered host is part of the detected set");
+	Check(registry.HasBit(dynamicBit), "HasBit sees the discovered host");
+	Check(registry.HasName("SELFHOST"), "HasHostName matches the discovered host case-insensitively");
+
+	char buffer[256] = {};
+	Check(std::strcmp(registry.FormatDetected(buffer, sizeof(buffer)), "StaticHost (custom), SelfHost (custom)") == 0,
+		"the detected set lists the source-level and the discovered host in bit order");
+
+	const venture::DetectedHost* const discovered = registry.DetectedAt(1);
+	Check(discovered && discovered->definition->version
+		&& std::strcmp(discovered->definition->version, "v1.2.3") == 0,
+		"the marker version is recorded");
+	Check(discovered && std::strstr(discovered->modulePath, "SelfHost.dll") != nullptr,
+		"the discovered module path is recorded");
+
+	const int problemsBefore = registry.ProblemCount();
+	Check(registry.RegisterDynamicHost("OtherHost.dll", "selfhost", "v1.0", "Z:\\game\\OtherHost.dll") == 0,
+		"a duplicate display name is rejected");
+	Check(registry.ProblemCount() == problemsBefore + 1
+		&& Contains(registry.ProblemAt(registry.ProblemCount() - 1), "already registered"),
+		"the duplicate-name problem is recorded");
+
+	Check(registry.RegisterDynamicHost("SelfHost.dll", "SelfHost", "v1.2.3", "Z:\\game\\SelfHost.dll") == dynamicBit,
+		"the same module is not registered twice");
+	Check(registry.DefinitionCount() == 5, "the rejected duplicates did not add a definition");
+
+	// A later Detect() re-probes the dynamic definition by module name and keeps
+	// the discovered set.
+	const unsigned mask = registry.Detect(&LoadStaticAndSelf);
+	Check(mask == ((1u << 3) | (1u << 4)), "Detect re-probes the discovered host by module name");
+	Check(registry.DetectedCount() == 2, "the re-probe finds the source-level and the dynamic host");
+
+	// The 29-slot limit is shared: fill a fresh registry with dynamically
+	// discovered hosts and verify the 30th is rejected.
+	FillCustomNames();
+	venture::HostRegistry full;
+	full.Register(MakeHost(Bit(venture::Host::Ares), "Ares.dll", "Ares", venture::HostKind::Builtin));
+	full.Register(MakeHost(Bit(venture::Host::Phobos), "Phobos.dll", "Phobos", venture::HostKind::Builtin));
+	full.Register(MakeHost(Bit(venture::Host::Kratos), "Kratos.dll", "Kratos", venture::HostKind::Builtin));
+	int registered = 0;
+	for (int index = 0; index < 29; ++index)
+	{
+		if (full.RegisterDynamicHost(g_customModules[index], g_customNames[index], "", "") != 0)
+			++registered;
+	}
+	Check(registered == 29, "all 29 custom host slots can be filled dynamically");
+	Check(full.RegisterDynamicHost("ExtraHost.dll", "ExtraHost", "", "") == 0,
+		"the 30th dynamically discovered host is rejected");
+	Check(Contains(full.ProblemAt(full.ProblemCount() - 1), "all 29 custom host slots"),
+		"the exhausted-slot problem is recorded");
+}
+
 int __cdecl main()
 {
 	TestBuiltinRegistration();
 	TestDetectionAndQueries();
 	TestCapacityLimits();
 	TestFormattingEdgeCases();
+	TestMarkerValidation();
+	TestDynamicRegistration();
 
 	std::printf("\n%s (%d failure%s)\n", g_failures == 0 ? "PASS" : "FAILED",
 		g_failures, g_failures == 1 ? "" : "s");
