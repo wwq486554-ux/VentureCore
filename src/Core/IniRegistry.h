@@ -36,12 +36,20 @@ namespace venture
 //     separately through LateInvalidCount() (INI-03);
 //   * after the feature initialization the base enumerates the file and warns
 //     about unknown feature switches ([Features]), unknown keys in a known
-//     section and unknown [Platform]/[Groups] keys.  User-defined sections are
-//     only logged at Debug level.  [Platform] IniWarnUnknownKeys=no turns the
-//     unknown-key warnings off;
+//     section and unknown [Platform]/[Groups] keys.  [Groups] is a platform-owned
+//     section even when no feature declares a group, so a typo there warns like an
+//     unknown [Platform] key (INI-09).  User-defined sections are only logged at
+//     Debug level.  [Platform] IniWarnUnknownKeys=no turns the unknown-key
+//     warnings off;
 //   * `[Groups] <group>=yes|no` is an explicit master switch for the feature
 //     group declared by FeatureDescriptor::group (one switch per module stays
-//     unchanged otherwise);
+//     unchanged otherwise).  A group switch is read once per initialization pass
+//     and cached for the modules of that group, so a bad value is warned about
+//     once, not once per module (INI-09);
+//   * BeginFeature/EndFeature delimit one module's Initialize(); nested or
+//     unmatched calls are warned about instead of silently re-tagging keys
+//     (INI-12), and a duplicate [Features] switch published twice renders once
+//     (INI-12);
 //   * [Platform] DumpIniTemplate=yes (development only) renders the registry as
 //     <Platform>.ini.generated next to the log: every value it lists is the
 //     declared default (a declaration reference, not the effective values the
@@ -73,7 +81,10 @@ using IniEnumerateFn = void (*)(IniEntryVisitorFn visitor, void* userData);
 // value, duplicate registration, unknown key), false for Debug detail.
 using IniLogFn = void (*)(bool warning, const char* message);
 
-// The value a raw provider returns for a missing key.
+// The value a raw provider returns for a missing key.  Reserved: a file value
+// equal to this literal is indistinguishable from a missing key by contract
+// (INI-11).  The leading 0x01 byte makes an accidental collision with a
+// human-edited value practically impossible; never use it as a real value.
 inline constexpr const char* kIniMissingValue = "\x01" "venture-ini-missing";
 
 enum class IniValueType : std::uint8_t
@@ -95,7 +106,7 @@ struct IniKeyInfo
 	std::string defaultText;
 	std::string valueText; // resolved value
 	bool invalid;          // the file value was rejected, valueText is the default
-	bool hasRange;         // an int key with an explicit allowed range
+	bool hasRange;         // an int key with a real allowed range (minValue <= maxValue)
 	int minValue;
 	int maxValue;
 	bool sizeWarned;       // internal: the size-limit diagnostic was already emitted
@@ -133,6 +144,15 @@ struct IniScanResult
 	int truncated;
 };
 
+// Row counts of the R1 template dump, for the dump log (INI-10): KeyCount() alone
+// is not the rendered row count because the [Features] switches are rows too.
+struct IniTemplateRows
+{
+	int sections; // section headers ([Platform], [Groups], [Features], module sections)
+	int keys;     // key=value rows (every registered key renders exactly once)
+	int switches; // [Features] switch rows (a switch with a null iniKey does not render)
+};
+
 class IniRegistry
 {
 public:
@@ -148,6 +168,11 @@ public:
 	void SetLogSink(IniLogFn sink);
 
 	// ---- lifecycle (called by src/Core/FeatureRegistry.cpp) ---------------
+	// Delimit one module's Initialize() so the keys declared there are tagged with
+	// its id (INI-12).  The calls must nest properly: an EndFeature without a
+	// matching BeginFeature is warned about and ignored, and a nested BeginFeature
+	// is warned about - the inner id owns the keys until its EndFeature restores
+	// the outer one.
 	void BeginFeature(const char* featureId);
 	void EndFeature();
 
@@ -195,8 +220,17 @@ public:
 	// the template dump).
 	bool ReadFeatureSwitch(const char* iniKey, bool defaultEnabled);
 	// [Groups] <group>: registered as a key and read, default on.  A null/empty
-	// group returns true (the feature belongs to no group).
+	// group returns true (the feature belongs to no group).  Within one
+	// initialization pass the switch is read once per group and cached for the
+	// other modules of the group, so an invalid value warns once (INI-09).  A new
+	// pass is signalled by SetFeatureSwitches (the feature registry publishes the
+	// switch set at the start of every pass), which drops the cache so a changed
+	// file is re-read.
 	bool ReadGroupSwitch(const char* group);
+	// Publishes the [Features] switch set for the startup scan and template dump.
+	// Entries are de-duplicated by iniKey (first wins, warned about): a repeated
+	// switch must not render two [Features] rows (INI-12).  Also starts a new
+	// initialization pass for the [Groups] switch cache (INI-09).
 	void SetFeatureSwitches(const IniFeatureSwitch* switches, int count);
 
 	// ---- pre-2.0 legacy getters (INI-08) ----------------------------------
@@ -222,6 +256,10 @@ public:
 	// The caller prepends the platform/version header and writes it next to the
 	// log.
 	std::string RenderTemplate() const;
+
+	// Row counts that the template dump writes; the dump log reports them instead
+	// of KeyCount(), which does not count the [Features] switch rows (INI-10).
+	IniTemplateRows TemplateRowCount() const;
 
 	// ---- introspection ----------------------------------------------------
 	int KeyCount() const;
@@ -281,6 +319,15 @@ private:
 	std::string SuggestSwitch(const char* unknown) const;
 	static void ScanTrampoline(const char* section, const char* key, void* userData);
 	void ScanEntry(const char* section, const char* key);
+	// Distinct module sections (everything but [Platform]/[Groups]), sorted the
+	// way the template renders them; shared by RenderTemplate/TemplateRowCount.
+	std::vector<std::string> TemplateSections() const;
+
+	struct CachedGroupSwitch
+	{
+		std::string group;
+		bool enabled;
+	};
 
 	std::vector<IniKeyInfo> keys_;
 	std::vector<IniFeatureSwitch> switches_;
@@ -288,6 +335,8 @@ private:
 	IniEnumerateFn enumerator_ = nullptr;
 	IniLogFn logSink_ = nullptr;
 	std::string currentFeatureId_;
+	std::vector<std::string> featureIdStack_;
+	std::vector<CachedGroupSwitch> groupSwitches_;
 	int invalidSwitchCount_ = 0;
 	int truncatedCount_ = 0;
 	int summaryInvalidTotal_ = 0;

@@ -55,6 +55,17 @@ class ExtensionStore
 		"the savegame row canary keeps the low 16 bits of TypeId - keep extension type ids <= 0xFFFF");
 	static_assert(std::is_constructible_v<TExt, AbstractClass*>,
 		"an extension class constructor must accept AbstractClass* (the store also constructs it while loading a savegame)");
+	// SAVE-08: the owner map is keyed by `const void*` so one map type serves both
+	// the typed lookups (Fetch/Remove cast a TOwner*) and the savegame adopt path
+	// (InsertItem/AdoptCallback receive an AbstractClass*).  The two addresses are
+	// equal only while AbstractClass is TOwner's primary base at offset 0 - true for
+	// every engine class used as TOwner today (they derive from AbstractClass as
+	// their first/only base).  This cannot be asserted at compile time in standard
+	// C++ for a polymorphic class (there is no compile-time base-offset query, and
+	// offsetof is only standard for standard-layout types), so it stays a documented
+	// assumption: if a future TOwner puts AbstractClass behind another base, the
+	// adopt path would insert a key that Fetch never matches.  Revisit this comment
+	// (and the casts in Fetch/Remove/InsertItem) if the hierarchy ever changes.
 
 public:
 	static ExtensionStore& Instance()
@@ -440,6 +451,9 @@ private:
 	}
 
 	ExtStoreDesc m_desc{};
+	// Owner -> extension.  Keyed by const void*: Fetch/Remove pass a TOwner* and
+	// InsertItem/AdoptCallback an AbstractClass*; both must be the same address
+	// (SAVE-08 - see the note at the top of the class).
 	std::unordered_map<const void*, TExt*> m_map;
 	TExt* m_head = nullptr;   // allocation order, oldest first
 	TExt* m_tail = nullptr;   // allocation order, newest last

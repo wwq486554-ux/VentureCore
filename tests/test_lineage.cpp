@@ -131,6 +131,17 @@ int __cdecl main()
 	Check(DetailsContain(mismatched, "savegame id differs from this build: 0x56433031"),
 		"details explain the savegame id mismatch");
 
+	// START-10: `allowStartup` is the decision the production startup path
+	// branches on, so the gate matrix is part of the contract: a savegame
+	// mismatch is a conflict like any other, and under Refuse it denies startup.
+	const venture::LineageDecision mismatchedRefused = DecideLineage(otherSavegame, LineagePolicy::Refuse);
+	Check(mismatchedRefused.conflict, "a savegame mismatch under Refuse still is a conflict");
+	Check(!mismatchedRefused.allowStartup,
+		"START-10: a savegame mismatch under Refuse denies startup");
+	Check(mismatchedRefused.savegameMismatch, "the mismatch is recorded under Refuse as well");
+	const venture::LineageDecision cleanWarn = DecideLineage({}, LineagePolicy::Warn);
+	Check(cleanWarn.allowStartup, "START-10: no modules under Warn still allows startup");
+
 	// -- policy parsing ------------------------------------------------------
 	Check(venture::ParseLineagePolicy("refuse") == LineagePolicy::Refuse, "policy: refuse");
 	Check(venture::ParseLineagePolicy("warn") == LineagePolicy::Warn, "policy: warn");

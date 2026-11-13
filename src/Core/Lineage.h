@@ -41,12 +41,15 @@ struct ForeignLineageModule
 };
 
 // Outcome of the mutual-exclusion decision.  `details` names every conflicting
-// module and is written to the log verbatim.
+// module and is written to the log verbatim.  The startup gate reads
+// `allowStartup` (START-10): it is derived here, once, so Platform::Startup() and
+// the unit tests cannot disagree about "conflict + policy -> may start"; do not
+// re-derive it from `conflict` + `policy` at the call site.
 struct LineageDecision
 {
 	bool conflict = false;         // at least one matching foreign marker
-	bool allowStartup = true;      // false only for a conflict under Refuse
-	bool savegameMismatch = false; // a conflicting module uses another savegame id
+	bool allowStartup = true;      // the startup gate: false only for a conflict under Refuse
+	bool savegameMismatch = false; // a conflicting module uses another savegame id (diagnostics; `details` carries it)
 	std::string details;           // "module (platform version, abi N, savegame 0x...)", "; "-separated
 };
 

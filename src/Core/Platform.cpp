@@ -172,7 +172,13 @@ void DumpIniTemplate()
 	}
 
 	char path[MAX_PATH * 2] = {};
-	_snprintf_s(path, sizeof(path), _TRUNCATE, "%s.generated", iniPath);
+	if (_snprintf_s(path, sizeof(path), _TRUNCATE, "%s.generated", iniPath) < 0)
+	{
+		// A truncated path would write to the wrong file (or fail later with a
+		// confusing error); refuse instead (INI-10).
+		venture::Log::Warn("ini template: <Platform>.ini path is too long for the dump file name - dump skipped");
+		return;
+	}
 
 	std::string text;
 	text += "; " VC_PLATFORM_NAME " " VC_VERSION_DISPLAY " - generated INI template\r\n";
@@ -188,14 +194,21 @@ void DumpIniTemplate()
 		return;
 	}
 	const std::size_t written = std::fwrite(text.data(), 1, text.size(), file);
-	std::fclose(file);
-	if (written != text.size())
+	// fclose flushes the stdio buffer: a short write can only surface here, so its
+	// result is checked too (INI-10).
+	const bool closed = std::fclose(file) == 0;
+	if (written != text.size() || !closed)
 	{
 		venture::Log::Warn("ini template: short write to %s", path);
 		return;
 	}
-	venture::Log::Info("ini template: wrote %s (%d registered key(s))", path,
-		venture::IniRegistry::Instance().KeyCount());
+	// Report the rendered row counts, not KeyCount() (which does not count the
+	// [Features] switch rows the template also writes) - INI-10.
+	const venture::IniTemplateRows rows =
+		venture::IniRegistry::Instance().TemplateRowCount();
+	venture::Log::Info(
+		"ini template: wrote %s (%d key row(s), %d switch row(s), %d section(s))",
+		path, rows.keys, rows.switches, rows.sections);
 }
 
 // The platform is only supported under SyringeEx: the injected trampolines rely
@@ -372,7 +385,11 @@ bool Startup()
 	{
 		Log::Info("lineage : no other %s-lineage DLL loaded", VC_PLATFORM_NAME);
 	}
-	else if (lineagePolicy == LineagePolicy::Warn)
+	// START-10: the decision record is the single source of truth for the startup
+	// gate - do not re-derive it from conflict + policy here.  allowStartup is
+	// exactly "not (conflict under Refuse)", so after the no-conflict branch above
+	// this is the Warn case (a conflict the configured policy allows to continue).
+	else if (lineage.allowStartup)
 	{
 		Log::Warn(
 			"lineage : conflicting %s-lineage DLL loaded: %s (LineagePolicy=warn - continuing)",

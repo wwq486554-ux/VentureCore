@@ -308,7 +308,15 @@ void EnterLoadWindow()
 
 void ExitLoadWindow()
 {
+	// START-09: the success path closes the window twice - the post-swizzle hook
+	// (0x67E685) is the functional close, and the documented success-tail hook
+	// (0x67E68A) closes it again idempotently.  The flag update stays
+	// unconditional (the close is idempotent by contract), but the log line is
+	// emitted only for the close that actually had the window open, so a
+	// successful load logs "load window closed" once instead of twice.
+	const bool wasOpen = ExtSave::IsLoadingSaveGame();
 	ExtSave::ExitLoadWindow();
-	Log::Info("savegame: load window closed");
+	if (wasOpen)
+		Log::Info("savegame: load window closed");
 }
 }

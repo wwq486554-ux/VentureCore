@@ -76,6 +76,17 @@ VENTURE_REGISTER_HOST(MyPlatform, 1u << 3, "MyPlatform.dll", "MyPlatform");
   detection is rejected and reported as a problem (an error in the startup
   block) instead of silently joining (or missing from) the set the features were
   gated on;
+* **the built-in hosts take priority by contract** (HOST-09): bits 0-2 are
+  reserved to the built-in definitions, and a derived platform must not reuse a
+  built-in module or display name (`Ares.dll`/`Ares`, ...).  Cross-translation-
+  unit static registration order is unspecified in C++, so a custom definition
+  that shadows a built-in name makes one of the two registrations fail with a
+  problem and leaves the feature gate with only the winner - which one depends on
+  the unspecified initialisation order.  Treat it as a declaration error in
+  `Hosts.Custom.cpp`, never as a way to override a built-in.  A dynamic
+  (marker-discovered) host is registered during detection, after every static
+  registration has run, so it can never displace or duplicate a static
+  definition;
 * the base registers no custom host itself, and this file is separate from
   `Hosts.Builtin.cpp`, so a base sync does not overwrite a platform's entries.
 

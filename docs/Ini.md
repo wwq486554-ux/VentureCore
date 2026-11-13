@@ -58,13 +58,30 @@ site; the equivalent function-pointer calls take `sourceFile` as the last
 argument.  Every declaration records `section / key / type / default / range /
 description / owning feature / source file` and returns the validated value.
 
+**Declare every key unconditionally.**  `Initialize()` runs in both switch states,
+so a module must declare each of its keys whether its `[Features]` switch is `yes`
+or `no`: the switch gates the module's **behaviour**, not the registration.  A key
+declared only on the enabled path is invisible to the unknown-key scan and to the
+template dump while the module is disabled, which is exactly when a user needs the
+diagnostics most.  While a module's `Initialize()` runs, the registry tags the
+keys it declares with the owning feature id; the `BeginFeature`/`EndFeature`
+region around the call **must not nest** - a nested `BeginFeature` is warned
+about (the inner id owns the keys until its `EndFeature` restores the outer one),
+and an `EndFeature` without a matching `BeginFeature` is warned about and
+ignored.  (This is the documented pattern: `Initialize()` is called for every
+registered module, on or off - see `include/platform/Feature.h`.)
+
 ### Registry rules
 
 * **Valid value** - the key is read with the same boolean tokens as before
   (`yes/no`, `true/false`, `on/off`, `1/0`, whole token, case-insensitive).
   Integers must be one complete base-10 number (the legacy getter accepted a
   prefix such as `12abc`; the registry rejects it) inside the declared
-  `[minValue, maxValue]` range (`minValue > maxValue` = no range).
+  `[minValue, maxValue]` range (`minValue > maxValue` = no range, so no range
+  check and no `range:` annotation in the template dump).  Values are trimmed
+  of leading/trailing whitespace before parsing; the legacy getters do not apply
+  the registry's trim (the Win32 profile API normalises in practice, so the
+  difference is theoretical).
 * **Invalid value** - falls back to the declared default and produces a warning:
   `key [MyFeature] ProgressEvery: '12abc' is not a valid integer - using the
   default '100'`.  Invalid values are never silent, and there is no switch to
@@ -93,7 +110,10 @@ description / owning feature / source file` and returns the validated value.
   count.
 * **Missing vs empty** - a missing key keeps the default without a warning; a key
   present with an empty value is validated like any other token (so an empty
-  bool is invalid).
+  bool is invalid).  The registry's raw reader uses a private sentinel to
+  distinguish "missing" from "present but empty"; a configuration value equal to
+  that sentinel is reserved (it would be read as missing) - write any other
+  value.
 
 ### Size limits and truncation
 
@@ -132,6 +152,12 @@ once and classifies every entry:
 entries are then Debug-logged instead); invalid values still warn.  The file is
 never rewritten or auto-repaired.
 
+`[Platform]` and `[Groups]` are **always** treated as platform-owned sections:
+even when no feature declares a group, an entry under `[Groups]` is an unknown
+key and warns at startup (the expected state of a platform with no groups is an
+empty `[Groups]` section).  A group master switch is read once per group, so a
+bad value produces one warning even when several modules share the group.
+
 ### Feature groups
 
 `FeatureDescriptor::group` (optional trailing field) names a group, and
@@ -139,7 +165,15 @@ never rewritten or auto-repaired.
 whole group.  A module is enabled when its `[Features]` switch, its group switch
 and its declared host requirements all allow it; the per-module switch is not
 replaced.  The group name is only needed for this gate and for the template
-dump - it does not change the feature API.
+dump - it does not change the feature API.  A group switch is read once per
+initialization pass and cached for the modules of the group, so a bad value is
+warned about once, not once per module.
+
+A `[Features]` switch published twice for the same `iniKey` (two descriptors, or
+a derived platform publishing its own switch set) is de-duplicated: the first
+entry wins, one warning is logged and the template renders a single row.  The
+feature registry already rejects a duplicate `iniKey`; this is the defensive
+layer for a set published outside it.
 
 ### R1 template dump
 
@@ -156,6 +190,21 @@ module's `defaultEnabled`.  Compare the two files with
 (add `--values` to compare the value text as well) when a key changed.  The dump
 is the R1 route; the build-time manifest route (R2) is deliberately not
 implemented.
+
+Writing the dump is diagnosed rather than silent: a `.generated` path that does
+not fit the buffer is refused with a warning (the dump would otherwise go to the
+wrong file name), and an open failure, a short write or a failed `fclose` (which
+flushes the stdio buffer) are reported as warnings with the dump skipped or
+incomplete.  The success line reports the actual rendered row counts:
+`ini template: wrote <path> (N key row(s), M switch row(s), K section(s))` - the
+key rows, the `[Features]` switch rows and the section headers - so a partial or
+mismatched dump is visible in the log instead of being summarized by the
+registered-key count alone.  The dump is a development aid and never modifies the
+configuration file.
+
+Entries in the dump carry `range: min..max` only when the declaration has a
+range; a declaration with `minValue > maxValue` means "no range" and is rendered
+without a range annotation.
 
 The rest of this document is about the third layer's engine half (typed reads
 over the parsed rules/art INI) and the takeover that keeps our own rules keys
@@ -433,10 +482,14 @@ key.
 range check, invalid values falling back with a warning, duplicate declarations
 (the first declaration resolving every read, including its default/range and the
 invalid count), the built-in `[Platform]` keys, `defaultEnabled` and `[Groups]`
-gates, the unknown-key scan (suggestions, known-section keys, Debug-only user
-sections, `IniWarnUnknownKeys=no`), the legacy-getter `MarkKnown` bridge, the
-`VENTURE_INI_*` macros, the size-limit/truncation diagnostics, the invalid-switch
-and late-invalid counters, and the R1 template rendering (declared defaults).
+gates (including the `[Groups]`-is-always-platform-owned unknown-key promise and
+the per-pass group-switch cache), the unknown-key scan (suggestions,
+known-section keys, Debug-only user sections, `IniWarnUnknownKeys=no`), the
+legacy-getter `MarkKnown` bridge, the `VENTURE_INI_*` macros, the
+size-limit/truncation diagnostics, the invalid-switch and late-invalid counters,
+the nested/unmatched `BeginFeature`/`EndFeature` warnings, duplicate `[Features]`
+switch rows, the template row counts reconciled against the rendered text, the
+"no range" spelling, and the R1 template rendering (declared defaults).
 
 The hook boundary itself is verified with `objdump -d -M intel
 --start-address=0x6686C0 --stop-address=0x6686E0 gamemd.exe` (window above), the

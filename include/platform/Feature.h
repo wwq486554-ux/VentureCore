@@ -117,6 +117,15 @@ struct FeatureContext
 	// way (minValue > maxValue means "no range").  A duplicate (section, key)
 	// registration from another feature produces a warning; the first
 	// declaration wins.
+	//
+	// Declare keys unconditionally (INI-05): Initialize() runs in both switch
+	// states, and the [Features] switch gates the module's *behaviour*, not its
+	// registration.  Declaring a key only while the switch is on would make the
+	// startup unknown-key scan and the template dump depend on the run-time switch
+	// value (a disabled module's keys would be reported unknown / missing from the
+	// R1 dump), and a user who turns the module on later would see a different
+	// schema than the .ini.example documents.  Read every key inside Initialize()
+	// and gate the behaviour on the returned value / *descriptor.enabled instead.
 	bool (__cdecl* IniBool)(const char* section, const char* key, bool defaultValue,
 		const char* description, const char* sourceFile);
 	int (__cdecl* IniInt)(const char* section, const char* key, int defaultValue,

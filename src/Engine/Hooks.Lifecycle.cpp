@@ -12,8 +12,15 @@
 // docs/HookCatalogue.md.
 // ---------------------------------------------------------------------------
 
-// Engine is about to run the game main loop: safe point to read the INI, detect
-// hosts, initialize features and open the log.
+// At CRT startup, before WinMain and before the game main loop - this is not
+// "about to enter the main loop" (HOOK-07).  0x7CD80F is the PE
+// AddressOfEntryPoint and starts with the one-byte `push ebp`; the hook starts at
+// 0x7CD810, the `mov ebp,esp; push -1; push 0x7f9798` prologue of the standard
+// MSVC CRT startup frame (the SEH chain is set up right after it), and the
+// 9-byte window ends exactly on the next instruction (0x7CD819, `push 0x7cc1d4`).
+// Running Startup() here is the safe point to read the INI, detect hosts,
+// initialize features and open the log, because the engine has not built its own
+// state yet.
 DEFINE_HOOK(0x7CD810, Venture_ExeRun, 0x9)
 {
 	venture::Startup();

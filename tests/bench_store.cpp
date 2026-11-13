@@ -1,17 +1,39 @@
 // Microbenchmark for the extension store hot paths.
 //
-// Not a unit test (it takes seconds and prints numbers): build and run it with
-// scripts/linux/bench_store.sh.  It measures, for 1k / 5k / 20k live extension
+// Not a unit test and not a pass/fail gate: scripts/linux/bench_store.sh builds
+// and runs it (release flags, see scripts/linux/common.sh) and saves the output;
+// nothing asserts on the numbers.  It reports, for 1k / 5k / 20k live extension
 // instances:
 //
 //   * Allocate  - map insert + heap allocation + allocation-order bookkeeping,
-//   * Fetch     - typed lookup (sequential pattern = store-level cache friendly,
-//                 round-robin pattern = every call misses),
+//   * Fetch     - typed lookup in three access patterns:
+//                   seq  - walk every owner in allocation order (a different
+//                          owner every call: this measures the map lookup, not
+//                          a repeated hot entry),
+//                   skew - round-robin over min(live, 256) owners (again a
+//                          different owner every call; the 256-owner window
+//                          bounds the working set),
+//                   same - the same owner every call (the per-frame/per-shot
+//                          feature pattern; the store's one-entry Fetch cache
+//                          answers this one without touching the map),
 //   * Remove    - destruction incl. removing the instance from the store,
 //   * Clear     - scenario teardown of all instances.
 //
-// The numbers are the "before/after" evidence for the store container design;
-// the measured container is documented in docs/EngineBindings.md.
+// Calibration and limitations (SAVE-08):
+//   * each size runs once, with no warm-up and no repeated trials, so run-to-run
+//     noise (Wine, host load, frequency scaling) is not quantified - compare the
+//     shape and the relative order of the columns, not the last digit;
+//   * the numbers are absolute measurements of the container shipped in this
+//     tree (ExtensionStore.h), not a before/after comparison: the repository has
+//     no second/reference container to measure against, and earlier numbers
+//     cannot be reproduced from the current tree;
+//   * the benchmark links the store the DLL uses (release-aligned flags), but it
+//     runs in a console process under Wine, so the environment is close to, not
+//     identical to, the game;
+//   * the savegame save/load paths and the deferred-allocation list are not
+//     measured here (a load-time workload needs an engine-side fixture).
+//
+// The measured container is described in docs/EngineBindings.md.
 //
 // TEST_DEPS: src/Ext/AbstractExt.cpp src/Ext/ExtensionIndex.cpp src/Core/Log.cpp src/Core/PlatformPaths.cpp
 
@@ -71,9 +93,11 @@ public:
 
 using BenchStore = venture::ExtensionStore<UnitClass, BenchUnitExt>;
 
-// The store gained a Reserve() hint with the container rework; the benchmark
-// compiles against both the old and the new header so the before/after numbers
-// come from the same source file.
+// The store gained a Reserve() hint with the container rework.  ReserveIfSupported()
+// keeps this benchmark compilable against a store header without Reserve() (for
+// example an older derived-platform copy); the header shipped in this tree always
+// has Reserve(), so the fallback branch is dead code here (SAVE-08) and is kept
+// only as a defensive shim.
 template <typename TStore, typename = void>
 struct HasReserve : std::false_type {};
 
@@ -122,7 +146,7 @@ Row RunCase(const int live)
 		row.allocateNs = elapsed * 1000.0 / static_cast<double>(live);
 	}
 
-	// -- fetch: sequential (cache friendly) ------------------------------
+	// -- fetch: allocation-order walk over every owner (map lookup per call) --
 	{
 		const int iterations = live * 20;
 		volatile std::uint32_t sink = 0;
@@ -137,7 +161,7 @@ Row RunCase(const int live)
 		(void)sink;
 	}
 
-	// -- fetch: round-robin over a large window (mostly cache misses) ----
+	// -- fetch: round-robin over min(live, 256) owners (no hot entry) -----
 	{
 		const int iterations = live * 20;
 		const int window = live > 256 ? 256 : live;
@@ -157,7 +181,7 @@ Row RunCase(const int live)
 		(void)sink;
 	}
 
-	// -- fetch: one owner repeatedly (what a per-frame feature does) ------
+	// -- fetch: one owner repeatedly (the one-entry Fetch cache path) -----
 	{
 		const int iterations = live * 20;
 		const UnitClass* const sameOwner = units[0];

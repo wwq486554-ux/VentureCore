@@ -40,6 +40,31 @@ namespace venture
 //     that; a late registration is rejected and reported as a problem, and so
 //     is a RegisterDynamicHost() call after the first Detect() (HOST-04: the
 //     detected set the feature gate is built from is frozen);
+//   * static registration happens from file-static registrars in several
+//     translation units: Hosts.Builtin.cpp registers the built-in hosts (bits
+//     0-2) and a derived platform registers its private hosts in
+//     Hosts.Custom.cpp (bits >= 1<<3).  C++ leaves the order of cross-
+//     translation-unit dynamic initialisation unspecified, and this registry
+//     does not depend on it: each definition is validated on its own and the
+//     first definition of a bit/module/display name wins, with the collision
+//     recorded as a registration problem that the startup log reports.  The
+//     project's link order happens to put Hosts.Builtin.cpp first, but that is
+//     a build detail, not a contract - do not rely on translation-unit order
+//     (HOST-09);
+//   * the built-in hosts are the base layer and take priority by contract: bits
+//     0-2 are reserved to HostKind::Builtin (a custom definition cannot claim
+//     them), and a derived platform must not reuse a built-in module or display
+//     name ("Ares.dll"/"Ares", ...).  A custom definition that shadows a
+//     built-in name makes one of the two registrations fail with a problem and
+//     leaves the feature gate with only the winner's definition - which one
+//     depends on the unspecified initialisation order - so treat it as a
+//     declaration error in Hosts.Custom.cpp and fix that, never as a way to
+//     override a built-in;
+//   * a dynamic (marker-discovered) host is registered during Detect(), i.e.
+//     after every static registration has run, so it can never displace or
+//     duplicate a static definition: a marker from an already registered module
+//     is ignored (first definition wins) and an occupied display name is
+//     rejected;
 //   * the detected set is written once on the game's main thread and then only
 //     read, like the rest of the startup state;
 //   * registration problems are drained with ReportNewProblems(): the startup

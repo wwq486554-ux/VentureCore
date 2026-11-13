@@ -17,7 +17,13 @@
 //     (2.0 feature-side INI API, INI-08/API-06);
 //   * the size-limit diagnostics (INI-06) and the pre-open logger queue
 //     (START-01 - the logger is exercised here because test_logging.cpp is not
-//     in this batch's write scope; the logger behaviour is engine-free).
+//     in this batch's write scope; the logger behaviour is engine-free);
+//   * batch D NITs: keys are declared unconditionally from Initialize() even
+//     when the [Features] switch is off (INI-05), [Groups] is a known section
+//     even with no declared group and a shared group switch is read/warned once
+//     per pass (INI-09), the template row counts and the "no range" spelling
+//     (INI-10/INI-11), duplicate [Features] switch rows and nested/unmatched
+//     BeginFeature/EndFeature (INI-12).
 
 #include <cstdarg>
 #include <cstddef>
@@ -71,6 +77,20 @@ void Check(const bool ok, const char* const what)
 bool Contains(const std::string& haystack, const char* const needle)
 {
 	return needle && haystack.find(needle) != std::string::npos;
+}
+
+std::size_t CountOccurrences(const std::string& haystack, const char* const needle)
+{
+	const std::size_t length = needle ? std::strlen(needle) : 0;
+	if (length == 0)
+		return 0;
+	std::size_t count = 0;
+	for (std::size_t position = haystack.find(needle); position != std::string::npos;
+		position = haystack.find(needle, position + length))
+	{
+		++count;
+	}
+	return count;
 }
 
 void ResetFakes()
@@ -333,6 +353,22 @@ void TestIntReads()
 	Check(ini.ReadInt("Numbers", "Free", 0, 1, 0, "no range", "unit_test.cpp") == 500,
 		"minValue > maxValue means no range check");
 
+	// INI-11: the "no range" spelling must not be recorded as a range, or the
+	// template would render a fake "range: 1..0".
+	const venture::IniKeyInfo* const free = FindInfo(ini, "Numbers", "Free");
+	Check(free && !free->hasRange, "minValue > maxValue registers the key without a range (INI-11)");
+	const std::string intTemplate = ini.RenderTemplate();
+	Check(!Contains(intTemplate, "range: 1..0"),
+		"a no-range key does not render a fake range in the template (INI-11)");
+	Check(Contains(intTemplate, "range: 0..100"), "a real range is still rendered");
+
+	// INI-11: surrounding whitespace is trimmed before parsing (the registry trims
+	// the raw value; the production provider already trims, so this only documents
+	// the contract for a raw provider).
+	SetFileValue("Numbers", "Padded", " 42 ");
+	Check(ini.ReadInt("Numbers", "Padded", 0, 0, 100, "a padded value", "unit_test.cpp") == 42,
+		"surrounding whitespace is trimmed before integer parsing (INI-11)");
+
 	Check(ini.InvalidCount() == 1, "the rejected key is counted once (per key, not per read)");
 }
 
@@ -351,6 +387,26 @@ void TestStringReads()
 
 	const venture::IniKeyInfo* const info = ini.KeyAt(ini.KeyCount() - 1);
 	Check(info && info->type == venture::IniValueType::String, "the string key is registered as a string");
+
+	// INI-11: the registry trims surrounding whitespace of a string value.
+	SetFileValue("Strings", "Padded", "  padded value  ");
+	ini.ReadString("Strings", "Padded", "fallback", buffer, sizeof(buffer), "a padded value", "unit_test.cpp");
+	Check(std::strcmp(buffer, "padded value") == 0,
+		"a string value is trimmed before it is returned (INI-11)");
+
+	// INI-11: kIniMissingValue is a reserved literal - a file value equal to it is
+	// indistinguishable from a missing key by contract.
+	SetFileValue("Strings", "Sentinel", venture::kIniMissingValue);
+	g_logs.clear();
+	char sentinelBuffer[64] = {};
+	ini.ReadString("Strings", "Sentinel", "fallback", sentinelBuffer, sizeof(sentinelBuffer),
+		"the reserved missing-value literal", "unit_test.cpp");
+	Check(std::strcmp(sentinelBuffer, "fallback") == 0,
+		"the reserved missing-value literal reads as a missing key (INI-11)");
+	Check(!SawWarning("is not a valid"), "the reserved literal is not reported as an invalid value");
+	const venture::IniKeyInfo* const sentinelInfo = FindInfo(ini, "Strings", "Sentinel");
+	Check(sentinelInfo && sentinelInfo->valueText == "fallback",
+		"the reserved-literal read still registers the key through the missing-key path");
 }
 
 void TestDuplicateRegistration()
@@ -460,6 +516,8 @@ void TestBuiltinPlatformKeys()
 bool g_enabledDefaultOn = false;
 bool g_enabledDefaultOff = false;
 bool g_enabledGrouped = false;
+bool g_enabledGrouped2 = false;
+bool g_enabledDeclaresKeys = false;
 
 void __cdecl NoopInitialize(const venture::FeatureContext& context)
 {
@@ -480,12 +538,39 @@ const venture::FeatureDescriptor kGrouped{
 	0u, 0u, &g_enabledGrouped, &NoopInitialize,
 	"Combat", true };
 
+// A second module of the same group: it must not re-read/re-warn the shared
+// [Groups] switch (INI-09).
+const venture::FeatureDescriptor kGrouped2{
+	"test_grouped_second", "GroupedSecond", "Second grouped feature",
+	0u, 0u, &g_enabledGrouped2, &NoopInitialize,
+	"Combat", true };
+
+// INI-05 regression helper: declares a platform INI key from Initialize() while
+// its own [Features] switch is off, which is the documented pattern (the switch
+// gates behaviour, not registration).
+void __cdecl DeclareKeysInitialize(const venture::FeatureContext& context)
+{
+	if (context.IniInt)
+	{
+		(void)VENTURE_INI_INT(context, "TestDeclaresKeys", "Count", 7, 0, 100,
+			"declared unconditionally from Initialize()");
+	}
+}
+
+const venture::FeatureDescriptor kDeclaresKeys{
+	"test_declares_keys", "DeclaresKeys", "Declares keys while disabled",
+	0u, 0u, &g_enabledDeclaresKeys, &DeclareKeysInitialize,
+	nullptr, false };
+
 void RunFeatureGate()
 {
 	venture::FeatureContext context{};
 	context.platformName = "VentureCore";
 	context.iniPath = "";
 	context.hostMask = 0u;
+	context.IniBool = &AdapterIniBool;
+	context.IniInt = &AdapterIniInt;
+	context.IniString = &AdapterIniString;
 	context.Log = &CaptureFeatureLog;
 	g_featureLogs.clear();
 	venture::InitializeFeatures(context);
@@ -495,17 +580,29 @@ void TestFeatureDescriptorIniSemantics()
 {
 	ResetRegistry();
 	venture::IniRegistry& ini = venture::IniRegistry::Instance();
-	(void)ini;
 
 	venture::RegisterFeature(&kDefaultOn);
 	venture::RegisterFeature(&kDefaultOff);
 	venture::RegisterFeature(&kGrouped);
+	venture::RegisterFeature(&kGrouped2);
+	venture::RegisterFeature(&kDeclaresKeys);
 
 	// No file entries: defaultEnabled decides, groups default on.
 	RunFeatureGate();
 	Check(g_enabledDefaultOn, "a descriptor without defaultEnabled defaults to enabled");
 	Check(!g_enabledDefaultOff, "defaultEnabled=false disables the module when the switch is absent");
 	Check(g_enabledGrouped, "a missing [Groups] switch defaults to on");
+	Check(g_enabledGrouped2, "a second module of the same group is enabled too");
+
+	// INI-05: Initialize() runs in both switch states, so keys are declared even
+	// while the module is disabled - the scan/template schema does not depend on
+	// the run-time switch value.
+	Check(!g_enabledDeclaresKeys, "the declaring module is disabled by defaultEnabled=false");
+	const venture::IniKeyInfo* const declaredWhileOff = FindInfo(ini, "TestDeclaresKeys", "Count");
+	Check(declaredWhileOff != nullptr,
+		"a module disabled by its switch still declares its keys in Initialize() (INI-05)");
+	Check(declaredWhileOff && declaredWhileOff->featureId == "test_declares_keys",
+		"the unconditionally declared key is tagged with its owning module");
 
 	// Explicit user values win.
 	SetFileValue("Features", "DefaultOff", "yes");
@@ -513,6 +610,7 @@ void TestFeatureDescriptorIniSemantics()
 	RunFeatureGate();
 	Check(g_enabledDefaultOff, "an explicit [Features] value overrides defaultEnabled");
 	Check(!g_enabledGrouped, "a [Groups] master switch disables the grouped module");
+	Check(!g_enabledGrouped2, "the [Groups] master switch disables every module of the group");
 	Check(FeatureLogContains("disabled by VentureCore.ini [Groups] Combat"),
 		"the group log line names the [Groups] switch");
 
@@ -524,6 +622,7 @@ void TestFeatureDescriptorIniSemantics()
 	Check(FeatureLogContains("disabled by VentureCore.ini [Features] DefaultOn"),
 		"the feature switch log line is unchanged");
 	Check(g_enabledGrouped, "removing the [Groups] override re-enables the grouped module");
+	Check(g_enabledGrouped2, "removing the [Groups] override re-enables the second grouped module");
 
 	// A switch with an invalid value warns and falls back to defaultEnabled.
 	SetFileValue("Features", "DefaultOff", "maybe");
@@ -623,6 +722,31 @@ void TestTemplateRender()
 	Check(Contains(text, "the large-range cutoff"), "the template renders the description");
 	Check(Contains(text, "range: 0..100"), "the template renders the integer range");
 	Check(Contains(text, "feature: radial"), "the template names the owning feature");
+
+	// INI-10: the dump log reports rendered row counts, not KeyCount() (which does
+	// not count the [Features] switch rows the template also writes).
+	const venture::IniTemplateRows rows = ini.TemplateRowCount();
+	Check(rows.keys == ini.KeyCount(), "the template row count covers every registered key");
+	Check(rows.switches == ini.SwitchCount(), "the template row count covers the [Features] switch rows");
+
+	int textSections = 0;
+	int textRows = 0;
+	for (std::size_t lineStart = 0; lineStart < text.size(); )
+	{
+		std::size_t lineEnd = text.find("\r\n", lineStart);
+		if (lineEnd == std::string::npos)
+			lineEnd = text.size();
+		const std::string line = text.substr(lineStart, lineEnd - lineStart);
+		if (!line.empty() && line[0] == '[')
+			++textSections;
+		else if (!line.empty() && line[0] != ';' && line.find('=') != std::string::npos)
+			++textRows;
+		lineStart = lineEnd + 2;
+	}
+	Check(textSections == rows.sections,
+		"the row count matches the section headers the template writes (INI-10)");
+	Check(textRows == rows.keys + rows.switches,
+		"the row count matches the key/switch rows the template writes (INI-10)");
 }
 
 
@@ -839,6 +963,130 @@ void TestStaticPhaseLogBuffering()
 	DeleteFileA(kPath);
 }
 
+// INI-09: [Groups] is a platform-owned section even when no feature declares a
+// group, so a typo there warns instead of falling through to the Debug-only
+// user-defined-section path.
+void TestGroupsSectionKnown()
+{
+	ResetRegistry();
+	venture::IniRegistry& ini = venture::IniRegistry::Instance();
+
+	// No module has declared a group in this registry state: there is no
+	// registered [Groups] key at all.
+	SetFileValue("Groups", "Bogus", "1");
+	g_logs.clear();
+	const venture::IniScanResult result = ini.ScanUnknownKeys(true);
+	Check(result.unknown == 1, "an unknown [Groups] key is counted as unknown (INI-09)");
+	Check(SawWarning("unknown key [Groups] Bogus - ignored"),
+		"an unknown [Groups] key warns even with no declared group (INI-09)");
+	Check(!SawDebug("ignoring user-defined section [Groups]"),
+		"[Groups] is never treated as a user-defined section (INI-09)");
+}
+
+// INI-09: a group switch shared by several modules is read and warned about once
+// per initialization pass, not once per module; a new pass re-reads the file.
+void TestGroupSwitchCaching()
+{
+	ResetRegistry();
+	venture::IniRegistry& ini = venture::IniRegistry::Instance();
+
+	SetFileValue("Groups", "Combat", "maybe");
+	g_logs.clear();
+	RunFeatureGate();
+
+	Check(g_enabledGrouped && g_enabledGrouped2,
+		"an invalid [Groups] switch falls back to its declared default (on) for every module");
+	Check(ini.InvalidCount() == 1, "the invalid group switch is counted once (one key)");
+	Check(ini.InvalidSwitchCount() == 0,
+		"a [Groups] switch is a registered key, so it counts through InvalidCount, not InvalidSwitchCount");
+	Check(CountLogs("[Groups] Combat: 'maybe' is not a valid bool", true) == 1,
+		"a shared group switch is warned about exactly once, not once per module (INI-09)");
+	Check(CountLogs("key [Groups] Combat =", false) == 1,
+		"the shared group switch is read and logged exactly once per pass (INI-09)");
+
+	int groupKeys = 0;
+	for (int index = 0; index < ini.KeyCount(); ++index)
+	{
+		const venture::IniKeyInfo* const info = ini.KeyAt(index);
+		if (info && info->section == "Groups")
+			++groupKeys;
+	}
+	Check(groupKeys == 1, "the shared group switch key is registered once");
+
+	// The feature registry publishes the switch set at the start of every pass;
+	// that drops the cache, so a changed file is re-read.
+	SetFileValue("Groups", "Combat", "no");
+	g_logs.clear();
+	RunFeatureGate();
+	Check(!g_enabledGrouped && !g_enabledGrouped2,
+		"a new initialization pass re-reads the [Groups] switch (cache dropped by SetFeatureSwitches, INI-09)");
+	Check(CountLogs("[Groups] Combat = no", false) == 1,
+		"the re-read value is logged once for the whole group");
+}
+
+// INI-12: a [Features] switch published twice must render and be read once; the
+// feature registry already rejects duplicate iniKeys, this is the defensive layer
+// in the registry itself.
+void TestFeatureSwitchDedup()
+{
+	ResetRegistry();
+	venture::IniRegistry& ini = venture::IniRegistry::Instance();
+
+	const venture::IniFeatureSwitch switches[] = {
+		{ "SwitchA", "First", nullptr, true },
+		{ " switcha ", "Second", nullptr, false },
+	};
+	g_logs.clear();
+	ini.SetFeatureSwitches(switches, 2);
+	Check(ini.SwitchCount() == 1, "a duplicate [Features] switch is published once (INI-12)");
+	Check(SawWarning("duplicate [Features] switch 'switcha'"),
+		"the duplicate switch publication warns (INI-12)");
+
+	const std::string text = ini.RenderTemplate();
+	Check(CountOccurrences(text, "SwitchA=yes") == 1,
+		"the duplicate switch renders exactly one row, the first declaration wins (INI-12)");
+	Check(!Contains(text, "Second"), "the duplicate switch's row is not rendered (INI-12)");
+}
+
+// INI-12: BeginFeature/EndFeature must nest properly; both a nested begin and an
+// unmatched end are warned about instead of silently re-tagging keys.
+void TestFeatureLifecycleTracking()
+{
+	ResetRegistry();
+	venture::IniRegistry& ini = venture::IniRegistry::Instance();
+
+	ini.BeginFeature("outer");
+	ini.ReadBool("Lifecycle", "A", true, "first", "lifecycle.cpp");
+	const venture::IniKeyInfo* info = FindInfo(ini, "Lifecycle", "A");
+	Check(info && info->featureId == "outer", "a key declared inside BeginFeature is tagged with the module id");
+
+	g_logs.clear();
+	ini.BeginFeature("inner");
+	Check(SawWarning("BeginFeature('inner') called while feature 'outer' is still active"),
+		"a nested BeginFeature is warned about (INI-12)");
+	ini.ReadBool("Lifecycle", "B", true, "second", "lifecycle.cpp");
+	info = FindInfo(ini, "Lifecycle", "B");
+	Check(info && info->featureId == "inner", "the inner module owns keys declared while nested");
+
+	ini.EndFeature();
+	ini.ReadBool("Lifecycle", "C", true, "third", "lifecycle.cpp");
+	info = FindInfo(ini, "Lifecycle", "C");
+	Check(info && info->featureId == "outer", "EndFeature restores the outer module as the owner");
+
+	ini.EndFeature();
+	ini.ReadBool("Lifecycle", "D", true, "fourth", "lifecycle.cpp");
+	info = FindInfo(ini, "Lifecycle", "D");
+	Check(info && info->featureId.empty(), "after the last EndFeature a key is base-owned");
+
+	g_logs.clear();
+	ini.EndFeature();
+	Check(SawWarning("EndFeature() without a matching BeginFeature() - ignored"),
+		"an unmatched EndFeature warns and is ignored (INI-12)");
+	ini.ReadBool("Lifecycle", "E", true, "fifth", "lifecycle.cpp");
+	info = FindInfo(ini, "Lifecycle", "E");
+	Check(info && info->featureId.empty(), "an unmatched EndFeature leaves the owner empty");
+}
+
 int __cdecl main()
 {
 	WireRegistry();
@@ -852,10 +1100,14 @@ int __cdecl main()
 	TestDuplicateRegistration();
 	TestDuplicateValueSource();
 	TestBuiltinPlatformKeys();
+	TestGroupsSectionKnown();
 	TestFeatureDescriptorIniSemantics();
+	TestGroupSwitchCaching();
 	TestInvalidSwitchAndLateInvalid();
 	TestUnknownKeyScan();
 	TestTemplateRender();
+	TestFeatureSwitchDedup();
+	TestFeatureLifecycleTracking();
 	TestMarkKnown();
 	TestTruncationDiagnostics();
 	TestFeatureIniApi();

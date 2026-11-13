@@ -449,6 +449,35 @@ LoadSummary FinishLoad()
 	return summary;
 }
 
+// --- load-window lifecycle and ownership (START-05 / SAVE-06) --------------
+//
+// The window is opened by the 0x67E44D hook before the engine reads the object
+// stream (SaveTrailer::EnterLoadWindow) and closed through
+// SaveTrailer::ExitLoadWindow from five hooks: the three LoadGame failure
+// epilogues (0x67E4B1 / 0x67E53A / 0x67E595) and the success path (0x67E685
+// post-swizzle close plus the documented second, idempotent close at 0x67E68A).
+//
+// FinishLoad() is the only place that takes ownership of the instances
+// ReadPayload created (it adopts them into their stores; the staged swizzle
+// records were already handed to the engine by ReadPayload).  START-05 / SAVE-06
+// asked what happens when a load "aborts" between ReadPayload and FinishLoad;
+// that exit does not exist in this engine build:
+//   * LoadGame has exactly four `ret` sites (0x67E4BD, 0x67E546, 0x67E5A1,
+//     0x67E72C) and every one of them is covered - the three failure epilogues
+//     run the ExitLoadWindow hooks named above, and the success return at
+//     0x67E72C comes after the 0x67E685/0x67E68A close;
+//   * 0x67E67B -> 0x67E685 is straight-line code (finish the object reader, then
+//     the swizzle call under the post-swizzle hook) with no branch or return in
+//     between; the three early exits all happen before the trailer is read, and
+//     the success tail never calls FinishLoad a second time.
+// So a normal run cannot leave loaded instances or staged registrations behind;
+// ExtensionIndex::ResetForScenarioClear() closing the window from
+// OnScenarioClear() is a defence net for the abnormal exits that remain (a crash
+// or exception, or a foreign hook that skips 0x67E685), not a reachable engine
+// path.  Do not turn that fallback into an unconditional cleanup without
+// re-deriving this: keeping the window open during a load exists for the
+// G1/E1 regression (Platform.cpp OnScenarioClear).
+// ---------------------------------------------------------------------------
 void EnterLoadWindow()
 {
 	ExtensionIndex::Instance().EnterLoadWindow();

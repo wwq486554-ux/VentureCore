@@ -261,7 +261,7 @@ claimed data is present.
 | load data end | `0x67F7C8` (end of the engine's load-data routine - not the end of `ScenarioClass::LoadGame`) | Reads the frame **sequentially** from the current position - exactly our block, because this handler runs after every ecosystem reader - with loops that tolerate legal COM short reads: 16-byte header, magic/version/size validation, then the payload and its CRC. No `Seek` and no position restore (the stream cannot seek and we consume exactly our own frame at the end). Then `ExtSave::ReadPayload`: payload version + store-set signature check (a mismatch drops the extension state, see *Compatibility notes*), then per store block: create the extension instances with their save-time owner pointer and extension address and load their data. Their swizzle registrations are staged and handed to the engine only once the whole payload validated (see *Failure handling*). |
 | swizzle | (engine's swizzle pass) | Rewrites every registered owner slot to the loaded object address. |
 | post-swizzle | `0x67E685` | `ExtSave::FinishLoad`: adopt the restored instances into their stores (the owner is valid now), call `PostLoad()`, then allocate fresh extensions (with `OnDeferredAllocation()`) for owners the game created during the load. The load window is closed right after this, before the hooked `call 0x685120` re-executes, so allocations made by that call take the normal path instead of being deferred after the drain and lost. |
-| load window close (success tail) | `0x67E68A` | Second, idempotent close of the load window (kept as the documented success-path close point; the post-swizzle handler already closed it); normal allocation is already active. |
+| load window close (success tail) | `0x67E68A` | Second, idempotent close of the load window (kept as the documented success-path close point; the post-swizzle handler already closed it); normal allocation is already active.  The `savegame: load window closed` log line is emitted only for the close that actually had the window open, so a successful load logs it once (the second close still updates the flag unconditionally). |
 
 ## Failure handling
 
@@ -293,6 +293,11 @@ boundary: the savegame is trusted input" above.
   routine (`0x67E739`) after the window opened (`0x67E44D`), and resetting the
   window there breaks the load (G1 E1 real game, 2026-11-10: the trailer's rows
   could not be adopted).  The three failure-exit hooks remain the actual A-04 fix.
+  There is no reachable engine path that returns between reading the payload and
+  `FinishLoad` - `LoadGame` has four returns and every one is covered - so the
+  scenario-clear reset is a **defence net for abnormal exits only** (a crash, or a
+  foreign hook that skips the post-swizzle close point), not part of the normal
+  load flow.
 * The frame reader is sequential and tolerates legal COM short reads by retrying
   until the header/payload is complete (A-13).  A failed read or a read that makes
   no progress drops the frame with a warning instead of spinning.  A stream that

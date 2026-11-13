@@ -224,12 +224,34 @@ void IniRegistry::SetLogSink(const IniLogFn sink)
 
 void IniRegistry::BeginFeature(const char* const featureId)
 {
-	currentFeatureId_ = featureId ? featureId : "";
+	featureIdStack_.push_back(featureId ? featureId : "");
+	currentFeatureId_ = featureIdStack_.back();
+
+	// INI-12: Begin/End must pair up.  A nested BeginFeature used to overwrite the
+	// owner silently (keys were tagged with the inner id and the outer id was
+	// lost); keep the stack so EndFeature restores the outer owner, but warn about
+	// the contract violation.
+	if (featureIdStack_.size() > 1)
+	{
+		Emit(true,
+			"BeginFeature('" + currentFeatureId_ + "') called while feature '"
+			+ featureIdStack_[featureIdStack_.size() - 2]
+			+ "' is still active - BeginFeature/EndFeature must not nest; the inner "
+			+ "feature owns the keys until its EndFeature restores the outer one (INI-12)");
+	}
 }
 
 void IniRegistry::EndFeature()
 {
-	currentFeatureId_.clear();
+	if (featureIdStack_.empty())
+	{
+		currentFeatureId_.clear();
+		Emit(true, "EndFeature() without a matching BeginFeature() - ignored (INI-12)");
+		return;
+	}
+
+	featureIdStack_.pop_back();
+	currentFeatureId_ = featureIdStack_.empty() ? "" : featureIdStack_.back();
 }
 
 void IniRegistry::Reset()
@@ -237,6 +259,8 @@ void IniRegistry::Reset()
 	keys_.clear();
 	switches_.clear();
 	currentFeatureId_.clear();
+	featureIdStack_.clear();
+	groupSwitches_.clear();
 	invalidSwitchCount_ = 0;
 	truncatedCount_ = 0;
 	summaryInvalidTotal_ = 0;
@@ -376,6 +400,17 @@ bool IniRegistry::HasSection(const char* const section) const
 	if (!section)
 		return false;
 	const std::string sectionText = Trim(section);
+	if (sectionText.empty())
+		return false;
+
+	// INI-09: [Groups] is a platform-owned section even when no feature declares a
+	// group (then no [Groups] key is registered, so the generic scan below would
+	// fall through to the Debug-only user-section path).  An unknown key there is
+	// a user typo and must warn like an unknown [Platform] key - that is what the
+	// header and docs/Ini.md promise.
+	if (EqualsIgnoreCase(sectionText, VC_SECTION_GROUPS))
+		return true;
+
 	for (const IniKeyInfo& info : keys_)
 	{
 		if (EqualsIgnoreCase(info.section, sectionText))
@@ -414,6 +449,10 @@ IniRegistry::RawValue IniRegistry::ReadRaw(const char* const section, const char
 	// fragment (INI-06).
 	result.possiblyTruncated = std::strlen(buffer) >= sizeof(buffer) - 1;
 	result.present = true;
+	// The registry trims surrounding whitespace.  The production provider (the
+	// Win32 profile API) already trims, so this only matters for a raw provider
+	// that hands through the untrimmed text - the legacy getters never exposed it
+	// (INI-11).
 	result.text = Trim(buffer);
 	return result;
 }
@@ -541,9 +580,13 @@ int IniRegistry::ReadInt(
 	const char* const description,
 	const char* const sourceFile)
 {
+	// INI-11: minValue > maxValue is the documented "no range" spelling, so the
+	// key must not claim a range - otherwise the template dump renders a fake
+	// "range: 10..0" annotation for it.
+	const bool hasRange = minValue <= maxValue;
 	IniKeyInfo& info = RegisterKey(
 		section, key, IniValueType::Int, IntText(defaultValue), description, sourceFile,
-		true, minValue, maxValue);
+		hasRange, minValue, maxValue);
 	if (info.type != IniValueType::Int)
 	{
 		EmitTypeMismatch(info, IniValueType::Int);
@@ -571,14 +614,17 @@ int IniRegistry::ReadInt(
 		}
 		else if (parsed < INT_MIN || parsed > INT_MAX)
 		{
+			// On Win32 long and int are both 32 bits, so strtol already saturates at
+			// INT_MIN/INT_MAX (an overflow is rejected as ERANGE above) and this
+			// branch is unreachable there; it stays as the correct guard for a
+			// future build where long is wider than int (INI-11).
 			invalid = true;
 			reason = "is outside the 32-bit range";
 		}
 		else
 		{
 			const int candidate = static_cast<int>(parsed);
-			if (info.hasRange && info.minValue <= info.maxValue
-				&& (candidate < info.minValue || candidate > info.maxValue))
+			if (info.hasRange && (candidate < info.minValue || candidate > info.maxValue))
 			{
 				invalid = true;
 				reason = "is outside the allowed range " + IntText(info.minValue)
@@ -739,29 +785,81 @@ bool IniRegistry::ReadGroupSwitch(const char* const group)
 	if (!group || group[0] == '\0')
 		return true;
 
+	const std::string groupText = Trim(group);
+	if (groupText.empty())
+		return true;
+
+	// INI-09: several modules can share one group.  The master switch is read once
+	// per initialization pass and cached for the rest, so an invalid value is
+	// validated/warned exactly once instead of once per module; the cache is
+	// dropped by SetFeatureSwitches at the start of the next pass so a changed
+	// file is re-read.
+	for (const CachedGroupSwitch& cached : groupSwitches_)
+	{
+		if (EqualsIgnoreCase(cached.group, groupText))
+			return cached.enabled;
+	}
+
 	// The group master switch is a real [Groups] key: register it so the
-	// unknown-key scan and the template dump know it.  Two descriptors sharing a
-	// group pass through here twice; the key is registered once (no warning).
+	// unknown-key scan and the template dump know it.
 	const std::string savedFeature = currentFeatureId_;
 	currentFeatureId_.clear();
 	const bool value = ReadBool(
 		VC_SECTION_GROUPS,
-		group,
+		groupText.c_str(),
 		true,
 		"feature group master switch ([Groups]; the features of a group are disabled together)",
 		nullptr);
 	currentFeatureId_ = savedFeature;
+	groupSwitches_.push_back(CachedGroupSwitch{ groupText, value });
 	return value;
 }
 
 void IniRegistry::SetFeatureSwitches(const IniFeatureSwitch* const switches, const int count)
 {
 	switches_.clear();
+
+	// INI-09: the feature registry publishes the switch set at the start of every
+	// initialization pass, which is exactly the point where the per-pass [Groups]
+	// switch cache must be dropped.
+	groupSwitches_.clear();
+
 	if (!switches || count <= 0)
 		return;
+
 	switches_.reserve(static_cast<std::size_t>(count));
 	for (int index = 0; index < count; ++index)
-		switches_.push_back(switches[index]);
+	{
+		const IniFeatureSwitch& candidate = switches[index];
+
+		// INI-12: a switch published twice would render two [Features] rows and be
+		// read twice.  Keep the first (the same policy as a duplicate key) and warn;
+		// the feature registry already rejects duplicate iniKeys, so this is the
+		// defensive layer for a derived platform that publishes its own set.
+		if (candidate.iniKey)
+		{
+			const std::string candidateKey = Trim(candidate.iniKey);
+			bool duplicate = false;
+			for (const IniFeatureSwitch& existing : switches_)
+			{
+				if (existing.iniKey && EqualsIgnoreCase(Trim(existing.iniKey), candidateKey))
+				{
+					duplicate = true;
+					break;
+				}
+			}
+			if (duplicate)
+			{
+				Emit(true,
+					"duplicate [" VC_SECTION_FEATURES "] switch '" + candidateKey
+					+ "' published by '" + (candidate.name ? candidate.name : "<unnamed>")
+					+ "' - keeping the first (INI-12)");
+				continue;
+			}
+		}
+
+		switches_.push_back(candidate);
+	}
 }
 
 IniScanResult IniRegistry::ScanUnknownKeys(const bool warnUnknown)
@@ -943,28 +1041,7 @@ std::string IniRegistry::RenderTemplate() const
 
 	// Feature sections, sorted by section name for a stable file.  Keys of one
 	// section keep their registration order.
-	std::vector<std::string> sections;
-	for (const IniKeyInfo& info : keys_)
-	{
-		if (EqualsIgnoreCase(info.section, VC_SECTION_PLATFORM) || EqualsIgnoreCase(info.section, VC_SECTION_GROUPS))
-			continue;
-		bool known = false;
-		for (const std::string& section : sections)
-		{
-			if (EqualsIgnoreCase(section, info.section))
-			{
-				known = true;
-				break;
-			}
-		}
-		if (!known)
-			sections.push_back(info.section);
-	}
-	std::sort(sections.begin(), sections.end(), [](const std::string& left, const std::string& right) {
-		return LowerAscii(left) < LowerAscii(right);
-	});
-
-	for (const std::string& section : sections)
+	for (const std::string& section : TemplateSections())
 	{
 		out += "\r\n";
 		AppendLine(out, "[" + section + "]");
@@ -985,6 +1062,51 @@ std::string IniRegistry::RenderTemplate() const
 	}
 
 	return out;
+}
+
+std::vector<std::string> IniRegistry::TemplateSections() const
+{
+	// Distinct module sections (everything but [Platform]/[Groups]), sorted the
+	// way RenderTemplate writes them.
+	std::vector<std::string> sections;
+	for (const IniKeyInfo& info : keys_)
+	{
+		if (EqualsIgnoreCase(info.section, VC_SECTION_PLATFORM)
+			|| EqualsIgnoreCase(info.section, VC_SECTION_GROUPS))
+		{
+			continue;
+		}
+		bool known = false;
+		for (const std::string& section : sections)
+		{
+			if (EqualsIgnoreCase(section, info.section))
+			{
+				known = true;
+				break;
+			}
+		}
+		if (!known)
+			sections.push_back(info.section);
+	}
+	std::sort(sections.begin(), sections.end(), [](const std::string& left, const std::string& right) {
+		return LowerAscii(left) < LowerAscii(right);
+	});
+	return sections;
+}
+
+IniTemplateRows IniRegistry::TemplateRowCount() const
+{
+	// [Platform] + [Groups] + [Features] always render, plus one header per module
+	// section; every registered key renders exactly once and every switch with a
+	// non-null iniKey renders one [Features] row (INI-10).
+	IniTemplateRows rows{ 3, KeyCount(), 0 };
+	rows.sections += static_cast<int>(TemplateSections().size());
+	for (const IniFeatureSwitch& featureSwitch : switches_)
+	{
+		if (featureSwitch.iniKey)
+			++rows.switches;
+	}
+	return rows;
 }
 
 int IniRegistry::KeyCount() const

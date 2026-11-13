@@ -128,6 +128,19 @@ The platform compiles against one exact YRpp revision
 | compile time | `src/Engine/EngineCompat.h` | 32-bit build and the engine ABI sizes the base actually touches; a moved field or changed layout fails with a `static_assert` message |
 | run time | startup log and `src/version.rc` | the log prints the short and full pin; the version resource records `YrppCommit` |
 
+**What the gates do not prove.**  The build-time gate pins *YRpp*; the
+compile-time `static_assert`s compare YRpp's own declared constants with
+`src/Engine/EngineCompat.h`; the run-time lines report what was compiled.  None of
+them reads the actual `gamemd.exe`, and the repository has **no engine-side fact
+source**: a YRpp revision that agrees with the pin but disagrees with the loaded
+executable is not caught by these three layers.  The only automated check that
+opens the executable is the offline hook-window validation
+(`scripts/verify_build.py` check 10, needs `VCS_GAMEMD_EXE`/`--gamemd`), and it
+verifies that the declared hook windows cover complete instructions - not class
+sizes or field offsets.  Treat the three gates as a **YRpp-consistency gate** plus
+a documented contract; engine-side validation (an `objdump`/`abi_probe.sh`
+comparison against the target build) is a manual step.
+
 ### ABI assertions
 
 `src/Engine/EngineCompat.h` currently asserts the engine ABI sizes the base
@@ -164,6 +177,13 @@ types (`INIClass`, `CCINIClass`, `INIClass::INIEntry`, `INIClass::INISection`),
 context).  A YRpp update can therefore be re-checked against every assertion.
 The probe is compiled with the same MSVC toolset under Wine and takes the shared
 toolchain lock like the build and the other probes.
+
+The probe **only prints** - it has no assertions, and its exit status does not
+depend on the printed values.  It is a measurement/reporting aid, not a gate:
+comparing its output with the table above (and, when in doubt, with the target
+executable) is a manual step.  The 16 `static_assert`s in `EngineCompat.h` are
+compile-time checks against YRpp's declared layout plus the 32-bit build and the
+Syringe `REGISTERS` size; they do not verify the loaded executable.
 
 ## Rules / art INI binding
 
@@ -321,7 +341,10 @@ script; live instance counts 1k / 5k / 20k).  "Before" is the flat
 recorded during the container rework with the benchmark as it was then (before
 the `/O2 /Oy` alignment), and they cannot be re-measured from this tree because
 the old container is gone - so compare them directionally, not as an
-apples-to-apples flag test.  "After" is the intrusive allocation-order list +
+apples-to-apples flag test.  The benchmark now measures absolute numbers for the
+container shipped in this tree only (there is no reference container to compare
+against), so the before column is retained as design context, not as an output of
+the current benchmark.  "After" is the intrusive allocation-order list +
 `Fetch` cache + `Reserve` hint, measured with `/O2 /Oy` in three runs on this
 machine on 2026-11-11, including the final clean-build acceptance run; the
 ranges span the runs because Wine timing is noisy:
@@ -338,6 +361,17 @@ The benchmark binary is rebuilt whenever `tests/bench_store.cpp`, a source from
 its `TEST_DEPS` line, any header under `src/`/`include/` or the generated git
 stamp header is newer than the binary, so the numbers cannot silently come from
 a stale build.
+
+Measurement limitations: the benchmark runs **one case per size in a single
+pass** (no warm-up and no repeated runs inside one process), so the after-column
+ranges are whole-run repeats and should be read as noisy orders of magnitude, not
+tight measurements.  It measures the store's hot paths only - the savegame
+row/serialization path is not benchmarked.  The "sequential" `Fetch` pattern
+touches a different owner on every call (`i % live`), so it necessarily misses
+the single-entry `Fetch` cache and measures the hash path; the cache hit is the
+separate same-owner row.  The before-column is historical as described above
+(recorded with different flags, the old container is not in the tree).  Treat the
+table as a design comparison, not as a performance guarantee for a running game.
 
 Memory: the intrusive links cost two pointers (8 bytes) per extension instance
 but remove the former container node (~24 bytes) and the vector's growth slack,

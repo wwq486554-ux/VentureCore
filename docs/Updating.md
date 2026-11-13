@@ -146,6 +146,12 @@ Checklist for a version bump:
 * Switches default to **on** unless the descriptor declares
   `defaultEnabled = false`; an explicit user value wins.  The optional
   `descriptor.group` adds a `[Groups] <group>=yes|no` master switch (default on).
+* `VC_DEFAULT_FEATURE_ENABLED` (`src/Core/PlatformConfig.h`) is a **historical
+  name only in 2.0**: it is still defined so existing derived platforms that
+  reference it keep compiling, but nothing reads it any more.  Changing it - or
+  setting it to `false` - has **no effect**; the default now comes from
+  `FeatureDescriptor::defaultEnabled` (default `true`).  A module that should be
+  off unless the user opts in must set `defaultEnabled = false` explicitly.
 * A module's own `<Platform>.ini` keys are declared at the read site with
   `FeatureContext::IniBool` / `IniInt` / `IniString` (or the `VENTURE_INI_*`
   macros).  The registry validates them, logs effective values and reports a
@@ -253,7 +259,9 @@ table; a 1.x save keeps loading and its extension state is preserved.
 2. **Descriptor defaults/groups** - the optional trailing fields `group` and
    `defaultEnabled` may be omitted.  A module that should be off unless the user
    opts in sets `defaultEnabled = false`; a group master switch is
-   `[Groups] <group>=yes|no` in `<Platform>.ini`.
+   `[Groups] <group>=yes|no` in `<Platform>.ini`.  The 1.x
+   `VC_DEFAULT_FEATURE_ENABLED` macro is **not read** in 2.0 - set
+   `defaultEnabled` explicitly instead (see §4).
 3. **Host registration** - the built-in table now lives in
    `src/Core/Hosts.Builtin.cpp` with the public bits in
    `include/platform/HostIds.h`.  A private host is registered in
