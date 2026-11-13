@@ -64,7 +64,8 @@ named with it (an in-game run is still the only end-to-end check - see
   extension table or trailer writer.  A refused copy is **inert**: its command is
   not added to the engine command list, its event types are neither sized nor
   dispatched, the rules-INI takeover purges nothing and the savegame hooks do not
-  touch the stream (see `docs/Lineage.md`).
+  touch the stream (see `docs/Lineage.md`).  The scan is a safety net for this
+  lineage, not a security boundary and not a sandbox for foreign DLLs.
 * **Compile-time feature registry** - `FeatureDescriptor`, `FeatureContext`,
   `FeatureRegistrar`, `VENTURE_REGISTER_FEATURE` (`include/platform/Feature.h`);
   one `[Features]` switch per feature module (`iniKey`, default on; a module's
@@ -85,8 +86,10 @@ named with it (an in-game run is still the only end-to-end check - see
   known platform's block; the load side reads it at the end of the ordered
   ecosystem blocks.  The payload carries a signature of the platform's saveable
   store set, so a changed feature set or a bumped store version drops the
-  extension state (one-time for `v0.2.0` saves) instead of misreading it; format
-  in `docs/SaveFormat.md`.
+  extension state (one-time for `v0.2.0` saves) instead of misreading it.  The
+  savegame is treated as **trusted input**: the checks are structural, not
+  authentication, and tampered/hostile saves are out of scope - see
+  `docs/SaveFormat.md`.
 * **Event channel** - platform-private network event types `0x70-0x7F` with fixed
   payloads, a responder registry, fail-closed sizing for unregistered numbers
   above the engine's `0x00-0x2E` table, and the engine's 111-byte `EventClass`
@@ -104,9 +107,11 @@ named with it (an in-game run is still the only end-to-end check - see
 * **Engine binding gate** - YRpp pinned by commit; enforced by the Linux build
   (`scripts/linux/check_yrpp.py`; on the Visual Studio path run it yourself),
   compile time (`static_assert`s in `src/Engine/EngineCompat.h`) and run time
-  (log + version resource).
+  (log + version resource).  The target `gamemd.exe` build itself is not declared
+  to the injector (no `.syexe00`/`SyringeHandshake`); the supported pairing is
+  guaranteed by the installation and injection - see `docs/EngineBindings.md`.
 * **Hook catalogue + static verification** - `docs/HookCatalogue.md` lists every
-  hook (20 records, 19 distinct handlers); `scripts/verify_build.py` parses that
+  hook (21 records, 20 distinct handlers); `scripts/verify_build.py` parses that
   table and verifies a built DLL against it without hard-coding a second copy.
 * **Unit tests and a benchmark** - `tests/` with engine-free test programs (run
   with `scripts/linux/run_tests.sh`) and the extension-store microbenchmark

@@ -33,6 +33,55 @@ std::unordered_set<std::uint32_t>& PoisonedTypes()
 	return poisoned;
 }
 
+// The built-in hierarchy ids seeded in TypeParents() above.  They are registered
+// before any feature code runs, so a conflicting feature declaration of one of
+// them is rejected without poisoning it (SAVE-04): poisoning 0x0004 would make
+// UnitExt::Fetch() return nullptr for every healthy unit.
+bool IsBuiltinTypeId(const std::uint32_t typeId)
+{
+	return typeId == venture::AbstractExt::TypeId || typeId == venture::TechnoExt::TypeId
+		|| typeId == venture::FootExt::TypeId || typeId == venture::UnitExt::TypeId;
+}
+
+bool IsPoisoned(const std::uint32_t typeId)
+{
+	return PoisonedTypes().count(typeId) != 0;
+}
+
+// START-07: bounded queue for problems reported before the platform installed its
+// sink.  A feature store can register its type from a static initializer, which
+// runs before Platform::Startup(); without a queue those diagnostics were
+// counted but lost.  Fixed-size storage: no allocation, no dependence on the
+// static-initialization order.  The game calls this on one thread, so no lock.
+struct PendingProblemQueue
+{
+	std::size_t count = 0;
+	std::size_t dropped = 0;
+	char messages[venture::MaxPendingExtTypeProblems][256] = {};
+};
+
+PendingProblemQueue& PendingProblems()
+{
+	static PendingProblemQueue queue;
+	return queue;
+}
+
+void EnqueueProblem(const char* const message)
+{
+	PendingProblemQueue& queue = PendingProblems();
+	if (queue.count >= venture::MaxPendingExtTypeProblems)
+	{
+		// Bounded on purpose: a broken batch of static registrations must not
+		// exhaust memory before the logger even exists.  The drain reports the
+		// overflow count as one summary message.
+		++queue.dropped;
+		return;
+	}
+
+	char* const slot = queue.messages[queue.count++];
+	std::snprintf(slot, sizeof(queue.messages[0]), "%s", message);
+}
+
 venture::ExtTypeProblemSink& ProblemSink()
 {
 	static venture::ExtTypeProblemSink sink = nullptr;
@@ -57,12 +106,12 @@ void ReportProblem(
 	++ProblemCount();
 	// Type id 0 is the root sentinel, not an extension type: poisoning it would
 	// turn the documented "wantedTypeId == 0 matches every extension" rule off.
-	if (typeId != 0)
+	// The seeded built-in ids are never poisoned either (SAVE-04): they are
+	// registered before any feature runs, so a conflicting feature declaration of
+	// one of them is rejected while the built-in base views of every real
+	// instance keep working.
+	if (typeId != 0 && !IsBuiltinTypeId(typeId))
 		PoisonedTypes().insert(typeId);
-
-	const venture::ExtTypeProblemSink sink = ProblemSink();
-	if (!sink)
-		return;
 
 	char message[256] = {};
 	std::snprintf(
@@ -73,7 +122,18 @@ void ReportProblem(
 		static_cast<unsigned>(typeId),
 		static_cast<unsigned>(baseTypeId),
 		reason);
-	sink(message);
+
+	// START-07: the sink is installed by Platform::Startup(), after the platform
+	// DLL's static initializers.  Buffer the message instead of dropping it; the
+	// startup path drains the queue once the logger is available.
+	const venture::ExtTypeProblemSink sink = ProblemSink();
+	if (sink)
+	{
+		sink(message);
+		return;
+	}
+
+	EnqueueProblem(message);
 }
 
 // Walks the already known part of the parent chain.  Returns false when the
@@ -160,7 +220,7 @@ bool RegisterExtType(const std::uint32_t typeId, const std::uint32_t baseTypeId)
 
 bool IsExtTypeDerivedFrom(const std::uint32_t actualTypeId, const std::uint32_t wantedTypeId)
 {
-	if (PoisonedTypes().count(actualTypeId) != 0 || PoisonedTypes().count(wantedTypeId) != 0)
+	if (IsPoisoned(actualTypeId) || IsPoisoned(wantedTypeId))
 		return false;
 
 	if (wantedTypeId == 0)
@@ -191,6 +251,13 @@ bool IsExtTypeDerivedFrom(const std::uint32_t actualTypeId, const std::uint32_t 
 		if (it == parents.end())
 			return false;
 		current = it->second;
+
+		// SAVE-04: every intermediate type has to be trustworthy too.  A poisoned
+		// node means its own class relation was rejected, so the chain above it no
+		// longer describes the C++ hierarchy; report no base view instead of
+		// casting through the break (/GR-, there is no RTTI fallback).
+		if (IsPoisoned(current))
+			return false;
 	}
 
 	return false;
@@ -199,6 +266,59 @@ bool IsExtTypeDerivedFrom(const std::uint32_t actualTypeId, const std::uint32_t 
 void SetExtTypeProblemSink(const ExtTypeProblemSink sink)
 {
 	ProblemSink() = sink;
+}
+
+std::size_t ExtTypeProblemDrain(const ExtTypeProblemSink sink)
+{
+	if (!sink)
+		return 0;
+
+	PendingProblemQueue& queue = PendingProblems();
+
+	// Snapshot first: the sink usually logs and may re-enter this registry, in
+	// which case a new problem is queued for the next drain instead of
+	// overwriting one this drain has not reported yet.
+	const std::size_t queued = queue.count;
+	char pending[MaxPendingExtTypeProblems][256] = {};
+	for (std::size_t i = 0; i < queued; ++i)
+		std::snprintf(pending[i], sizeof(pending[i]), "%s", queue.messages[i]);
+
+	const std::size_t dropped = queue.dropped;
+	queue.count = 0;
+	queue.dropped = 0;
+
+	std::size_t reported = 0;
+	for (std::size_t i = 0; i < queued; ++i)
+	{
+		sink(pending[i]);
+		++reported;
+	}
+
+	if (dropped != 0)
+	{
+		char message[256] = {};
+		std::snprintf(
+			message,
+			sizeof(message),
+			"ext type: %zu registration problem(s) were dropped - the %zu-message startup queue was "
+			"full; their type ids are still poisoned and counted in the total below",
+			dropped,
+			MaxPendingExtTypeProblems);
+		sink(message);
+		++reported;
+	}
+
+	return reported;
+}
+
+std::size_t PendingExtTypeProblemCount()
+{
+	return PendingProblems().count;
+}
+
+std::size_t DroppedExtTypeProblemCount()
+{
+	return PendingProblems().dropped;
 }
 
 std::size_t ExtTypeProblemCount()

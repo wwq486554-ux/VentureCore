@@ -3,7 +3,10 @@
 // The registry in src/Command/Commands.h is engine-free by design (the engine
 // CommandClass objects are created in src/Engine/Hooks.Commands.cpp), so the
 // test links Commands.cpp alone and checks the data the engine-facing half
-// consumes: unique names, UI fields, enable/disable, iteration.
+// consumes: unique names, UI fields, enable/disable, iteration, plus the two
+// engine-free helpers of the command layer - the shared-list name-conflict scan
+// the post-registration hook runs (HOOK-03) and the command-to-event house
+// index guard that keeps HouseIndex = -1 out of the event queue (HOOK-08).
 //
 // TEST_DEPS: src/Command/Commands.cpp
 
@@ -220,13 +223,129 @@ int __cdecl main(void)
 	Check(Commands::Count() == 3, "the running registration is stored");
 	venture::PlatformGate::MarkPending();
 
+	// --- shared engine-list name conflicts (HOOK-03) -------------------------
+	// The engine's first-match command list is one flat namespace shared by the
+	// engine and every injected DLL.  The post-registration hook snapshots it
+	// once the engine's own registration is complete and feeds the snapshot to
+	// the engine-free scan tested here.
+	std::printf("-- engine-list conflicts --\n");
+	{
+		const venture::SharedCommandEntry entries[] = {
+			{"Venture Test Command", true},
+			{"Select All", false},
+		};
+		Check(venture::FindPlatformCommandConflicts(entries, 2).empty(),
+			"different names produce no conflict");
+	}
+	Check(venture::FindPlatformCommandConflicts(nullptr, 0).empty(),
+		"a null snapshot produces no conflict");
+	{
+		const venture::SharedCommandEntry entries[] = {
+			{"Venture Test Command", true},
+			{"venture test command", false},
+		};
+		const auto conflicts = venture::FindPlatformCommandConflicts(entries, 2);
+		Check(conflicts.size() == 1, "a case-insensitive duplicate is one conflict");
+		if (conflicts.size() == 1)
+		{
+			Check(conflicts[0].platformIndex == 0 && conflicts[0].otherIndex == 1,
+				"the conflict reports the snapshot indexes");
+			Check(conflicts[0].platformShadows,
+				"platform entry first: the other command is shadowed");
+			Check(conflicts[0].platformName == entries[0].name
+					&& conflicts[0].otherName == entries[1].name,
+				"the conflict reports the colliding names");
+		}
+	}
+	{
+		const venture::SharedCommandEntry entries[] = {
+			{"select all", false},
+			{"Select All", true},
+		};
+		const auto conflicts = venture::FindPlatformCommandConflicts(entries, 2);
+		Check(conflicts.size() == 1, "an engine command registered first is one conflict");
+		if (conflicts.size() == 1)
+		{
+			Check(!conflicts[0].platformShadows,
+				"engine command first: the platform command is shadowed");
+			Check(conflicts[0].platformIndex == 1 && conflicts[0].otherIndex == 0,
+				"the conflict indexes follow the snapshot order");
+		}
+	}
+	{
+		const venture::SharedCommandEntry entries[] = {
+			{"Select All", false},
+			{"select all", false},
+		};
+		Check(venture::FindPlatformCommandConflicts(entries, 2).empty(),
+			"engine-engine duplicates are not the platform's conflict");
+	}
+	{
+		const venture::SharedCommandEntry entries[] = {
+			{"Venture Twin", true},
+			{"venture twin", true},
+		};
+		Check(venture::FindPlatformCommandConflicts(entries, 2).empty(),
+			"platform-platform duplicates are the registry's job, not the scan's");
+	}
+	{
+		const venture::SharedCommandEntry entries[] = {
+			{nullptr, false},
+			{"", false},
+			{nullptr, true},
+			{"", true},
+		};
+		Check(venture::FindPlatformCommandConflicts(entries, 4).empty(),
+			"null/empty names never match");
+	}
+	{
+		const venture::SharedCommandEntry entries[] = {
+			{"Select All", false},
+			{"select all", true},
+			{"SELECT ALL", false},
+		};
+		const auto conflicts = venture::FindPlatformCommandConflicts(entries, 3);
+		Check(conflicts.size() == 2, "both colliding engine entries are reported");
+		Check(conflicts.size() == 2
+				&& conflicts[0].platformIndex == 1 && conflicts[0].otherIndex == 0
+				&& !conflicts[0].platformShadows,
+			"the first reported pair precedes the platform entry");
+		Check(conflicts.size() == 2
+				&& conflicts[1].platformIndex == 1 && conflicts[1].otherIndex == 2
+				&& conflicts[1].platformShadows,
+			"the second reported pair follows the platform entry");
+	}
+
+	// --- command-to-event house index (HOOK-08) ------------------------------
+	// The example command must never queue HouseIndex = -1: the engine
+	// sign-extends the field (0x4C6CC4) and indexes HouseClass::Array with it
+	// (0x4C6CCA) before the event-type switch.  The pure helper is the send-side
+	// guard, so its edges are checked without the engine.
+	std::printf("-- event house index --\n");
+	{
+		std::int8_t houseIndex = 42;
+		Check(!venture::TryEventHouseIndex(-1, houseIndex),
+			"a missing current player (-1) is rejected");
+		Check(houseIndex == 42, "a rejected index leaves the output untouched");
+		Check(!venture::TryEventHouseIndex(-2, houseIndex),
+			"any negative index is rejected");
+		Check(venture::TryEventHouseIndex(0, houseIndex) && houseIndex == 0,
+			"house 0 is accepted");
+		Check(venture::TryEventHouseIndex(7, houseIndex) && houseIndex == 7,
+			"a normal house index is accepted");
+		Check(venture::TryEventHouseIndex(127, houseIndex) && houseIndex == 127,
+			"the largest signed-byte index is accepted");
+		Check(!venture::TryEventHouseIndex(128, houseIndex),
+			"an index that does not fit the signed byte is rejected");
+	}
+
 	std::printf("\n");
 	if (g_failures == 0)
 	{
-		std::printf("test_commands: all checks passed\n");
+		std::printf("PASS (0 failures)\n");
 		return 0;
 	}
 
-	std::printf("test_commands: %d check(s) FAILED\n", g_failures);
+	std::printf("FAIL (%d failure%s)\n", g_failures, g_failures == 1 ? "" : "s");
 	return 1;
 }

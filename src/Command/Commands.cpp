@@ -61,6 +61,61 @@ bool CommandNameEquals(const char* const left, const char* const right)
 	return *a == '\0' && *b == '\0';
 }
 
+std::vector<CommandNameConflict> FindPlatformCommandConflicts(
+	const SharedCommandEntry* const entries, const std::size_t count)
+{
+	std::vector<CommandNameConflict> conflicts;
+	if (!entries)
+		return conflicts;
+
+	for (std::size_t platform = 0; platform < count; ++platform)
+	{
+		if (!entries[platform].isPlatform
+			|| !entries[platform].name
+			|| !*entries[platform].name)
+		{
+			continue;
+		}
+
+		for (std::size_t other = 0; other < count; ++other)
+		{
+			if (other == platform
+				|| entries[other].isPlatform
+				|| !entries[other].name
+				|| !*entries[other].name)
+			{
+				continue;
+			}
+
+			if (!CommandNameEquals(entries[platform].name, entries[other].name))
+				continue;
+
+			conflicts.push_back(CommandNameConflict{
+				platform,
+				other,
+				entries[platform].name,
+				entries[other].name,
+				platform < other,
+			});
+		}
+	}
+
+	return conflicts;
+}
+
+bool TryEventHouseIndex(const int currentPlayerArrayIndex, std::int8_t& houseIndex)
+{
+	// The engine's HouseIndex field is a signed byte that the dispatch entry
+	// sign-extends before indexing HouseClass::Array, so a valid index must fit
+	// the signed byte range.  A real house index is far smaller; anything else
+	// means the caller has no current player and must not send the event.
+	if (currentPlayerArrayIndex < 0 || currentPlayerArrayIndex > 0x7F)
+		return false;
+
+	houseIndex = static_cast<std::int8_t>(currentPlayerArrayIndex);
+	return true;
+}
+
 Commands::RegisterResult Commands::Register(const Command& command)
 {
 	// A refused platform keeps no registration path to the engine (C-06).

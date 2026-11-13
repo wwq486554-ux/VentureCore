@@ -8,8 +8,10 @@
 #include <unordered_map>
 #include <vector>
 
+#include "Core/Log.h"
 #include "Ext/AbstractExt.h"
 #include "Ext/ExtensionIndex.h"
+#include "Ext/ExtSave.h"
 #include "Ext/ExtStream.h"
 #include "Ext/ExtSwizzle.h"
 
@@ -147,22 +149,40 @@ public:
 	}
 
 	// Drops every extension in this store (scenario clear).
+	//
+	// SAVE-03: a feature extension's destructor runs arbitrary feature code and
+	// may re-enter the store (Fetch / Remove / Clear).  The list and the owner map
+	// are therefore detached *before* the first instance is deleted, so a
+	// destructor can never observe a half-torn-down store: Fetch answers nullptr,
+	// Remove is a no-op and a nested Clear is empty.  (Remove() has always erased
+	// the map entry and invalidated the cache before deleting for the same
+	// reason.)  Instances a destructor allocates while the store is being cleared
+	// are drained by the next round - bounded, because a store-teardown loop must
+	// not be steered by feature code.
 	void Clear()
 	{
-		TExt* node = m_head;
-		while (node)
+		for (int round = 0; round < kMaxClearRounds && m_head != nullptr; ++round)
 		{
-			TExt* const next = static_cast<TExt*>(node->StoreNext());
-			ExtensionIndex::Instance().Detach(node->Owner());
-			delete node;
-			node = next;
-		}
+			std::vector<TExt*> instances;
+			instances.reserve(m_size);
 
-		m_head = nullptr;
-		m_tail = nullptr;
-		m_size = 0;
-		m_map.clear();
-		InvalidateFetchCache();
+			for (TExt* node = m_head; node != nullptr; node = static_cast<TExt*>(node->StoreNext()))
+				instances.push_back(node);
+
+			// Detach the whole store first: map lookups/caches must not see the
+			// nodes that are about to be deleted.
+			m_head = nullptr;
+			m_tail = nullptr;
+			m_size = 0;
+			m_map.clear();
+			InvalidateFetchCache();
+
+			for (TExt* const ext : instances)
+			{
+				ExtensionIndex::Instance().Detach(ext->Owner());
+				delete ext;
+			}
+		}
 	}
 
 	std::size_t Size() const
@@ -171,6 +191,11 @@ public:
 	}
 
 private:
+	// SAVE-03: number of detach+delete rounds Clear() runs at most.  One round is
+	// the normal case; the extra ones only drain instances a destructor allocated
+	// while the store was being torn down.
+	static constexpr int kMaxClearRounds = 4;
+
 	// Canary written into every saved row.  It identifies the extension class AND
 	// the store's row layout version, so a Save()/Load() drift (fields added or
 	// removed without bumping dataVersion) is rejected instead of misread:
@@ -298,6 +323,25 @@ private:
 		if (!stream.ReadU32(count))
 			return;
 
+		// SAVE-05: rowCount is savegame-controlled.  Reject an impossible row
+		// count *before creating a single instance*: every row occupies at least
+		// MinRowSize serialized bytes, and one store never legitimately carries
+		// more than MaxRowsPerStore rows.  Without this bound a 16 MiB payload
+		// (~1,048,573 minimal rows) would create one extension object + one engine
+		// identity entry per row - a load-time memory/sort denial-of-service.
+		if (count > ExtSave::MaxRowsPerStore
+			|| static_cast<std::size_t>(count) > stream.Remaining() / ExtSave::MinRowSize)
+		{
+			Log::Warn("savegame: store \"%s\" block rejected - rowCount %u exceeds the load limit "
+				"(%u row(s) per store, or more rows than the remaining %zu byte(s) can hold)",
+				Instance().m_desc.name ? Instance().m_desc.name : "?",
+				static_cast<unsigned>(count),
+				static_cast<unsigned>(ExtSave::MaxRowsPerStore),
+				stream.Remaining());
+			stream.Fail();
+			return;
+		}
+
 		for (std::uint32_t i = 0; i < count; ++i)
 		{
 			std::uint32_t extSaveAddress = 0;
@@ -318,9 +362,17 @@ private:
 
 			// A-02/W5b: the row data size is savegame-controlled.  Validate it
 			// before allocating: it must fit in the bytes the store block still
-			// carries (the block itself was already bounded by ReadPayload).
-			if (dataSize > stream.Remaining())
+			// carries (the block itself was already bounded by ReadPayload) and in
+			// the per-row cap (SAVE-05 - one row's data can never legitimately need
+			// the whole payload cap).
+			if (dataSize > ExtSave::MaxRowDataSize || dataSize > stream.Remaining())
 			{
+				Log::Warn("savegame: store \"%s\" row rejected - dataSize %u exceeds the load limit "
+					"(%u byte(s) per row, or more than the remaining %zu byte(s))",
+					Instance().m_desc.name ? Instance().m_desc.name : "?",
+					static_cast<unsigned>(dataSize),
+					static_cast<unsigned>(ExtSave::MaxRowDataSize),
+					stream.Remaining());
 				stream.Fail();
 				return;
 			}

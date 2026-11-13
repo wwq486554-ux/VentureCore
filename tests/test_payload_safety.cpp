@@ -1,6 +1,14 @@
-// Unit test: malformed-payload safety for the extension savegame layer.
+// Unit test: structurally-malformed-payload safety for the extension savegame
+// layer.
 //
-// Covers the A-01/A-02/A-03/A-05/A-11 hardening of the savegame payload:
+// The savegame is trusted input: this suite does NOT promise that a structurally
+// valid, CRC-correct forged payload is harmless (a forged non-zero owner address
+// still traps in the engine's remap pass, and the row/byte limits only bound the
+// resources one block can claim).  What is covered is the *structural* hardening
+// - truncated/short fields, bogus sizes, trailing bytes and an impossible row
+// count are rejected before they can corrupt memory or grow without bound (see
+// docs/SaveFormat.md for the trust boundary).  Concretely it covers the
+// A-01/A-02/A-03/A-05/A-11 hardening plus the SAVE-05 load limits:
 //   * swizzle registrations are staged while a payload is parsed and are only
 //     committed after the whole payload validated.  A rejected payload must leave
 //     the engine-side fake with ZERO registrations, because the instances created
@@ -9,9 +17,12 @@
 //   * the byte-stream bounds check rejects truncated reads and sizes that would
 //     wrap the 32-bit `offset + size` comparison (0xFFFFFFF8);
 //   * every size field read from the payload (blockSize / row dataSize) is
-//     validated against the bytes that are actually left AND the 16 MiB payload
-//     cap before anything is allocated from it, so a modified save cannot make
-//     the loader allocate gigabytes or terminate the process;
+//     validated against the bytes that are actually left, the 16 MiB payload cap
+//     and the per-row/per-store limits before anything is allocated from it, so
+//     a malformed size field cannot make the loader allocate gigabytes; a
+//     rowCount that is impossible for the bytes present - or above the
+//     documented per-store row cap - is rejected before one instance is created
+//     (SAVE-05);
 //   * the writer enforces the same 16 MiB cap while it assembles the payload: an
 //     oversized payload is rejected instead of being materialized and written;
 //   * payload v2 carries a store-set signature (type ids, data versions, order).
@@ -76,10 +87,19 @@ constexpr std::uint32_t kSavegameId = 0x56433031u;
 
 // --- strict fake swizzle manager ------------------------------------------
 // g_commandCount counts every call the fake receives, so a rejection test can
-// assert that the engine was not touched at all.  FakeProcess() emulates the
-// engine's remap pass and reports a registered slot without a matching identity
-// as a failure (the engine's no-match branch is a divide-by-zero trap).
-std::vector<void**> g_changedSlots;
+// assert that the engine was not touched at all.  The fake mirrors the engine's
+// remap pass (SAVE-07): RegisterForChange queues the current slot value and
+// clears the slot (0x6CF2A8), and FakeProcess() reports a queued non-zero value
+// without a matching identity as a failure - the engine's no-match branch is a
+// divide-by-zero trap (0x6CF3DD), not a silent skip.  A null slot is not queued
+// (0x6CF256).
+struct FakeChangedSlot
+{
+	void* was;
+	void** slot;
+};
+
+std::vector<FakeChangedSlot> g_changedSlots;
 std::unordered_map<void*, void*> g_identities;
 int g_commandCount = 0;
 int g_applyFailures = 0;
@@ -87,7 +107,11 @@ int g_applyFailures = 0;
 void FakeRegisterForChange(void** const pointer)
 {
 	++g_commandCount;
-	g_changedSlots.push_back(pointer);
+	if (!pointer || *pointer == nullptr)
+		return;
+
+	g_changedSlots.push_back(FakeChangedSlot{ *pointer, pointer });
+	*pointer = nullptr;
 }
 
 void FakeRegisterIdentity(void* const was, void* const is)
@@ -108,9 +132,9 @@ bool FakeProcess()
 {
 	bool applied = true;
 
-	for (void** const slot : g_changedSlots)
+	for (const FakeChangedSlot& changed : g_changedSlots)
 	{
-		const auto it = g_identities.find(*slot);
+		const auto it = g_identities.find(changed.was);
 		if (it == g_identities.end())
 		{
 			++g_applyFailures;
@@ -118,7 +142,8 @@ bool FakeProcess()
 			continue;
 		}
 
-		*slot = it->second;
+		if (changed.slot)
+			*changed.slot = it->second;
 	}
 
 	g_changedSlots.clear();
@@ -474,7 +499,9 @@ void TestStagingApi()
 		"CommitStaged hands exactly the staged registrations to the engine");
 
 	// Outside a staging window the calls go straight to the adapter (old behavior).
+	// The commit above cleared the slot (0x6CF2A8), so re-arm it first.
 	FakeReset();
+	slot = &dummyA;
 	venture::ExtSwizzle::RegisterForChange(slotAddress);
 	venture::ExtSwizzle::RegisterIdentity(&dummyA, &dummyB);
 	Check(g_commandCount == 2 && g_changedSlots.size() == 1 && g_identities.size() == 1,
@@ -514,13 +541,16 @@ void TestRejectedPayloads()
 		ExpectRejected(payload, "a block whose size exceeds the remaining payload is rejected");
 	}
 
-	// 4. Row cut inside its header (rowCount says two rows, one is present).
+	// 4. Row cut inside its header (rowCount says two rows, one is present).  The
+	//    count is already impossible for the bytes present (two minimal rows need
+	//    32 bytes, the block carries 24), so SAVE-05 rejects it before one instance
+	//    is created - a truncated row is therefore caught by the count limit.
 	{
 		Bytes rows;
 		AppendRow(rows, 0x1000, 0x2000, kCanary, BuildRowData(7, 0x3000));
 		const Bytes payload = BuildPayload({ BuildBlock(2, rows) });
-		Check(ExpectRejected(payload, "a row truncated in its header is rejected") == 1,
-			"the truncated-row-header case created (then deleted) exactly one instance");
+		Check(ExpectRejected(payload, "an infeasible rowCount is rejected before any row is read") == 0,
+			"the truncated-row-header case is caught by the rowCount limit, before construction");
 	}
 
 	// 5. Bad canary: rejected before any instance is constructed.
@@ -660,6 +690,42 @@ void TestRejectedPayloads()
 		AppendRow(rows, 0x1000, 0x2000, RowCanary(kDataVersion + 1), BuildRowData(7, 0x3000));
 		const Bytes payload = BuildPayload({ BuildBlock(1, rows) });
 		ExpectRejected(payload, "a row canary with a different dataVersion is rejected");
+	}
+
+	// 16. SAVE-05: a rowCount above the per-store cap is rejected before any
+	//     instance is created, even though the block would fit in the payload cap
+	//     (the payload cap alone would allow ~1M minimal rows).
+	{
+		const Bytes payload = BuildPayload(
+			{ BuildBlock(venture::ExtSave::MaxRowsPerStore + 1, Bytes{}) });
+		Check(ExpectRejected(payload, "a rowCount above the per-store cap is rejected") == 0,
+			"the rowCount cap is enforced before construction");
+	}
+
+	// 17. SAVE-05: a rowCount the remaining bytes cannot possibly hold (four
+	//     minimal rows need 64 bytes, the block carries one 24-byte row) is
+	//     rejected before the first row is parsed.
+	{
+		Bytes rows;
+		AppendRow(rows, 0x1000, 0x2000, kCanary, BuildRowData(7, 0x3000));
+		const Bytes payload = BuildPayload({ BuildBlock(4, rows) });
+		Check(ExpectRejected(payload, "an impossible rowCount is rejected before construction") == 0,
+			"the count-versus-remaining check runs before any row is parsed");
+	}
+
+	// 18. SAVE-05: a row dataSize above the per-row cap is rejected before the
+	//     row buffer is allocated, even when that many bytes really follow.
+	{
+		const std::size_t dataSize = venture::ExtSave::MaxRowDataSize + 1;
+		Bytes rows;
+		AppendU32(rows, 0x1000);
+		AppendU32(rows, 0x2000);
+		AppendU32(rows, kCanary);
+		AppendU32(rows, static_cast<std::uint32_t>(dataSize));
+		rows.insert(rows.end(), dataSize, 0xEE);
+		const Bytes payload = BuildPayload({ BuildBlock(1, rows) });
+		Check(ExpectRejected(payload, "a row dataSize above the 1 MiB row cap is rejected") == 0,
+			"the row data cap is enforced before the row buffer is allocated");
 	}
 }
 

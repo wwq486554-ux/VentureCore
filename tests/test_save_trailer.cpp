@@ -13,6 +13,14 @@
 // signature; the defensive-parsing cases below cover that gate (unknown store,
 // changed store dataVersion, other payload version) as well as frame corruption.
 //
+// The fake swizzle manager mirrors the engine's remap pass exactly enough to be
+// a regression test for it (SAVE-07): it clears every registered slot (0x6CF2A8)
+// and reports a non-zero slot without an identity as the engine's no-match trap
+// (0x6CF3DD) instead of silently keeping the save-time pointer.  The non-seekable
+// round trip therefore runs a real remap to a new object address, and a whole
+// section drives FinishLoad's deferred list through a callback that defers again
+// (SAVE-02).
+//
 // TEST_DEPS: src/Ext/AbstractExt.cpp src/Ext/ExtensionIndex.cpp src/Ext/ExtSave.cpp src/Core/SaveTrailer.cpp src/Core/Log.cpp src/Core/PlatformPaths.cpp
 
 #include <algorithm>
@@ -64,15 +72,36 @@ void Check(const bool ok, const char* const what)
 constexpr std::uint32_t kSavegameId = 0x56433031u;
 
 // --- fake swizzle manager --------------------------------------------------
-// Records the pointer fields registered for change and the save-time -> loaded
-// address identities; Process() emulates the engine's conversion pass.
-std::vector<void**> g_changedSlots;
+// Mirrors the engine's remap pass (objdump 0x6CF230 / 0x6CF256-0x6CF3DD):
+//   * RegisterForChange queues the *current* slot value and clears the slot
+//     (0x6CF2A8).  The engine does not queue a null value at all (0x6CF256), so
+//     the fake ignores one too;
+//   * Process() looks every queued save-time value up in the identity table and
+//     writes the loaded value into the slot.  A non-zero value without an
+//     identity is a divide-by-zero trap in the engine (0x6CF3DD); the fake
+//     reports that as a failure instead of terminating the test process.
+// The previous fake kept the slot value and silently skipped unmatched
+// registrations, i.e. it was more lenient than the engine exactly where the
+// savegame layer has to be strict (SAVE-07).
+struct FakeChangedSlot
+{
+	void* was;
+	void** slot;
+};
+
+std::vector<FakeChangedSlot> g_changedSlots;
 std::unordered_map<void*, void*> g_identities;
+int g_swizzleTraps = 0;
 
 void FakeRegisterForChange(void** const pointer)
 {
-	if (pointer)
-		g_changedSlots.push_back(pointer);
+	if (!pointer || *pointer == nullptr)
+		return; // 0x6CF256: a null slot is not queued
+
+	// 0x6CF2A1/A4 enqueue the old value and the slot address, 0x6CF2A8 clears
+	// the slot: the engine never remaps a slot a second time.
+	g_changedSlots.push_back(FakeChangedSlot{ *pointer, pointer });
+	*pointer = nullptr;
 }
 
 void FakeRegisterIdentity(void* const was, void* const is)
@@ -80,16 +109,35 @@ void FakeRegisterIdentity(void* const was, void* const is)
 	g_identities[was] = is;
 }
 
-void FakeProcess()
+bool FakeProcess()
 {
-	for (void** const slot : g_changedSlots)
+	bool allMatched = true;
+
+	for (const FakeChangedSlot& changed : g_changedSlots)
 	{
-		const auto it = g_identities.find(*slot);
-		if (it != g_identities.end())
-			*slot = it->second;
+		const auto it = g_identities.find(changed.was);
+		if (it == g_identities.end())
+		{
+			// 0x6CF3CF/0x6CF3DD: no identity for a non-zero value = #DE trap.
+			++g_swizzleTraps;
+			allMatched = false;
+			continue;
+		}
+
+		if (changed.slot)
+			*changed.slot = it->second;
 	}
+
 	g_changedSlots.clear();
 	g_identities.clear();
+	return allMatched;
+}
+
+void FakeReset()
+{
+	g_changedSlots.clear();
+	g_identities.clear();
+	g_swizzleTraps = 0;
 }
 
 // --- fake IStream ----------------------------------------------------------
@@ -310,6 +358,56 @@ void SetUp(bool saveable)
 	SavedStore::Instance().SetSaveable(saveable, 1);
 }
 
+// SAVE-02: a feature that allocates an extension for another owner from its
+// OnDeferredAllocation() callback.  The load window is still open at that point,
+// so the call is deferred again into the same list FinishLoad is iterating - the
+// old code invalidated its own range-for iterator (undefined behaviour).
+class ChainedExt final : public venture::UnitExt
+{
+public:
+	static constexpr std::uint32_t TypeId = 0x0112u;
+	static constexpr std::uint32_t BaseTypeId = venture::UnitExt::TypeId;
+
+	explicit ChainedExt(AbstractClass* const owner) : UnitExt(owner) {}
+
+	std::uint32_t ExtTypeId() const override { return TypeId; }
+
+	// A plain function pointer: the store alias below needs a complete class.
+	static inline void (*OnDeferred)(ChainedExt* self) = nullptr;
+
+	int DeferredCalls = 0;
+
+	void OnDeferredAllocation() override
+	{
+		++DeferredCalls;
+		if (OnDeferred)
+			OnDeferred(this);
+	}
+};
+
+using ChainedStore = venture::ExtensionStore<UnitClass, ChainedExt>;
+
+UnitClass* g_chainedOwner = nullptr;
+int g_chainedCallbackCalls = 0;
+
+void DeferAnotherOwner(ChainedExt*)
+{
+	++g_chainedCallbackCalls;
+	if (g_chainedOwner)
+		(void)ChainedStore::Instance().Allocate(g_chainedOwner);
+}
+
+UnitClass* g_chainedOwners[4] = {};
+int g_chainedNextOwner = 0;
+int g_chainedOwnerCount = 0;
+
+void DeferNextOwner(ChainedExt*)
+{
+	++g_chainedCallbackCalls;
+	if (g_chainedNextOwner < g_chainedOwnerCount)
+		(void)ChainedStore::Instance().Allocate(g_chainedOwners[g_chainedNextOwner++]);
+}
+
 // Builds a payload v2 by hand for the "store set / bad header" cases: one
 // signature entry and one block with the same type id / data version.
 std::vector<std::uint8_t> BuildRawPayload(
@@ -461,7 +559,7 @@ int __cdecl main()
 	UnitClass newUnitB;
 	UnitClass newUnitC;
 
-	g_identities.clear();
+	FakeReset();
 	FakeRegisterIdentity(&oldUnitA, &newUnitA);
 	FakeRegisterIdentity(&oldUnitB, &newUnitB);
 	FakeRegisterIdentity(&oldUnitC, &newUnitC);
@@ -482,7 +580,8 @@ int __cdecl main()
 		"the payload recreates the two stored extensions");
 
 	// Engine swizzle pass.
-	FakeProcess();
+	Check(FakeProcess() && g_swizzleTraps == 0,
+		"the engine remap pass resolves every registered slot");
 
 	// Post-swizzle step.
 	const venture::ExtSave::LoadSummary finished = venture::ExtSave::FinishLoad();
@@ -586,13 +685,51 @@ int __cdecl main()
 		venture::ExtensionIndex::Instance().ClearAll();
 		venture::ExtSave::EnterLoadWindow();
 		(void)venture::ExtSave::ReadPayload(kSavegameId, orphanPayload.data(), orphanPayload.size());
-		// Simulate the engine resolving this owner to "no object" (a null slot).
+		// Simulate the engine resolving this owner to "no object" (a null slot):
+		// the identity exists but points at null, so the remap is a match and the
+		// owner slot becomes null rather than trapping.
 		FakeRegisterIdentity(&orphanSource, nullptr);
-		FakeProcess();
+		Check(FakeProcess() && g_swizzleTraps == 0,
+			"an identity that maps to null is a match, not a swizzle trap");
 		const venture::ExtSave::LoadSummary missing = venture::ExtSave::FinishLoad();
 		venture::ExtSave::ExitLoadWindow();
 		Check(missing.failed == 1 && missing.adopted == 0 && store.Size() == 0,
 			"an extension with an unresolved owner is dropped, not attached");
+	}
+
+	// ---- 4b. SAVE-07: an owner id the engine never loaded is a swizzle trap --
+	// The strict fake mirrors the engine's no-match branch: a queued save-time
+	// owner address with no identity would divide by zero in the engine's remap
+	// pass (0x6CF3DD).  The fake records the trap instead of terminating, so the
+	// test can prove the registration really runs through the remap.
+	{
+		venture::ExtensionIndex::Instance().ClearAll();
+		UnitClass missingOwner;
+		SavedUnitExt* const unmatchedExt = store.Allocate(&missingOwner);
+		Check(unmatchedExt != nullptr, "SAVE-07: the unmatched-owner case has a saved extension");
+		unmatchedExt->Serial = 5150;
+
+		std::vector<std::uint8_t> unmatchedPayload;
+		Check(venture::ExtSave::WritePayload(kSavegameId, unmatchedPayload, nullptr),
+			"SAVE-07: the unmatched-owner payload is written");
+
+		venture::ExtensionIndex::Instance().ClearAll();
+		FakeReset();
+		venture::ExtSave::EnterLoadWindow();
+		const venture::ExtSave::LoadSummary loaded = venture::ExtSave::ReadPayload(
+			kSavegameId, unmatchedPayload.data(), unmatchedPayload.size());
+		Check(loaded.result == venture::ExtSave::LoadSummary::Result::Loaded && loaded.created == 1,
+			"SAVE-07: the unmatched-owner payload is structurally valid");
+
+		// The engine loaded no object at the saved owner address: no identity is
+		// registered for it, so the remap cannot resolve the owner slot.
+		Check(!FakeProcess() && g_swizzleTraps == 1,
+			"SAVE-07: an unmatched non-zero owner slot is a swizzle trap (the engine's #DE)");
+
+		const venture::ExtSave::LoadSummary lost = venture::ExtSave::FinishLoad();
+		venture::ExtSave::ExitLoadWindow();
+		Check(lost.failed == 1 && lost.adopted == 0 && store.Size() == 0,
+			"SAVE-07: the instance whose remap trapped is dropped, not attached");
 	}
 
 	// ---- 5. write with no stateful store ----------------------------------
@@ -648,6 +785,7 @@ int __cdecl main()
 		// stream exactly at the start of our frame (the other platforms' sequential
 		// readers already consumed their blocks), so the reader must not Seek either.
 		venture::ExtensionIndex::Instance().ClearAll();
+		FakeReset();
 		FakeStream loaded(written.Data());
 		loaded.SetFailSeeks(true);
 		loaded.SkipTo(engineBytes.size());
@@ -658,13 +796,23 @@ int __cdecl main()
 			"the reader consumes exactly the frame (the stream ends after it)");
 		Check(venture::ExtensionIndex::Instance().LoadedExtensions().size() == 1,
 			"a non-seekable stream restores the stored extension instance");
+
+		// SAVE-07: the load has to run the engine's remap, not rely on the save-time
+		// owner address happening to still be the same object.  The engine loaded
+		// the owner at a new address, so the identity table maps the save-time
+		// address to the new object and the slot is rewritten.
+		UnitClass loadedUnit;
+		FakeRegisterIdentity(&writeUnit, &loadedUnit);
+		Check(FakeProcess() && g_swizzleTraps == 0,
+			"the non-seekable round trip runs a real engine remap pass");
+
 		const venture::ExtSave::LoadSummary adopted = venture::ExtSave::FinishLoad();
 		venture::ExtSave::ExitLoadWindow();
 		Check(adopted.adopted == 1 && adopted.failed == 0,
 			"the extension read from a non-seekable stream is adopted");
-		SavedUnitExt* const restored = store.Fetch(&writeUnit);
+		SavedUnitExt* const restored = store.Fetch(&loadedUnit);
 		Check(restored != nullptr && restored->Serial == 4242,
-			"the extension state round-trips without any Seek");
+			"the extension state round-trips through the remapped owner without any Seek");
 
 		// Short writes (legal for COM) are retried until the whole frame is out.
 		{
@@ -832,6 +980,71 @@ int __cdecl main()
 		SavedUnitExt* const fresh = store.Fetch(&deferredUnit);
 		Check(fresh != nullptr && fresh->Serial == 0 && fresh->DeferredCalls == 1,
 			"no trailer: the deferred extension is fresh and initialised exactly once");
+		venture::ExtensionIndex::Instance().ClearAll();
+	}
+
+	// ---- 8. SAVE-02: a deferred callback may defer another owner ------------
+	// FinishLoad iterates a local snapshot of the deferred list; allocations the
+	// OnDeferredAllocation() callback makes are deferred into the (cleared) live
+	// list and processed in one bounded second pass.  Iterating the live vector
+	// directly used to be undefined behaviour when the callback pushed into it.
+	{
+		venture::ExtensionIndex::Instance().ClearAll();
+		ChainedStore& chained = ChainedStore::Instance();
+		chained.SetName("UnitClass/ChainedExt");
+
+		UnitClass firstOwner;
+		UnitClass chainedOwner;
+		g_chainedOwner = &chainedOwner;
+		g_chainedCallbackCalls = 0;
+		ChainedExt::OnDeferred = &DeferAnotherOwner;
+
+		venture::ExtSave::EnterLoadWindow();
+		Check(chained.Allocate(&firstOwner) == nullptr,
+			"SAVE-02: the first owner's allocation is deferred while the window is open");
+		const venture::ExtSave::LoadSummary chainedLoad = venture::ExtSave::FinishLoad();
+		venture::ExtSave::ExitLoadWindow();
+		ChainedExt::OnDeferred = nullptr;
+
+		Check(chainedLoad.deferred == 2,
+			"SAVE-02: the callback's new deferral is processed in the bounded second pass");
+		Check(g_chainedCallbackCalls == 2,
+			"SAVE-02: the callback ran once per processed deferred entry");
+		Check(chained.Size() == 2 && chained.Fetch(&firstOwner) != nullptr
+				&& chained.Fetch(&chainedOwner) != nullptr,
+			"SAVE-02: both the original and the chained owner get an extension");
+		Check(venture::ExtensionIndex::Instance().DeferredAllocations().empty(),
+			"SAVE-02: the deferred list is empty after FinishLoad");
+		venture::ExtensionIndex::Instance().ClearAll();
+	}
+	{
+		// A feature that keeps deferring a new owner on every callback is cut off
+		// after the bounded second pass; the leftover record is dropped instead of
+		// making FinishLoad loop forever.
+		venture::ExtensionIndex::Instance().ClearAll();
+		ChainedStore& chained = ChainedStore::Instance();
+		UnitClass owners[3];
+		g_chainedOwners[0] = &owners[1];
+		g_chainedOwners[1] = &owners[2];
+		g_chainedOwnerCount = 2;
+		g_chainedNextOwner = 0;
+		g_chainedCallbackCalls = 0;
+		ChainedExt::OnDeferred = &DeferNextOwner;
+
+		venture::ExtSave::EnterLoadWindow();
+		Check(chained.Allocate(&owners[0]) == nullptr,
+			"SAVE-02: the first owner is deferred before the bounded-pass test");
+		const venture::ExtSave::LoadSummary bounded = venture::ExtSave::FinishLoad();
+		venture::ExtSave::ExitLoadWindow();
+		ChainedExt::OnDeferred = nullptr;
+
+		Check(bounded.deferred == 2, "SAVE-02: only the two bounded passes are processed");
+		Check(chained.Fetch(&owners[0]) != nullptr && chained.Fetch(&owners[1]) != nullptr,
+			"SAVE-02: the owners of both processed passes have an extension");
+		Check(chained.Fetch(&owners[2]) == nullptr,
+			"SAVE-02: the third chained owner is dropped with the bounded-pass limit");
+		Check(venture::ExtensionIndex::Instance().DeferredAllocations().empty(),
+			"SAVE-02: no deferred record survives FinishLoad");
 		venture::ExtensionIndex::Instance().ClearAll();
 	}
 

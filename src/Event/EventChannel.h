@@ -76,7 +76,12 @@ public:
 	{
 		std::uint8_t type;         // 0x70-0x7F
 		std::uint8_t isExecuted;   // 0 on the wire; the engine sets it when it runs
-		std::int8_t houseIndex;    // player house that raised it; -1 = none
+		// Player house that raised the event.  Must be a real ArrayIndex 0..127:
+		// the engine's dispatch (0x4C6CC4 movsx / 0x4C6CCA) indexes HouseClass::Array
+		// with it unconditionally, before the type switch - so -1 is *not* safe on
+		// the wire (it becomes array[-1], an out-of-bounds read).  Platform senders
+		// must refuse to send without a current player (HOOK-08).
+		std::int8_t houseIndex;
 		std::uint32_t frameNumber; // engine frame the event is for
 		std::uint8_t payload[EventChannelMaxPayload]; // zero-padded
 	};
@@ -218,7 +223,11 @@ public:
 
 	// Serializes and queues one event through the installed sender.  Returns
 	// false when the event is not ours, the payload size is wrong, or no
-	// sender is installed.
+	// sender is installed.  `houseIndex` must be a valid player house index
+	// (0..127, e.g. HouseClass::CurrentPlayer->ArrayIndex): the engine's event
+	// dispatch indexes HouseClass::Array with it before checking the type, so a
+	// -1/"no house" value is an out-of-bounds read - see platform::TryEventHouseIndex()
+	// in src/Command/Commands.h (HOOK-08).
 	static bool Send(
 		Type type,
 		std::int8_t houseIndex,

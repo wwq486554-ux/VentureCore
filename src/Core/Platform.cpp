@@ -401,6 +401,12 @@ bool Startup()
 	// in the same feature initialization, so route their deny-list warnings too
 	// (C-09).
 	SetExtTypeProblemSink(&ExtTypeProblemLog);
+	// START-07: extension type registrations that ran during static initialization
+	// (a feature store's first use / an EnsureExtTypeRegistered<> in a static
+	// initializer) were recorded in the Ext layer's bounded startup queue because
+	// no sink was installed yet.  Flush them to the logger before feature
+	// initialization can add more.
+	ExtTypeProblemDrain(&ExtTypeProblemLog);
 	IniTakeover::SetWarnSink(&IniTakeoverWarnLog);
 
 	FeatureContext context{};
@@ -465,11 +471,17 @@ bool Startup()
 		DumpIniTemplate();
 	}
 
+	// START-07: every rejected registration is reported: the static-phase ones
+	// were queued until the sink existed and flushed above, later ones went to the
+	// sink directly.  The total also counts a problem the bounded startup queue
+	// had to drop (the drain reports that as one summary line).
 	const std::size_t extTypeProblems = ExtTypeProblemCount();
 	if (extTypeProblems != 0)
 	{
 		Log::Error(
-			"ext types: %zu registration problem(s) - the types logged above cannot be fetched "
+			"ext types: %zu registration problem(s) - the rejected types are reported above "
+			"(a static-initialization problem is queued until the logger is open, then flushed; "
+			"a startup-queue overflow is reported as one summary line) and cannot be fetched "
 			"(a wrong TypeId/BaseTypeId pair in an extension class is a composition error)",
 			extTypeProblems);
 	}

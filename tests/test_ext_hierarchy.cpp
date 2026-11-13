@@ -85,6 +85,32 @@ public:
 
 using BuildingStore = venture::ExtensionStore<BuildingClass, BuildingExt>;
 
+// SAVE-03: an extension whose destructor re-enters its store.  Clear() detaches
+// the whole store before deleting, so a destructor must observe an empty store
+// instead of a half-torn-down list (formerly a use-after-free / double free).
+class ReentrantExt final : public venture::TechnoExt
+{
+public:
+	static constexpr std::uint32_t TypeId = 0x0104u;
+	static constexpr std::uint32_t BaseTypeId = venture::TechnoExt::TypeId;
+
+	explicit ReentrantExt(AbstractClass* const owner) : TechnoExt(owner) {}
+
+	std::uint32_t ExtTypeId() const override { return TypeId; }
+
+	// A plain function pointer: the store alias below needs a complete extension
+	// class, so the probe cannot be a member that names its own store.
+	static inline void (*OnDestroyed)() = nullptr;
+
+	~ReentrantExt() override
+	{
+		if (OnDestroyed)
+			OnDestroyed();
+	}
+};
+
+using ReentrantStore = venture::ExtensionStore<BuildingClass, ReentrantExt>;
+
 // D-22: capture what RegisterExtType reports through the problem sink.  A plain
 // function (not a lambda) because the sink is a function pointer.
 int g_problemMessages = 0;
@@ -93,6 +119,25 @@ void CaptureExtTypeProblem(const char* const message)
 {
 	if (message && *message)
 		++g_problemMessages;
+}
+
+// SAVE-03: what the re-entrant destructor probe observed while its store was
+// being cleared.
+BuildingClass* g_reentrantProbeOwner = nullptr;
+venture::AbstractExt* g_reentrantFetched = nullptr;
+int g_reentrantDestructions = 0;
+int g_reentrantNestedClears = 0;
+
+void ProbeStoreReentrancy()
+{
+	++g_reentrantDestructions;
+	ReentrantStore& store = ReentrantStore::Instance();
+	// Every call here used to touch a node that had already been deleted, or a
+	// node the teardown loop was about to delete again.
+	g_reentrantFetched = store.Fetch(g_reentrantProbeOwner);
+	store.Remove(g_reentrantProbeOwner);
+	store.Clear();
+	++g_reentrantNestedClears;
 }
 }
 
@@ -180,6 +225,44 @@ int __cdecl main()
 		"every rejected registration is counted once");
 	Check(g_problemMessages == 5, "every rejected registration is reported through the problem sink");
 
+	// -- SAVE-04: a poisoned intermediate type invalidates the chain ----------
+	// The lookup used to validate only the two endpoints, so a chain through a
+	// poisoned middle node still passed and FetchExtAs performed a static_cast
+	// through a class relation that had been rejected.  (Checked before the
+	// built-in conflict below, which would poison its own endpoint.)
+	Check(venture::RegisterExtType(0x1A1u, UnitExt::TypeId), "SAVE-04: the chain base registers");
+	Check(venture::RegisterExtType(0x1A0u, 0x1A1u), "SAVE-04: the derived chain type registers");
+	Check(venture::IsExtTypeDerivedFrom(0x1A0u, UnitExt::TypeId),
+		"SAVE-04: the healthy chain reports the base view");
+	Check(!venture::RegisterExtType(0x1A1u, TechnoExt::TypeId),
+		"SAVE-04: re-registering the mid-chain type with another base is rejected");
+	Check(venture::ExtTypeProblemCount() == firstProblemCount + 6,
+		"SAVE-04: the mid-chain rejection is counted");
+	Check(!venture::IsExtTypeDerivedFrom(0x1A0u, UnitExt::TypeId),
+		"SAVE-04: a base view through a poisoned intermediate type is refused");
+	Check(!venture::IsExtTypeDerivedFrom(0x1A0u, AbstractExt::TypeId),
+		"SAVE-04: a root view through a poisoned intermediate type is refused too");
+	Check(g_problemMessages == 6, "SAVE-04: the mid-chain rejection is logged");
+
+	// -- SAVE-04: a built-in id conflict is rejected without poisoning --------
+	// The seeded built-in ids are registered before any feature runs.  A feature
+	// that re-declares one of them is rejected, but poisoning it used to make
+	// every base view of every real instance fail (one bad feature turned
+	// UnitExt::Fetch into a universal nullptr).
+	Check(!venture::RegisterExtType(UnitExt::TypeId, TechnoExt::TypeId),
+		"SAVE-04: re-registering a built-in type with another base is rejected");
+	Check(venture::ExtTypeProblemCount() == firstProblemCount + 7,
+		"SAVE-04: the rejected built-in re-registration is counted");
+	Check(g_problemMessages == 7, "SAVE-04: the rejected built-in re-registration is logged");
+	Check(venture::IsExtTypeDerivedFrom(TestUnitExt::TypeId, UnitExt::TypeId),
+		"SAVE-04: the rejected re-registration does not poison the built-in hierarchy");
+	Check(venture::IsExtTypeDerivedFrom(UnitExt::TypeId, AbstractExt::TypeId),
+		"SAVE-04: the built-in chain still reaches the root");
+	Check(UnitExt::Fetch(&unitA) == extA,
+		"SAVE-04: a healthy instance keeps its base view after the rejected re-registration");
+	Check(venture::RegisterExtType(UnitExt::TypeId, venture::FootExt::TypeId),
+		"SAVE-04: the correct built-in pair is still idempotent");
+
 	// -- parent-chain depth guard (A-18) -------------------------------------
 	// Build a forward-referenced chain deeper than any real hierarchy (each pair
 	// is accepted because its base is not registered yet).  The lookup must stop
@@ -204,6 +287,62 @@ int __cdecl main()
 		"a repeated lookup does not report the same chain again");
 
 	venture::SetExtTypeProblemSink(nullptr);
+
+	// -- START-07: bounded static-phase problem queue -------------------------
+	// A real feature can register its type during static initialization, i.e.
+	// before Platform::Startup() installs the sink.  Those problems are queued
+	// (bounded) and the platform drains them right after installing the sink.
+	{
+		Check(venture::PendingExtTypeProblemCount() == 0,
+			"START-07: nothing is queued while the sink had been installed");
+		g_problemMessages = 0;
+		const std::size_t problemsBefore = venture::ExtTypeProblemCount();
+
+		Check(!venture::RegisterExtType(0x2A0u, 0x2A0u),
+			"START-07: the rejected self-base registration is rejected");
+		Check(venture::PendingExtTypeProblemCount() == 1,
+			"START-07: a problem reported without a sink is queued, not dropped");
+		Check(g_problemMessages == 0, "START-07: no sink was called while it is not installed");
+		Check(venture::ExtTypeProblemCount() == problemsBefore + 1,
+			"START-07: the rejected registration is still counted");
+
+		Check(venture::ExtTypeProblemDrain(nullptr) == 0,
+			"START-07: draining without a sink reports nothing");
+		Check(venture::PendingExtTypeProblemCount() == 1,
+			"START-07: a null drain keeps the queued problem");
+
+		Check(venture::ExtTypeProblemDrain(&CaptureExtTypeProblem) == 1,
+			"START-07: the drain reports the queued problem");
+		Check(g_problemMessages == 1, "START-07: the queued problem reached the sink");
+		Check(venture::PendingExtTypeProblemCount() == 0,
+			"START-07: the queue is empty after the drain");
+		Check(venture::ExtTypeProblemDrain(&CaptureExtTypeProblem) == 0,
+			"START-07: a second drain reports nothing");
+		Check(venture::ExtTypeProblemCount() == problemsBefore + 1,
+			"START-07: draining does not change the rejected-registration total");
+	}
+	{
+		// Overflow: the queue must stay bounded even when feature code raises many
+		// problems before the logger exists.
+		g_problemMessages = 0;
+		bool allRejected = true;
+		for (std::uint32_t i = 0; i < 20; ++i)
+			allRejected = !venture::RegisterExtType(0x2B0u + i, 0x2B0u + i) && allRejected;
+		Check(allRejected, "START-07: twenty self-base registrations are all rejected");
+		Check(venture::PendingExtTypeProblemCount() == venture::MaxPendingExtTypeProblems,
+			"START-07: the startup queue is bounded");
+		Check(venture::DroppedExtTypeProblemCount()
+				== static_cast<std::size_t>(20) - venture::MaxPendingExtTypeProblems,
+			"START-07: problems beyond the queue capacity are counted as dropped");
+		Check(venture::ExtTypeProblemDrain(&CaptureExtTypeProblem)
+				== venture::MaxPendingExtTypeProblems + 1,
+			"START-07: the drain reports the queued problems plus one overflow summary");
+		Check(g_problemMessages == static_cast<int>(venture::MaxPendingExtTypeProblems) + 1,
+			"START-07: the overflow summary reached the sink");
+		Check(venture::PendingExtTypeProblemCount() == 0
+				&& venture::DroppedExtTypeProblemCount() == 0,
+			"START-07: a drain resets the queue and the drop counter");
+	}
 
 	BuildingExt* const buildingExt = buildingStore.Allocate(&building);
 	Check(buildingExt != nullptr, "a second owner class has its own store");
@@ -233,6 +372,43 @@ int __cdecl main()
 	Check(ExtensionIndex::Instance().ExtCount() == 0, "scenario clear drops the global index");
 	ExtensionIndex::Instance().ClearAll();
 	Check(store.Size() == 0, "scenario clear is idempotent");
+
+	// -- SAVE-03: store teardown is re-entrancy safe -------------------------
+	// A feature extension's destructor may call back into the store.  Clear()
+	// detaches the list and the map before the first delete, so the re-entrant
+	// Fetch/Remove/Clear calls must see an empty store instead of dangling nodes
+	// (formerly a use-after-free / double free).
+	{
+		ReentrantStore& reentrant = ReentrantStore::Instance();
+		reentrant.SetName("BuildingClass/ReentrantExt");
+
+		BuildingClass firstOwner;
+		BuildingClass secondOwner;
+		Check(reentrant.Allocate(&firstOwner) != nullptr
+				&& reentrant.Allocate(&secondOwner) != nullptr,
+			"SAVE-03: the re-entrancy store allocated two extensions");
+		Check(reentrant.Size() == 2, "SAVE-03: both extensions are in the store");
+
+		g_reentrantProbeOwner = &firstOwner;
+		g_reentrantFetched = nullptr;
+		g_reentrantDestructions = 0;
+		g_reentrantNestedClears = 0;
+		ReentrantExt::OnDestroyed = &ProbeStoreReentrancy;
+
+		ExtensionIndex::Instance().ClearAll();
+		ReentrantExt::OnDestroyed = nullptr;
+
+		Check(g_reentrantDestructions == 2,
+			"SAVE-03: scenario clear destroys every instance exactly once");
+		Check(reentrant.Size() == 0, "SAVE-03: the store is empty after the clear");
+		Check(g_reentrantFetched == nullptr,
+			"SAVE-03: Fetch from a destructor sees the detached map, not a dangling node");
+		Check(g_reentrantNestedClears == 2,
+			"SAVE-03: a nested Clear from a destructor runs once per instance and is a no-op");
+		Check(ExtensionIndex::Instance().Fetch(&firstOwner) == nullptr
+				&& ExtensionIndex::Instance().Fetch(&secondOwner) == nullptr,
+			"SAVE-03: the global index holds no entry for the cleared owners");
+	}
 
 	// -- allocation order after a clear -------------------------------------
 	TestUnitExt* const again = store.Allocate(&unitA);

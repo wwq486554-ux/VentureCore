@@ -6,7 +6,7 @@
 // exits, reset it on scenario clear, and drop a deferred entry when the engine
 // invalidates the owner pointer.
 //
-// TEST_DEPS: src/Ext/AbstractExt.cpp src/Ext/ExtensionIndex.cpp src/Core/Log.cpp src/Core/PlatformPaths.cpp
+// TEST_DEPS: src/Ext/AbstractExt.cpp src/Ext/ExtensionIndex.cpp src/Ext/ExtSave.cpp src/Core/Log.cpp src/Core/PlatformPaths.cpp
 
 #include <cstdint>
 #include <cstdio>
@@ -24,6 +24,7 @@ class UnitClass : public FootClass {};
 
 #include "Ext/ExtHierarchy.h"
 #include "Ext/ExtensionStore.h"
+#include "Ext/ExtSave.h"
 #include "Ext/ExtSwizzle.h"
 
 namespace
@@ -174,14 +175,14 @@ int __cdecl main()
 		Check(store.Allocate(&constructedDuringLoad) == nullptr,
 			"the object the engine created during the load is deferred");
 
-		// Order of the 0x67E685 handler: FinishLoad drains the deferred list, then
-		// the window is closed before the hooked `call 0x685120` re-executes.
-		for (const venture::ExtensionIndex::DeferredAllocation& deferred : index.DeferredAllocations())
-		{
-			if (deferred.desc->allocateDeferred)
-				deferred.desc->allocateDeferred(deferred.owner);
-		}
-		index.ClearDeferredAllocations();
+		// Order of the 0x67E685 handler: the real FinishLoad drains the deferred
+		// list, then the window is closed before the hooked `call 0x685120`
+		// re-executes.  Test the production entry point instead of a hand-copied
+		// drain loop, which used to hide a drift between the test and FinishLoad
+		// (SAVE-07).
+		const venture::ExtSave::LoadSummary finished = venture::ExtSave::FinishLoad();
+		Check(finished.deferred == 1 && finished.adopted == 0 && finished.failed == 0,
+			"the real FinishLoad drains the deferred allocation");
 		index.ExitLoadWindow();
 		Check(!index.IsLoadingSaveGame(), "the window is closed right after FinishLoad");
 

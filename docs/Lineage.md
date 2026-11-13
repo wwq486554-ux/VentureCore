@@ -57,6 +57,14 @@ How the fields are produced:
 | `version` | `VC_VERSION_DISPLAY` from `src/Core/PlatformVersion.h` |
 | `savegameId` | `VC_SAVEGAME_ID` from `src/Core/PlatformConfig.h` - the savegame trailer format of the lineage |
 
+The marker is an **internal ABI of the VENTURE lineage**, not a general
+interoperability protocol: any DLL built from this base tree is expected to
+export it with these fields, and the scan's guarantees are about copies of this
+lineage.  A private fork that changes the marker layout, the platform identity
+scheme or the export name is not promised to be recognised - and two unrelated
+platforms are not supposed to run side by side through this mechanism (hosts are
+handled by the separate host-matrix protocol, see `docs/HostMatrix.md`).
+
 `__cdecl` is written out explicitly and the functions are decorated with
 `__declspec(dllexport)` exactly like the SyringeEx hook handlers: the project is
 compiled with **`/Gz`** (stdcall is the default calling convention), so a
@@ -106,9 +114,12 @@ not a startup dependency.
 The scan is **not** a security boundary and does not contain faults raised inside
 a foreign module: when a module exports the probe symbol, its
 `VentureLineage_GetInfo()` is called directly, so a module that exports the
-symbol but crashes inside it can still take the process down.  (The host-marker
-scan protects its call; containment of a faulting lineage export is a known
-limitation, see "Limits and residual risks".)
+symbol but crashes inside it can still take the process down.  This is a
+deliberate, recorded limitation (not hardened in 2.x): the marker is the
+lineage-internal contract above, so a module that exports it is treated as a
+same-lineage peer, not as untrusted third-party code.  (The host-marker protocol
+has its own guarded read path; the lineage scan does not.)  See "Limits and
+residual risks".
 
 ## Policy and startup behaviour
 
@@ -236,8 +247,11 @@ are covered by `tests/test_lineage.cpp`; run it with
   one copy of the DLL state, not two.
 * The scan calls an exported function of another module directly (`GetProcAddress`
   then a call).  A module that exports the probe symbol but raises inside the
-  call can take the process down; containing a faulting foreign export is a known
-  limitation of this scan (the host-marker scan has the protected path).
+  call can take the process down; containing a faulting foreign export is a
+  **known, accepted limitation** (deliberately not hardened in 2.x).  The marker
+  is a lineage-internal contract: a module that exports it is treated as a
+  same-lineage peer, not as untrusted third-party code, and the scan is not a
+  sandbox.
 * The marker layout is ABI: append fields only with an
   `VENTURE_LINEAGE_ABI_VERSION` bump, and keep the `__cdecl` exports
   undecorated.

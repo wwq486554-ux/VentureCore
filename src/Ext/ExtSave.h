@@ -45,10 +45,19 @@ namespace venture::ExtSave
 // best-effort skips: a mismatch drops the whole extension state and the game's
 // own objects still load normally.
 //
-// The parser is deliberately defensive: size fields read from the payload are
-// validated against the remaining bytes and MaxPayloadSize before anything is
-// allocated, and any malformed header/signature/block rejects the payload with a
-// warning instead of failing the game's load.
+// The parser is deliberately defensive against *structurally* malformed
+// payloads: size fields read from the payload are validated against the
+// remaining bytes, the per-row/per-store limits below and MaxPayloadSize before
+// anything is allocated, and any malformed header/signature/block rejects the
+// payload with a warning instead of failing the game's load.
+//
+// This is a corruption guard, NOT an authentication/trust boundary: the savegame
+// is treated as trusted input.  A payload that is structurally valid (and whose
+// CRC was recomputed) can still make the engine's pointer remap fail (a forged,
+// non-zero owner address that matches no loaded object traps in the remap pass)
+// or claim resources up to the row/byte limits below.  Protecting against a
+// modified savegame is out of scope for the Ext layer; docs/SaveFormat.md
+// documents the trust boundary and the load-time limits.
 // ---------------------------------------------------------------------------
 constexpr std::uint32_t PayloadVersion = 2;
 
@@ -59,6 +68,25 @@ constexpr std::uint32_t PayloadVersion = 2;
 // rejected before anything is allocated from an oversized size field, and a save
 // whose payload would exceed the limit is not written.
 constexpr std::uint32_t MaxPayloadSize = 16u * 1024u * 1024u;
+
+// Upper bound of the rows one store block may carry (SAVE-05).  `rowCount` is
+// savegame-controlled input: the 16 MiB payload cap alone allows ~1,048,573
+// minimal rows, i.e. one extension object plus one engine identity entry per
+// row, which is a load-time memory/sort denial-of-service.  A real scenario
+// never has more than a few thousand extensions of one store, so 65,535 (one
+// 16-bit index space) is a generous bound; a block above it is rejected before
+// any instance is created.  docs/SaveFormat.md documents the limit.
+constexpr std::uint32_t MaxRowsPerStore = 65535u;
+
+// Upper bound of one row's serialized extension data (SAVE-05).  A row carries
+// one extension's Save() output; 1 MiB is far above any real extension and keeps
+// a single row from consuming the whole payload cap.
+constexpr std::uint32_t MaxRowDataSize = 1024u * 1024u;
+
+// Minimum serialized row size: [extSaveAddress][ownerSaveAddress][canary]
+// [dataSize] = 4 x u32.  Used to reject an impossible rowCount before the loader
+// tries to read (or allocate) a single row (SAVE-05).
+constexpr std::size_t MinRowSize = 4u * sizeof(std::uint32_t);
 
 struct LoadSummary
 {

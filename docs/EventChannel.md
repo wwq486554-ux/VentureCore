@@ -65,6 +65,14 @@ event stream is misparsed and the game desynchronises. That is what the
 mixed-client warning is about; there is no length on the wire that would let the
 receiver skip a payload whose type it does not know.
 
+The one-byte answer is an **intentional trade-off**, not a stop-gap: memory
+safety is preferred over a mis-sized read.  A number/peer mismatch therefore
+surfaces as a desynchronisation - visible, and recoverable by restarting the
+session - instead of as a return-address overwrite inside the engine's event
+decoder.  Guessing a size from the wire is not an option (the wire carries no
+length), so the alternatives are a desync or an out-of-bounds read; the channel
+deliberately chooses the former.
+
 ### Order contract
 
 Engine hooks run in DLL load order, and the first handler that returns a
@@ -86,6 +94,40 @@ the engine's size table for any number above `0x2E`. A platform loaded before
 VentureCore keeps this property automatically: its own size hook runs first and
 claims its numbers before the fail-closed answer is reached.
 
+### Co-load verification (in-game, NEED-HW)
+
+The order above is a **load-order property**.  The build machine has no SyringeEx
+chain implementation and no co-loaded platform DLLs, so the automated checks
+cannot prove it; the supported combination is verified by hand and recorded here
+(fill in per release - the platform versions matter because the event-number
+ranges are version contracts):
+
+| Co-loaded platform | Tested version | Its event numbers | Result |
+| --- | --- | --- | --- |
+| Ares | *(record the tested version)* | `0x60-0x61` | *(pending in-game run)* |
+| Kratos | *(record the tested version)* | `0x50-0x51` | *(pending in-game run)* |
+| Phobos (the Mix fork ships as `Phobos.dll`) | *(record the tested version)* | `0x40-0x45` | *(pending in-game run)* |
+
+Checklist for one pass:
+
+1. the startup log shows the expected `hosts   : ...` line and the event-channel
+   block (registered types, fail-closed policy, mixed-client warning);
+2. each co-loaded platform's own event numbers still behave (its hook answers its
+   range before the fail-closed answer is reached - no size warnings appear);
+3. our example command/event still raises, sends and dispatches while the
+   platform is co-loaded;
+4. no crash occurs and the game does not desync in single-player; a multiplayer
+   pass with the same builds stays in sync.
+
+Record the actual results in the release notes.  Until the user's in-game pass
+fills the table in, this section is a **checklist, not evidence**.
+
+The failure mode of a broken order is a **desynchronisation, not a crash**: a
+number answered by the wrong platform is consumed as the wrong number of bytes,
+the following events are misparsed, and a multiplayer game desyncs (see the
+mixed-client warning below) - the fail-closed path cannot overrun the event
+buffer, but it also cannot repair a mis-sized stream.
+
 ## The frame
 
 One event is one 111-byte record, byte-for-byte identical to the engine's
@@ -95,7 +137,7 @@ One event is one 111-byte record, byte-for-byte identical to the engine's
 | --- | --- | --- | --- |
 | 0 | 1 | `type` | event number, `0x70-0x7F` |
 | 1 | 1 | `isExecuted` | `0` on the wire; the engine sets it when it runs the event |
-| 2 | 1 | `houseIndex` | player house that raised the event, `-1` = no house |
+| 2 | 1 | `houseIndex` | player house that raised the event; `-1` ("no house") is the frame's default/reserved value, but the platform never sends it deliberately - a negative index is an out-of-bounds read in the engine's dispatch entry, so callers must supply a valid house index or drop the event (see the `Send` notes under "Registration API") |
 | 3 | 4 | `frameNumber` | engine frame the event should execute on (little endian) |
 | 7 | 104 | `payload` | the registered payload, zero-padded to 104 bytes |
 
@@ -159,11 +201,23 @@ Raising an event from game code:
 MyPayload payload{ 42 };
 venture::EventChannel::Send(
 	MyEventType,
-	static_cast<std::int8_t>(houseIndex), // -1 when there is no house
+	static_cast<std::int8_t>(houseIndex), // a valid HouseClass::Array index, never -1
 	frameNumber,                          // e.g. Unsorted::CurrentFrame
 	reinterpret_cast<const std::uint8_t*>(&payload),
 	sizeof(payload));
 ```
+
+**Never send `HouseIndex = -1`.**  The engine's event dispatch entry
+sign-extends the field (`0x4C6CC4 movsx ebx, byte [esi+2]`) and indexes
+`HouseClass::Array` with it unconditionally at `0x4C6CCA`, *before* the
+event-type switch, so a negative index is a four-byte out-of-bounds read on every
+machine that receives the event.  `Send` / `WriteFrame` do not validate the field
+(they are low-level codecs): passing `-1` is a caller bug.  A feature that has no
+current player (or no valid house index) must **drop the event and log a
+warning** instead of sending it.  The command-to-event helper
+`venture::TryEventHouseIndex()` (`src/Command/Commands.h`) returns `false` for an
+unusable index and is the intended way to derive it; `docs/Commands.md` applies
+the same rule to the example command.
 
 `Send` validates the type and payload size, serializes the 111-byte frame and
 hands it to the engine sender installed at load time by

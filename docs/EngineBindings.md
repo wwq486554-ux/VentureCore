@@ -74,11 +74,48 @@ SyringeEx sets the exported feature flags (`ESPModification`, `ZFPreservation`,
 **refuses to run under an older Syringe**: it shows a message box and terminates
 the game instead of risking silent corruption.  There is no degraded mode.
 
-### `.syexe00`
+### Target executable: no injector-side pin
 
-SyringeEx also understands a `.syexe00` section for host-checksum declarations.
-The v0 base does not use it (no `declhost` records); optional hosts are detected
-at run time instead of being declared to the injector.  See `docs/HostMatrix.md`.
+SyringeEx also understands a `.syexe00` section for host-checksum declarations
+(`declhost`) and a `SyringeHandshake` export for a host handshake.  **This DLL
+uses neither**: it does not declare the target executable or any host to the
+injector.
+
+* the released DLL has no `.syexe00` section (its sections are
+  `.text/.rdata/.data/.syhks00/.fptable/.rsrc/.reloc`) and no
+  `SyringeHandshake` export; the source contains no `declhost` record;
+* the only executable binding is the set of fixed hook addresses plus the
+  compile-time ABI assertions in `src/Engine/EngineCompat.h`.  Those are built
+  against the **pinned YRpp for `gamemd.exe` 1.001**, not derived from the image
+  that happens to be loaded at run time: nothing in the DLL inspects or verifies
+  the process it was injected into.
+
+**Trust boundary.** The supported installation is the YR 1.001 `gamemd.exe`
+build; the pairing of "this DLL + that executable" is guaranteed by the injector
+and the installation, not by this DLL.  If SyringeEx does not itself reject a
+mismatched executable, the hard-coded hook windows are patched blindly into
+whatever process was launched.  Against another build the windows may not land on
+complete instructions, so the failure is undefined behaviour (a crash or silent
+corruption), not a controlled refusal.  No runtime self-check is added in 2.x: it
+would need the injector's host/checksum semantics (and a wrong declaration could
+reject a legitimate executable), so this stays a documented limitation.  See
+`docs/HookCatalogue.md` for the declared windows and their instruction evidence.
+
+**In-game verification item.** Record in the release test notes whether the
+expected SyringeEx/`gamemd.exe` combination is accepted, and - if a mismatched
+executable can be tried safely on the test machine - whether the injector
+refuses it before injection.  This DLL itself has no way to tell the difference,
+so a "works on my machine" result only covers the supported pairing.
+
+**Image facts (correction).** The released DLL is a **relocatable** image:
+`ImageBase = 0x10000000`, `DllCharacteristics = 0x0140` (`DYNAMIC_BASE` |
+`NX_COMPAT`) and a `.reloc` section is present (`scripts/verify_build.py` reports
+the same ImageBase).  It is **not** `RELOCS_STRIPPED` and its base is **not**
+fixed at `0x400000`; an earlier audit note claimed otherwise and was corrected.
+Relocation does not disturb the hook binding: the `.syhks00` `hookName` entries
+are VAs (ImageBase + RVA) and the loader applies the image's relocations to them,
+while the handler functions are resolved by name at injection and the game hook
+addresses live in the game's own image.
 
 ## YRpp pin: three gates
 
@@ -210,14 +247,23 @@ derived platform drop a module without touching engine class layouts.
   its first `Fetch`.  `RegisterExtType` validates the pair: a feature type id
   must be >= `FirstUserTypeId`, a type cannot be its own base, and a type id
   that was already registered with a different base is rejected (the typical
-  symptom of a copy-pasted `TypeId`).  A rejected id is **poisoned**:
-  `IsExtTypeDerivedFrom` reports false for it, so `FetchExtAs` returns `nullptr`
-  instead of risking a wrong `static_cast`; each problem is logged through the
-  platform logger when it happens.  The same lookup is bounded: a parent chain
-  that does not reach the root within the depth limit is treated as a cycle,
-  reported once and its type poisoned, so a broken table cannot hang a frame.
-  A broken composition therefore fails loudly and safely instead of corrupting
-  memory later.
+  symptom of a copy-pasted `TypeId`).  A rejected **feature** id is
+  **poisoned**: `IsExtTypeDerivedFrom` reports false for it, so `FetchExtAs`
+  returns `nullptr` instead of risking a wrong `static_cast`.  The four seeded
+  base-hierarchy ids (`0x0001`-`0x0004`) are registered before any feature code
+  runs and are never poisoned - a conflicting feature declaration of one of them
+  is rejected while the base-class views of every real instance keep working.
+  A poisoned node also breaks any longer chain that passes through it: the
+  lookup reports no base view instead of casting through the break (there is no
+  RTTI fallback in this build).  Each problem is logged through the platform
+  logger: normally when it happens; a problem raised before `Platform::Startup()`
+  installed the logger sink (a store registering from a static initializer) is
+  queued in a bounded startup queue and flushed once the logger is available, so
+  a broken composition shows up in the startup log instead of being silently
+  dropped.  The same lookup is bounded: a parent chain that does not reach the
+  root within the depth limit is treated as a cycle, reported once and its type
+  poisoned, so a broken table cannot hang a frame.  A broken composition
+  therefore fails loudly and safely instead of corrupting memory later.
 * **Global index** (`src/Ext/ExtensionIndex.h`): `unordered_map<owner,
   AbstractExt*>` for polymorphic attach/fetch/detach, plus the registry of
   stores.  A store registers a type-erased `ExtStoreDesc` on first use (type id,
@@ -356,7 +402,8 @@ platform build that registered the same event type with the same payload size.
 A peer without the platform (or with a different registry) sizes our events from
 the vanilla table and desynchronises; there is no automatic peer detection - the
 startup log lists the registered types and warns about mixed clients.  See
-`docs/EventChannel.md` and the mixed-client note in `docs/HostMatrix.md`.
+`docs/EventChannel.md` (including the in-game co-load verification checklist) and
+the mixed-client note in `docs/HostMatrix.md`.
 
 ## Command binding
 
@@ -367,12 +414,28 @@ handler) and appends it with `CommandClass::Array.AddItem`, which is the same
 mechanism the rest of the ecosystem uses; the command then appears in the game's
 keyboard options dialog where the player binds a key.  The example command logs
 and raises the platform's demo event, so one key press exercises the command path,
-the event sender, the engine's event queue and the event responder.
+the event sender, the engine's event queue and the event responder.  The example
+command never sends `HouseIndex = -1`: the engine's dispatch entry sign-extends
+that field and indexes `HouseClass::Array` before the event-type switch, so when
+there is no current player the command drops the event and logs a warning
+(HOOK-08, see `docs/EventChannel.md`).
 
-The engine reloads `CommandClass::Hotkeys` from `KEYBOARDMD.INI` right after the
-callback (`0x533D20`), so a default hotkey set from the registration hook would be
-discarded: commands ship unbound and the player binds them.  Details:
-`docs/Commands.md`.
+The engine's registration routine keeps appending its own commands **after** that
+hook point, so a second hook closes the visibility gap:
+`DEFINE_HOOK(0x533C3E, Venture_Commands_VerifyRegistered, 0x5)` runs on the
+`call 0x533D20` at the end of that routine, after its last command append and
+before the hotkey map is rebuilt.  It snapshots the final shared command list and
+warns about every name collision that involves a platform command - in both
+directions (a platform command that shadows another, and one that is shadowed by
+an earlier entry), including commands of the engine and other injected DLLs.  The
+scan is diagnostic only (it never renames or removes entries); both handlers
+return 0, so the trampoline re-executes the overwritten instruction / call.
+
+The engine then rebuilds `CommandClass::Hotkeys` from `KEYBOARDMD.INI` in that
+same call (`0x533D20`), so a default hotkey set from the registration hook would
+be discarded: commands ship unbound and the player binds them.  Details, window
+evidence and the free-site audit: `docs/Commands.md` and
+`docs/HookCatalogue.md`.
 
 ## Savegame trailer binding
 
@@ -400,8 +463,9 @@ platform hooks that runs after the engine's object-state writer - the routine
 containing the tail site Ares owns (`0x67E42E`, whose handler always jumps away) -
 so the append puts our block last regardless of handler order.  The reader runs at
 `0x67F7C8` after every ecosystem sequential reader (the known platform modules
-sort before `VentureCore.dll`), so it starts exactly at our frame.  `docs/SaveFormat.md` records
-the failure mode for a platform outside that order.
+sort before `VentureCore.dll`), so it starts exactly at our frame.  `docs/SaveFormat.md`
+records the failure mode for a platform outside that order and the trailer's
+trust boundary (structural checks, not authentication).
 
 ## Logging
 
@@ -447,5 +511,8 @@ the level semantics, the measured cost and the hot-path rules.  The binding side
 * The lineage marker detects this platform's own lineage only (same magic); a
   DLL loaded after startup is not detected (see `docs/Lineage.md`).
 * No runtime plugin ABI: features are compiled into the single platform DLL.
+* The target executable is not pinned to the injector (no `.syexe00` /
+  `SyringeHandshake`): the supported `gamemd.exe` pairing is guaranteed by the
+  installation and injection (see "Target executable: no injector-side pin").
 * No unload hook: the platform does not try to restore engine memory; the game
   process terminates normally.

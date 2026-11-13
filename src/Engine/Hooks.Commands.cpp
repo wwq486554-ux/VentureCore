@@ -12,6 +12,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <vector>
 
 // ---------------------------------------------------------------------------
 // Command registration - engine adapter.
@@ -34,9 +35,31 @@
 // in Options -> Keyboard, where the player binds them - the ecosystem
 // convention.  See docs/Commands.md.
 //
+// The engine's own registration is a long inline sequence *inside* the routine
+// that calls this hook, so a name colliding with a command the engine registers
+// after our 0x533066 entry is not visible yet.  A second, post-registration hook
+// closes that gap (HOOK-03):
+//
+//   0x533C3E size 5 - scan the final CommandClass::Array for name collisions
+//     that involve a platform command and warn with the real first-match
+//     direction (both directions, engine commands and other DLLs' commands
+//     alike).  objdump from 0x533C3E: `call 0x533D20` (5 bytes), next
+//     instruction 0x533C43.  The call rebuilds CommandClass::Hotkeys and is
+//     made after the last CommandClass::Array append in that routine (that
+//     append is the `call 0x538780` at 0x533C39; no array reference follows
+//     this site), so the handler observes the completed list before the engine
+//     locks in the key map.  Free site: none of the five
+//     audited ecosystem `.syhks00` tables (Ares / Kratos / Mix / Phobos and one
+//     closed-source platform) has a window in 0x533B00-0x533E00.  The handler
+//     returns 0, so the trampoline re-executes the call and the hotkey rebuild
+//     still runs.
+//
 // The example command also raises the example event 0x70, so one key press
 // exercises the whole path: command -> log -> event channel -> dispatch ->
-// responder log (single-player test, see docs/EventChannel.md).
+// responder log (single-player test, see docs/EventChannel.md).  It never sends
+// HouseIndex = -1 (HOOK-08): the engine sign-extends that field and indexes
+// HouseClass::Array with it before the event-type switch (0x4C6CC4 / 0x4C6CCA),
+// so a negative index would be an out-of-bounds read on every receiver.
 // ---------------------------------------------------------------------------
 
 namespace
@@ -118,12 +141,28 @@ void ExecuteTestCommand()
 {
 	Log::Info("[Venture] command \"Venture Test Command\" executed");
 
+	// HOOK-08: never send HouseIndex = -1.  The engine's dispatch entry
+	// sign-extends the field (0x4C6CC4 `movsx ebx,byte [esi+2]`) and indexes
+	// HouseClass::Array with it unconditionally at 0x4C6CCA
+	// (`mov edi,[ecx+ebx*4]`) before the event-type switch, so a negative index
+	// is a 4-byte out-of-bounds read on every receiver.  With no current player
+	// there is no house to attribute the event to: drop the event instead of
+	// creating the negative index.
+	HouseClass* const currentPlayer = HouseClass::CurrentPlayer;
+	const int currentPlayerIndex = currentPlayer
+		? static_cast<int>(currentPlayer->ArrayIndex)
+		: -1;
+	std::int8_t houseIndex = 0;
+	if (!venture::TryEventHouseIndex(currentPlayerIndex, houseIndex))
+	{
+		Log::Warn("[Venture] command: no usable current player - event 0x%02X not "
+			"raised (HouseIndex must not be -1; see docs/Commands.md)",
+			static_cast<unsigned>(kTestEventType));
+		return;
+	}
+
 	++g_testEventSequence;
 	TestEventPayload payload{kTestEventMagic, g_testEventSequence};
-
-	const std::int8_t houseIndex = HouseClass::CurrentPlayer
-		? static_cast<std::int8_t>(HouseClass::CurrentPlayer->ArrayIndex)
-		: static_cast<std::int8_t>(-1);
 	const std::uint32_t frameNumber = static_cast<std::uint32_t>(Unsorted::CurrentFrame);
 
 	if (!Channel::Send(
@@ -137,6 +176,14 @@ void ExecuteTestCommand()
 			static_cast<unsigned>(kTestEventType));
 	}
 }
+
+// The engine command objects this translation unit appended to
+// CommandClass::Array.  The post-registration check uses this pointer set to
+// tell the platform's own entries from the engine's (and other injected DLLs')
+// entries: the build disables RTTI (/GR-), so the object type cannot be queried
+// at run time.  Declared before the static registrar below so its dynamic
+// initialization is finished before anything can run the registration hook.
+std::vector<const CommandClass*> g_platformCommands;
 
 // Registers the example command and its event at load time: before the engine
 // asks for the command list and before any event can be dispatched.
@@ -174,43 +221,96 @@ struct Registrar
 };
 
 const Registrar g_registrar;
+
+bool IsPlatformCommand(const CommandClass* const command)
+{
+	for (const CommandClass* const platformCommand : g_platformCommands)
+	{
+		if (platformCommand == command)
+			return true;
+	}
+	return false;
 }
 
-// Name of an engine command already in the engine's list whose name equals
-// `name` case-insensitively, or nullptr.  Our hook appends at 0x533066, which is
-// *mid-way* through the engine's own registration: an entry found here was
-// registered before us, so the engine's first-match lookup and hotkey path see
-// it first and our command is the one that silently loses (C-08).
-const char* FindEngineCommandConflict(const char* const name)
+// Snapshot of the engine's shared command list plus the collision scan.  One
+// warning per collision, with the real first-match direction: a platform entry
+// that comes first shadows the other command, a platform entry that comes
+// later is the shadowed one.  The registration hook is mid-way through the
+// engine's own registration, so this only runs once the array is final
+// (HOOK-03; see the file header for the 0x533C3E window evidence).
+void CheckRegisteredCommandNames()
 {
-	if (!name || !*name)
-		return nullptr;
+	std::vector<venture::SharedCommandEntry> entries;
+	entries.reserve(static_cast<std::size_t>(CommandClass::Array.Count));
 
 	for (int index = 0; index < CommandClass::Array.Count; ++index)
 	{
-		const CommandClass* const pExisting = CommandClass::Array[index];
-		if (!pExisting)
+		const CommandClass* const pCommand = CommandClass::Array[index];
+		if (!pCommand)
 			continue;
 
-		const char* const existingName = pExisting->GetName();
-		if (existingName && venture::CommandNameEquals(existingName, name))
-			return existingName;
+		entries.push_back(venture::SharedCommandEntry{
+			pCommand->GetName(),
+			IsPlatformCommand(pCommand),
+		});
 	}
 
-	return nullptr;
+	std::size_t platformCount = 0;
+	for (const venture::SharedCommandEntry& entry : entries)
+	{
+		if (entry.isPlatform)
+			++platformCount;
+	}
+
+	const std::vector<venture::CommandNameConflict> conflicts =
+		venture::FindPlatformCommandConflicts(entries.data(), entries.size());
+
+	for (const venture::CommandNameConflict& conflict : conflicts)
+	{
+		if (conflict.platformShadows)
+		{
+			Log::Warn(
+				"commands:   platform command \"%s\" was registered before \"%s\" (engine or another "
+				"DLL) - the game's first-match lookup finds the platform command first, so the other "
+				"command is shadowed; the mandatory platform prefix prevents this (see docs/Commands.md)",
+				conflict.platformName,
+				conflict.otherName);
+		}
+		else
+		{
+			Log::Warn(
+				"commands:   platform command \"%s\" was registered after \"%s\" (engine or another "
+				"DLL) - the game's first-match lookup finds the other command first, so the platform "
+				"command is shadowed; rename it with the platform prefix (see docs/Commands.md)",
+				conflict.platformName,
+				conflict.otherName);
+		}
+	}
+
+	Log::Info(
+		"commands: post-registration check - %zu platform command(s) among %zu engine-list entry(s), "
+		"%zu name conflict(s)",
+		platformCount,
+		entries.size(),
+		conflicts.size());
+}
 }
 
-// --- hook ------------------------------------------------------------------
+// --- hook: register the platform commands ----------------------------------
 // Engine's command-registration callback: create one engine command object per
 // enabled descriptor and append it to the engine's command array.  The hook
-// runs once per process; the startup log line per command lives here because
-// this is the only point where the final, engine-visible list is known.
+// runs once per process, mid-way through the engine's own inline registration
+// sequence; the post-registration hook below does the final name check.
 DEFINE_HOOK(0x533066, Venture_Commands_Register, 0x6)
 {
 	// C-06: a refused platform (lineage conflict) keeps its hooks installed but
 	// must not act on the engine.
 	if (!venture::IsStarted())
 		return 0;
+
+	// The engine calls the registration callback once per process; clear the
+	// pointer set so a (defensive) second call cannot mix old and new entries.
+	g_platformCommands.clear();
 
 	Log::Info("commands: %zu command(s) in the platform registry", venture::Commands::Count());
 	int appended = 0;
@@ -228,10 +328,6 @@ DEFINE_HOOK(0x533066, Venture_Commands_Register, 0x6)
 			continue;
 		}
 
-		// The engine's command list is a flat, shared namespace; warn about a
-		// collision with a command that is already in it (C-08).
-		const char* const engineConflict = FindEngineCommandConflict(command->name);
-
 		PlatformCommandClass* const pCommand = GameCreate<PlatformCommandClass>(*command);
 		if (!pCommand)
 		{
@@ -245,21 +341,33 @@ DEFINE_HOOK(0x533066, Venture_Commands_Register, 0x6)
 			continue;
 		}
 
+		g_platformCommands.push_back(pCommand);
 		++appended;
 		Log::Info("commands:   \"%s\" (category \"%ls\", ui name \"%ls\") registered",
 			command->name, command->uiCategory, command->uiName);
-
-		if (engineConflict)
-		{
-			Log::Warn(
-				"commands:   \"%s\" collides with the engine command \"%s\" that was registered before "
-				"this hook - the engine's first match wins, so this command is shadowed; rename it "
-				"with the platform prefix (see docs/Commands.md)",
-				command->name,
-				engineConflict);
-		}
 	}
 
 	Log::Info("commands: %d command(s) appended to the engine command list", appended);
+	return 0;
+}
+
+// --- hook: verify the completed command list (HOOK-03) ---------------------
+// 0x533C3E is the `call 0x533D20` inside the same engine registration routine
+// that rebuilds CommandClass::Hotkeys; it runs after the last
+// CommandClass::Array append (the `call 0x538780` at 0x533C39; no array
+// reference follows this site), i.e. once every engine command and every other
+// DLL's command is in the array.  Hooking its
+// return-0 window re-executes the call, so the engine's hotkey rebuild is
+// unchanged.  See the file header and docs/HookCatalogue.md for the window
+// evidence and the free-site audit.
+DEFINE_HOOK(0x533C3E, Venture_Commands_VerifyRegistered, 0x5)
+{
+	// C-06: a refused platform keeps its hooks installed but must not act on the
+	// engine; the registration hook also returned early, so there is nothing to
+	// verify.
+	if (!venture::IsStarted())
+		return 0;
+
+	CheckRegisteredCommandNames();
 	return 0;
 }

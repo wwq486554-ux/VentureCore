@@ -15,7 +15,9 @@ The engine does not know about platform extensions, so every platform appends an
 opaque block of its own to the same `IStream` while the game saves, and reads its
 block back while the game loads. The ecosystem rule is: **the platforms write
 their blocks in DLL order and read them back in the same order**; a reader that
-is out of order consumes another platform's bytes and the load fails.
+is out of order consumes another platform's bytes and loses that platform's
+extension state (the game's own load is unaffected - see the order contract
+below).
 
 The engine's savegame `IStream` is a **streaming wrapper** around the OLE
 `CONTENTS` stream (the game wraps it in a `CoCreateInstance`'d object); it does
@@ -41,20 +43,99 @@ position restore:
   the next platform's block starts) - that is reported as "no extension trailer"
   and the game loads normally;
 * the frame is self-describing (**header first**: magic + version + size + CRC),
-  so a truncated, foreign or damaged tail is rejected with a log warning instead
-  of corrupting the game's load. The header is fixed size, so the reader validates
-  it before allocating or reading the payload.
+  so a structurally malformed tail (a truncated header, a foreign block or a
+  damaged frame) is rejected with a log warning and the extension state starts
+  empty - the game's own save data is unaffected. The header is fixed size, so
+  the reader validates it before allocating or reading the payload. These checks
+  cover structural malformation only: see "Trust boundary: the savegame is
+  trusted input" below.
 
-Known limitation: the protocol needs the same order on both sides. A platform
-whose DLL name sorts **after** `VentureCore.dll` would read at `0x67F7C8` after
-us, while its block was still written before ours (all ecosystem writers run
-inside `0x67D300`) - our sequential read would then see that platform's block
-instead of our frame and drop the extension state. The current audited platform
-set (`Ares.dll`, `Kratos.dll`, `Phobos.dll` with the Mix fork under the Phobos
-name, plus one closed-source platform) sorts before us, so the order holds; a
-platform that writes after `0x67D1B4` or reads after `0x67F7C8` is outside the
-contract. The log line reports the mismatch and extension state starts empty; it
-is a platform-ordering concern, not a savegame format break.
+### Order contract: write/read alignment (co-load assumption)
+
+The stream has no per-block framing that a foreign reader could skip: each
+platform consumes its own block and leaves the stream positioned for the next
+reader, so the **reader order must match the writer order**. This platform is
+designed to be the *last* block on both sides:
+
+* **write** - the handler at `0x67D1B4` runs after the engine's object-state
+  writer (`call 0x67D300`) returned, while the ecosystem's historical tail
+  handlers (Ares `0x67E42E`, whose handler always jumps away) run *inside* that
+  call. A sequential append therefore makes our block the last one regardless of
+  hook order;
+* **read** - the handler at `0x67F7C8` runs after every ecosystem sequential
+  reader, so the stream is positioned exactly at our frame when it runs. Engine
+  hooks run in DLL load order, and `VentureCore.dll` sorts after the known
+  platform DLLs: `Ares.dll`, `Kratos.dll`, `Phobos.dll` (the Mix fork ships under
+  the `Phobos.dll` name) and one closed-source ecosystem module. That set is
+  audited from the platforms' `.syhks00` hook tables - the same five-platform
+  audit recorded in `docs/HookCatalogue.md` - not from a dynamic co-load test, so
+  the ordering itself is verified in-game (see the checklist at the end of this
+  section).
+
+**Failure mode when the order is broken.** A platform whose read hook runs after
+ours - for example a future DLL that sorts after `VentureCore.dll`, or an injector
+order that loads it later - was still written before our block (the ecosystem
+writers run inside `0x67D300`), so our sequential read finds that platform's block
+instead of our frame. The reader reports it and the extension state starts empty;
+the other direction (a platform reading at the wrong position) loses its state the
+same way. Typical log lines:
+
+```text
+savegame: no extension trailer (the stream continues with 0x..., not our block)
+savegame: extension trailer format version N is not supported (expected 2) - extension state dropped
+savegame: store set changed - extension state dropped
+savegame: extension payload rejected (malformed) - extension state starts empty
+```
+
+The engine's own save/load still succeeds - only the platform's extension state is
+lost.  Note that the common ordering-mismatch case (the stream continues with a
+foreign block) is logged at **Info** level, because it is indistinguishable from
+"this save was written without the platform": a load that silently starts with
+empty extension state is the expected symptom, not an error popup.  A platform
+that writes after `0x67D1B4` or reads after `0x67F7C8` is outside the contract;
+the audited set above does not contain one.
+
+**In-game verification (NEED-HW).** The automated checks cannot prove the co-load
+ordering on the build machine (there is no SyringeEx chain implementation there),
+so the user's in-game pass with the supported co-load platforms must confirm:
+
+1. the startup log lists the co-loaded hosts (`hosts   : ...`);
+2. save -> load with each audited platform present restores the extension state
+   (`savegame: extension state restored (N adopted, ...)`) and prints no
+   `no extension trailer (...)` / `store set changed` / `malformed` line for our
+   block;
+3. the tested platform set and versions are recorded in the release notes.
+
+The result of that pass, not this document, is the evidence for the ordering
+claim.
+
+## Trust boundary: the savegame is trusted input
+
+The extension trailer is integrity-checked, **not authenticated**. The platform
+validates structure only: the frame's magic/format version/payload size/CRC, the
+payload's savegame id and version, the store-set signature, and every block/row
+field (canary, size fields, exact consumption). That protects the loader and the
+engine against accidental corruption and incompatible writers; it is not a
+security mechanism:
+
+* the CRC is the standard **unkeyed** IEEE 802.3 CRC-32 - anyone can recompute it,
+  so a deliberately edited save passes every check;
+* there is no signature/MAC/authentication and no trust store; the store-set
+  signature identifies a compatible store set, not a trusted writer;
+* the save-time owner/extension addresses are recorded and handed to the engine's
+  swizzle manager as-is; the loader does not verify that they refer to live
+  objects (referential integrity is the engine's remap pass's job), and it does
+  not try to detect a forged owner id.
+
+**Savegames are treated as trusted input** (project decision, 2026-11-13):
+defending against tampered or malicious savegames is **out of scope** for this
+base. The contract is narrower: a *structurally malformed* or *incompatible*
+trailer is rejected as a whole with a warning, so the game loads its own state
+and the extension state starts empty instead of being misread. That is not a
+promise that an edited-but-structurally-valid save is safe - it may restore
+inconsistent extension state, or it may break the engine's own remap pass. Do not
+treat the trailer as an anti-cheat or anti-tamper boundary, and do not describe it
+as one.
 
 ## Stream layout
 
@@ -127,17 +208,20 @@ storeBlock*:                                      (storeBlockCount entries)
 * rows, blocks and the payload are **consumed exactly**: the extension's `Load()`
   must read its row data to the last byte, a block must contain nothing after its
   last row, and the payload must contain nothing after the last block.  Trailing
-  bytes (or a short read in a row) mean a drifted layout or a modified save and
-  reject the whole payload as malformed (`Invalid`).
+  bytes (or a short read in a row) mean a drifted layout or structurally
+  malformed rows and reject the whole payload as malformed (`Invalid`).
+  `rowCount`, `dataSize` and the payload size are additionally capped by the
+  load-time limits below.
 * `data` is the bytes written by the extension's `Save(ExtStreamWriter&)`. Pointers
   inside it are written with `WritePointer` and read with
   `ReadPointerForChange`, which registers the field for the swizzle pass.
 * every `blockSize` / `dataSize` field is savegame-controlled and is validated
   **before** the bytes it claims are allocated or read: it must not exceed the
-  bytes the enclosing payload/block still carries and must stay within the 16 MiB
-  payload cap.  A violation rejects the whole payload (`Invalid`, extension state
-  starts empty) instead of attempting the claimed allocation (A-02).
-* the writer enforces the same 16 MiB cap **while it builds the payload**: a
+  bytes the enclosing payload/block still carries and must stay within the
+  per-row, per-block and payload caps below.  A violation rejects the whole
+  payload (`Invalid`, extension state starts empty) instead of attempting the
+  claimed allocation (A-02).
+* the writer enforces the same payload cap **while it builds the payload**: a
   payload that would exceed it is not appended to the savegame (`Log::Error`) -
   that save is written without extension state, which the next load reports as
   empty, rather than aborting the engine's save (A-11).
@@ -145,6 +229,25 @@ storeBlock*:                                      (storeBlockCount entries)
 Rows are written in **allocation order** (`ExtensionStore` keeps its instances in
 an intrusive doubly linked list in allocation order, and stores are visited in
 registration order), so a load recreates a deterministic order.
+
+### Load-time limits
+
+The loader applies hard bounds before allocating or reading anything. A value
+beyond them is a structural `Invalid` and rejects the whole payload (the game
+loads, the extension state starts empty):
+
+| Bound | Limit | Enforced |
+| --- | --- | --- |
+| rows in one store block (`rowCount`) | 65535 | while reading the block |
+| data bytes in one row (`dataSize`) | 1 MiB | before reading the row data |
+| one store block (`blockSize`) | the remaining payload, and never more than 16 MiB | before reading the block |
+| one complete payload (and the frame that carries it) | 16 MiB | frame header and payload builder |
+
+These are 32-bit-process pragmatics that bound the memory/work one load can
+claim from a savegame; they are not a content-security boundary (see "Trust
+boundary" above). A value inside a cap still has to fit the bytes the enclosing
+block/payload actually carries - the caps are upper bounds, not promises that the
+claimed data is present.
 
 ## Save / load sequence
 
@@ -163,7 +266,11 @@ registration order), so a load recreates a deterministic order.
 ## Failure handling
 
 The parser is strict by design: a payload is either applied in full or rejected
-as a whole - it never restores "what it could read".
+as a whole - it never restores "what it could read". That is a guarantee about
+**structurally malformed or incompatible input only**: it makes a bad trailer a
+clean drop instead of a misread. It does not authenticate the savegame and does
+not validate the semantic content of a structurally valid one - see "Trust
+boundary: the savegame is trusted input" above.
 
 * The whole payload is validated **before the engine's swizzle manager is
   touched**.  Row registrations are staged in the platform
@@ -178,8 +285,9 @@ as a whole - it never restores "what it could read".
   trailing bytes in a row/block/payload all leave extension state empty with a
   `Log::Warn`.  The engine's own objects still load.
 * Size fields are validated against the bytes that are actually present and the
-  16 MiB cap **before** anything is allocated from them (A-02); the writer
-  enforces the same cap while it assembles the payload (A-11).
+  per-row/per-block/16 MiB caps **before** anything is allocated from them
+  (A-02); the writer enforces the payload cap while it assembles the payload
+  (A-11).
 * The load-window fallback in `OnScenarioClear` is deliberately skipped while a
   load is in progress: the engine calls `ResetScenario` from inside the load
   routine (`0x67E739`) after the window opened (`0x67E44D`), and resetting the

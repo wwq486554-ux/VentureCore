@@ -29,7 +29,7 @@ The table is machine-read.  Keep these rules when editing it:
   `gamemd.exe` build (Yuri's Revenge 1.001, as pinned by the build target).  A
   different executable build will not match these addresses.
 
-## 2.0.0 hook table
+## Current hook table
 
 | 地址 | size | 名称 | 用途 | 备注 |
 | --- | --- | --- | --- | --- |
@@ -53,8 +53,9 @@ The table is machine-read.  Keep these rules when editing it:
 | 0x64BE7D | 0x6 | Venture_Event_GetSize2 | Event channel: same as GetSize1 but also writes the size into the caller frame slot [esp+0x20] (STACK_OFFSET(0xAC, -0x8C)) and resumes at 0x64BE97 | Event channel; same site and semantics as the reference ecosystem declares (Phobos/Kratos/Mix: size 0x6, stack slot [esp+0x20]). objdump from 0x64BE7D: `and edi,0xff` (6 bytes), next instruction 0x64BE83 = address+6 |
 | 0x64C30E | 0x6 | Venture_Event_GetSize3 | Event channel: same as GetSize1 with the type taken from ESI and resumes at 0x64C321 | Event channel; same site and semantics as the reference ecosystem declares (Phobos/Kratos/Mix: size 0x6). objdump from 0x64C30E: `and esi,0xff` (6 bytes), next instruction 0x64C314 = address+6 |
 | 0x533066 | 0x6 | Venture_Commands_Register | Commands: create one engine command object per enabled platform command descriptor and append it to CommandClass::Array; the command then appears in the game's keyboard dialog where the player binds a key | Commands; same site and semantics as the reference ecosystem declares (the audited Phobos/Kratos/Mix `.syhks00` tables and one closed-source ecosystem platform: 0x533066, size 0x6, handler returns 0). objdump from 0x533066: `mov DWORD PTR [eax],0x7eb89c` (6 bytes), next instruction 0x53306C = address+6; returning 0 lets the trampoline re-execute that store, so the engine's own command object is still initialised |
+| 0x533C3E | 0x5 | Venture_Commands_VerifyRegistered | Commands: after the engine's own command registration is complete, scan the final shared command list for name collisions that involve a platform command and warn with the real first-match direction - both directions, covering engine commands (and other DLLs' commands) registered before *and* after the platform's 0x533066 entry | Commands; free site - none of the five audited ecosystem `.syhks00` tables (Ares / Kratos / Mix / Phobos and one closed-source platform) has a window in `0x533B00`-`0x533E00`. objdump from `0x533C3E`: `call 0x533D20` (5 bytes), next instruction `0x533C43` = address+5; the call is the hotkey-map rebuild inside the same engine registration routine and runs after the last `CommandClass::Array` append (the `call 0x538780` at `0x533C39`; no reference to the array follows this site), so the handler observes the completed list before the engine locks in `CommandClass::Hotkeys`; returning 0 lets the trampoline re-execute the call, so the hotkey rebuild still runs (HOOK-03); in a co-load, Ares's adjacent `0x533058` hook jumps back into the same routine (`0x533062`), so engine execution still reaches this site |
 
-Twenty hook records, nineteen distinct hook handler names (`Venture_Example_UnitClass_DTOR`
+Twenty-one hook records, twenty distinct hook handler names (`Venture_Example_UnitClass_DTOR`
 is installed at two addresses with `DEFINE_HOOK_AGAIN`).
 
 ## What "size" means

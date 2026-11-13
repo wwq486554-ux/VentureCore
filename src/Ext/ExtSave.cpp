@@ -394,18 +394,49 @@ LoadSummary FinishLoad()
 
 	// 2. Owners the engine constructed itself while loading carry no saved data;
 	//    they get a fresh extension now.
-	for (const ExtensionIndex::DeferredAllocation& deferred : index.DeferredAllocations())
-	{
-		if (index.Fetch(deferred.owner) != nullptr)
-			continue; // restored from the trailer a moment ago
-
-		if (deferred.desc->allocateDeferred)
-		{
-			deferred.desc->allocateDeferred(deferred.owner);
-			++summary.deferred;
-		}
-	}
+	//
+	// SAVE-02: the deferred list is moved into a local snapshot and cleared before
+	// the callbacks run.  A feature's OnDeferredAllocation() may allocate an
+	// extension for another owner; the load window is still open, so that call is
+	// deferred again into the same list.  Iterating the list directly used to let
+	// the callback push into the vector being range-for'd - a reallocation
+	// invalidated the iterators (undefined behaviour).  The snapshot makes the
+	// callback's new entries land in the cleared list, and they are processed in
+	// one bounded second pass.  A feature that keeps deferring new owners from
+	// OnDeferredAllocation() is cut off after kDeferredPasses passes; its
+	// leftovers are dropped with a warning so FinishLoad cannot be steered into
+	// an unbounded loop by feature code.
+	constexpr std::size_t kDeferredPasses = 2;
+	std::vector<ExtensionIndex::DeferredAllocation> deferred = index.DeferredAllocations();
 	index.ClearDeferredAllocations();
+
+	for (std::size_t pass = 0; pass < kDeferredPasses; ++pass)
+	{
+		for (const ExtensionIndex::DeferredAllocation& entry : deferred)
+		{
+			if (index.Fetch(entry.owner) != nullptr)
+				continue; // restored from the trailer a moment ago
+
+			if (entry.desc->allocateDeferred)
+			{
+				entry.desc->allocateDeferred(entry.owner);
+				++summary.deferred;
+			}
+		}
+
+		deferred = index.DeferredAllocations();
+		index.ClearDeferredAllocations();
+
+		if (deferred.empty())
+			break;
+	}
+
+	if (!deferred.empty())
+	{
+		Log::Warn("savegame: %u deferred allocation(s) dropped after %u pass(es) - a feature kept "
+			"deferring new owners from OnDeferredAllocation()",
+			static_cast<unsigned>(deferred.size()), static_cast<unsigned>(kDeferredPasses));
+	}
 
 	if (summary.failed != 0)
 	{

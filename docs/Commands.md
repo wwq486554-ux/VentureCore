@@ -69,21 +69,37 @@ installs), `docs/EventChannel.md` (the event the example command raises),
    finishes with a summary line (`N command(s) appended to the engine command
    list`).
 
+3. The engine's own registration routine keeps appending its command objects
+   **after** that hook point, so a second, post-registration hook runs once the
+   list is final: `0x533C3E`, size 5 - the `call 0x533D20` inside the same
+   routine that rebuilds `CommandClass::Hotkeys` (window and free-site evidence
+   in `docs/HookCatalogue.md`).  It snapshots the completed list, logs one
+   summary line (`commands: post-registration check - ...`) and warns about
+   every name collision that involves a platform command, in both directions
+   (see the next section).  Its handler returns 0, so the trampoline re-executes
+   the call and the engine's hotkey rebuild is unchanged.
+
 ### Name collisions and the platform prefix
 
 The engine's command list is one flat namespace shared by the engine and every
-injected DLL, and lookups are first-match.  The platform's hook appends at
-`0x533066`, which is **mid-way** through the engine's own registration, so:
+injected DLL, and lookups are first-match.  The platform's registration hook
+appends at `0x533066`, which is **mid-way** through the engine's own inline
+registration sequence, so a command the engine (or another DLL) registers after
+that point is not visible from there.  The post-registration hook `0x533C3E`
+(see above) runs once the routine has appended its last command and before the
+hotkey map is rebuilt; it snapshots the final list and reports every collision
+that involves a platform command - in both directions:
 
-* a same-named command that was registered **before** this hook wins - the
-  platform's command is shadowed (the hook logs a `collides with the engine
-  command ...` warning for exactly this case);
-* a same-named command registered **after** this hook loses to the platform's
-  command (nothing can detect that at this point - a later engine registration
-  is not observable from the hook).
+* a platform command that comes **first** in the list shadows the other command
+  (the game's lookup stops at the first match) - the warning names both entries
+  and says the other command is shadowed;
+* a platform command that comes **later** is the one shadowed - the warning says
+  so and asks for a rename.
 
-There is no reliable way to win or even detect every collision, so the platform
-convention is mandatory:
+Commands of other injected DLLs are part of the same namespace, so they are
+covered too.  The scan is diagnostic only: by the time it runs the engine owns
+the list, it never removes or renames entries.  That is why the convention is
+mandatory:
 
 > **Name every platform command with the platform prefix**, for example
 > `"Venture Test Command"` (engine name) for `VentureCore`.  A derived platform
@@ -95,20 +111,24 @@ The registry also rejects a second platform command whose name differs only in
 case, which keeps the two sides of the configuration unambiguous.
 
 Every hook handler returns 0, so Syringe's trampoline re-executes the
-instruction the hook overwrote (`mov DWORD PTR [eax],0x7eb89c`), and the
-platforms chained at the same site (Phobos, Kratos, Mix and other ecosystem
-platforms) keep working.
+instruction the hook overwrote: the command-object store
+(`mov DWORD PTR [eax],0x7eb89c`) at the shared `0x533066` site, and the
+`call 0x533D20` at the post-registration site.  The platforms chained at the
+registration site (Phobos, Kratos, Mix and other ecosystem platforms) keep
+working.
 
 ## Hotkeys
 
-The engine's command objects do not carry a default key. Right after the
-registration callback, the engine rebuilds `CommandClass::Hotkeys` from the
-`[Hotkey]` section of `KEYBOARDMD.INI` (verified in the engine at `0x533D20`:
-the map is cleared, then filled from the keyboard configuration). A binding
-added during the registration callback would therefore be thrown away, so the
+The engine's command objects do not carry a default key.  At the end of its own
+command-registration routine the engine calls `0x533D20`, which rebuilds
+`CommandClass::Hotkeys` from the `[Hotkey]` section of `KEYBOARDMD.INI` (the map
+is cleared, then filled from the keyboard configuration); the platform's
+post-registration check hooks that call inside the routine (`0x533C3E`, size 5)
+and therefore observes the final command list immediately before the rebuild.
+A binding added during the registration callback would be thrown away, so the
 platform does **not** hard-code one: like every other command in the ecosystem,
 the command shows up in **Options -> Keyboard**, and the player assigns the key
-there. The binding is stored in the game's keyboard configuration and survives
+there.  The binding is stored in the game's keyboard configuration and survives
 restarts.
 
 **Suggested binding for the example command: `Ctrl+Shift+V`** (or any free key).
@@ -141,16 +161,26 @@ When the command runs it:
    on the local machine - and the event responder logs
    `[Venture] event 0x70 received (sequence=N) - command and event paths are live`.
 
+The event is only raised when there is a current player: `HouseIndex = -1` is
+never sent (HOOK-08).  The engine's event dispatch entry sign-extends the house
+index (`0x4C6CC4 movsx ebx,byte [esi+2]`) and indexes `HouseClass::Array` with it
+unconditionally at `0x4C6CCA`, before the event-type switch, so a negative index
+would be a 4-byte out-of-bounds read on every receiver.  If `CurrentPlayer` is
+null (a headless/early call) the command logs one warning and drops the event
+instead of creating that index.
+
 So one key press proves the whole path: command hook -> descriptor ->
 `Execute` -> event channel -> frame codec -> engine event queue -> dispatch
 hook -> responder. The event side is described in `docs/EventChannel.md`.
 
-Expected log excerpt (startup and after the key press):
+Expected log excerpt (startup and after the key press; `N` is the engine's
+command count and `M` the platform's enabled command count):
 
 ```
-commands: 1 command(s) in the platform registry
+commands: M command(s) in the platform registry
 commands:   "Venture Test Command" (category "VentureCore", ui name "Venture Test Command") registered
-commands: 1 command(s) appended to the engine command list
+commands: M command(s) appended to the engine command list
+commands: post-registration check - M platform command(s) among N engine-list entry(s), 0 name conflict(s)
 event channel: 0x70-0x7F, 1 registered handler(s)
 event channel:   0x70 Venture_Event_Test        8 byte(s)
 ...
@@ -160,15 +190,20 @@ event channel:   0x70 Venture_Event_Test        8 byte(s)
 
 ## What to test in the game
 
-1. Startup log contains the `commands:` lines above and no warning about the
-   example command.
+1. Startup log contains the `commands:` lines above (including the
+   `post-registration check` summary) and no warning about the example command
+   or any name collision.
 2. Options -> Keyboard shows **Venture Test Command** under **VentureCore**;
    the description is visible.
 3. After binding `Ctrl+Shift+V`, pressing it in a single-player game writes the
    two `[Venture]` lines (command and event) to `<Platform>.log`.
 4. Vanilla commands keep working and other DLLs' commands still appear; the
-   platform must not disturb them (all handlers return 0 at the shared site).
-5. Multiplayer: commands are local triggers; anything that has to happen on
+   platform must not disturb them (all handlers return 0 at the shared site),
+   and the hotkey rebuild still runs after the post-registration check.
+5. Co-load (Ares/Phobos/Kratos/Mix): the post-registration summary is still
+   logged once, no collision warning names a real ecosystem command, and every
+   DLL's commands are visible in Options -> Keyboard.
+6. Multiplayer: commands are local triggers; anything that has to happen on
    every machine must raise a platform event (see the mixed-client warning in
    `docs/EventChannel.md`).
 
@@ -179,6 +214,12 @@ event channel:   0x70 Venture_Event_Test        8 byte(s)
 * The registry is fixed at load time: commands cannot be added or removed
   after the engine built its list (the enabled flag is read once, by the
   registration hook).
+* Name-collision detection is diagnostic only and runs after registration: it
+  warns about both shadowing directions (including commands of other injected
+  DLLs) but cannot rename or remove anything.
+* The example command raises no event when there is no current player - a
+  missing event is logged as one warning instead of sending `HouseIndex = -1`
+  (HOOK-08, see above).
 * `enabled` is a platform switch only; it is not exposed to the player as a
   runtime toggle.
 * UI strings are wide literals in the DLL; there is no CSF/localisation
