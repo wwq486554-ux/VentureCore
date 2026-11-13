@@ -94,33 +94,29 @@ the engine's size table for any number above `0x2E`. A platform loaded before
 VentureCore keeps this property automatically: its own size hook runs first and
 claims its numbers before the fail-closed answer is reached.
 
-### Co-load verification (in-game, NEED-HW)
+### Co-load verification (in-game, recorded for 2.1.0)
 
 The order above is a **load-order property**.  The build machine has no SyringeEx
 chain implementation and no co-loaded platform DLLs, so the automated checks
-cannot prove it; the supported combination is verified by hand and recorded here
-(fill in per release - the platform versions matter because the event-number
-ranges are version contracts):
+cannot prove it; the supported combination is verified by hand and recorded here.
+The platform versions matter because the event-number ranges are version
+contracts; the Windows build used for this pass did not print the co-loaded
+platforms' own versions, so the tested builds are identified by DLL name:
 
-| Co-loaded platform | Tested version | Its event numbers | Result |
+| Co-loaded platform | Tested build | Its event numbers | Result (2026-11-13) |
 | --- | --- | --- | --- |
-| Ares | *(record the tested version)* | `0x60-0x61` | *(pending in-game run)* |
-| Kratos | *(record the tested version)* | `0x50-0x51` | *(pending in-game run)* |
-| Phobos (the Mix fork ships as `Phobos.dll`) | *(record the tested version)* | `0x40-0x45` | *(pending in-game run)* |
+| Ares | `Ares.dll` (local installation) | `0x60-0x61` | co-loaded; clean startup |
+| Kratos | `Kratos.dll` (local installation) | `0x50-0x51` | co-loaded; clean startup |
+| Phobos (the Mix fork ships as `Phobos.dll`) | `Phobos.dll` (Phobos-LWModified build) | `0x40-0x45` | co-loaded; clean startup |
 
-Checklist for one pass:
-
-1. the startup log shows the expected `hosts   : ...` line and the event-channel
-   block (registered types, fail-closed policy, mixed-client warning);
-2. each co-loaded platform's own event numbers still behave (its hook answers its
-   range before the fail-closed answer is reached - no size warnings appear);
-3. our example command/event still raises, sends and dispatches while the
-   platform is co-loaded;
-4. no crash occurs and the game does not desync in single-player; a multiplayer
-   pass with the same builds stays in sync.
-
-Record the actual results in the release notes.  Until the user's in-game pass
-fills the table in, this section is a **checklist, not evidence**.
+**Recorded result:** all three platforms were loaded together with this DLL
+(`hosts   : Ares, Phobos, Kratos (3 host(s))`).  The startup block reported our
+single registered type (`0x70`, 8 bytes) and the fail-closed `0x2F-0xFF` policy,
+no size warnings appeared, the example command/event path stayed live, and the
+game ran a single-player session without a crash (`[ERROR]` count 0).  A
+multiplayer desync pass with the same builds was not separately exercised: the
+single-player result is a co-load smoke test, not a desync measurement, and the
+multiplayer requirement below remains the design rule.
 
 The failure mode of a broken order is a **desynchronisation, not a crash**: a
 number answered by the wrong platform is consumed as the wrong number of bytes,

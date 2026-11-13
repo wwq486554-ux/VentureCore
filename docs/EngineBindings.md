@@ -101,11 +101,10 @@ would need the injector's host/checksum semantics (and a wrong declaration could
 reject a legitimate executable), so this stays a documented limitation.  See
 `docs/HookCatalogue.md` for the declared windows and their instruction evidence.
 
-**In-game verification item.** Record in the release test notes whether the
-expected SyringeEx/`gamemd.exe` combination is accepted, and - if a mismatched
-executable can be tried safely on the test machine - whether the injector
-refuses it before injection.  This DLL itself has no way to tell the difference,
-so a "works on my machine" result only covers the supported pairing.
+**Scope.** This is a documented boundary, not a verification item: the DLL
+cannot tell a supported executable from a mismatched one, so "works on this
+machine" only ever covers the supported pairing.  The pairing is guaranteed by
+the injector and the installation (see the trust boundary above).
 
 **Image facts (correction).** The released DLL is a **relocatable** image:
 `ImageBase = 0x10000000`, `DllCharacteristics = 0x0140` (`DYNAMIC_BASE` |

@@ -95,16 +95,20 @@ empty extension state is the expected symptom, not an error popup.  A platform
 that writes after `0x67D1B4` or reads after `0x67F7C8` is outside the contract;
 the audited set above does not contain one.
 
-**In-game verification (NEED-HW).** The automated checks cannot prove the co-load
-ordering on the build machine (there is no SyringeEx chain implementation there),
-so the user's in-game pass with the supported co-load platforms must confirm:
+**Recorded co-load run (2.1.0, 2026-11-13).** The automated checks cannot prove
+the co-load ordering on the build machine (there is no SyringeEx chain
+implementation there); the in-game pass with the supported platforms recorded:
 
-1. the startup log lists the co-loaded hosts (`hosts   : ...`);
-2. save -> load with each audited platform present restores the extension state
-   (`savegame: extension state restored (N adopted, ...)`) and prints no
-   `no extension trailer (...)` / `store set changed` / `malformed` line for our
-   block;
-3. the tested platform set and versions are recorded in the release notes.
+1. startup with Ares + Phobos (`Phobos.dll`) + Kratos co-loaded lists
+   `hosts   : Ares, Phobos, Kratos (3 host(s))` and completes startup;
+2. save -> load with Ares co-loaded restores the extension state
+   (`savegame: extension state restored (44 adopted, 0 created during load, 0 failed)`)
+   and prints no `no extension trailer (...)` / `store set changed` / `malformed`
+   line for our block; this exercises the reader/writer order against a platform
+   that also writes a tail block;
+3. the three-platform co-load was exercised as a startup/gameplay smoke; a
+   save/load round with all three platforms loaded at once was not separately
+   recorded.  The same audited DLL-name ordering rule applies to that set.
 
 The result of that pass, not this document, is the evidence for the ordering
 claim.
