@@ -194,7 +194,7 @@ PLATFORM_NAME = "VentureCore"
 # For a non-stable build the display also carries the prerelease suffix
 # ("v2.0.0.0-alpha"); add that spelling here too.
 # See check_version_strings() for why both encodings of the version are required.
-VERSION_STRINGS: Tuple[str, ...] = ("2.0.0.0", "2.0.0")
+VERSION_STRINGS: Tuple[str, ...] = ("2.1.0.0", "2.1.0")
 
 # The three-gate YRpp pin (src/Core/EnginePin.h).
 YRPP_PIN = "c6c522f77b58508588d9a8652c53356e4aef7a96"

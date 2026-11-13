@@ -116,10 +116,10 @@ Version metadata lives in `src/Core/PlatformVersion.h`:
 * `VC_VERSION_MAJOR`, `VC_VERSION_MINOR`, `VC_VERSION_REVISION`,
   `VC_VERSION_PATCH`,
 * `VC_PRERELEASE_SUFFIX` - a non-stable suffix (`"experimental"`, `"alpha"`, ...);
-  **commented out for a stable release** (as in 2.0.0: the display has no suffix and
-  the version resource does not set `VS_FF_PRERELEASE`).
+  **commented out for a stable release** (as in 2.1.0: the display has no suffix
+  and the version resource does not set `VS_FF_PRERELEASE`).
 
-Everything else is derived: the log banner (`v2.0.0.0`), the version
+Everything else is derived: the log banner (`v2.1.0.0`), the version
 resource strings, the build-type string (`LOCAL` / `NIGHTLY` / `RELEASE`, set by
 `--build-type`).  Do not edit the generated strings by hand.
 
@@ -131,7 +131,7 @@ Checklist for a version bump:
 3. Rebuild with `--build-type RELEASE` for a release artefact and verify it with
    `VCS_GAMEMD_EXE=<pinned gamemd.exe> python3 scripts/verify_build.py` (the
    verifier expects the `VERSION_STRINGS` at the top of that file - currently
-   `2.0.0.0` / `2.0.0`; update them in the same change as the version bump, and
+   `2.1.0.0` / `2.1.0`; update them in the same change as the version bump, and
    pass the engine executable so the offline hook-window check runs instead of
    being skipped).
 4. Run `scripts/linux/load_probe.sh`.
@@ -289,3 +289,37 @@ table; a 1.x save keeps loading and its extension state is preserved.
    `scripts/linux/run_tests.sh`, `scripts/linux/load_probe.sh`,
    `scripts/linux/probe_hosts.sh`, then the in-game smoke test from your own
    documentation.
+
+## 9. Migrating a 2.0 platform to 2.1
+
+2.1 is a remediation release over 2.0: no savegame or wire-format changes, but one
+source-level recompile requirement and a set of INI/host/command diagnostics
+changes.  A derived platform should:
+
+1. **Recompile everything** - the feature-API callbacks are pinned `__cdecl`.  A
+   callback defined without an explicit `__cdecl` in a translation unit built
+   with the project's `/Gz` (stdcall default) now fails to compile instead of
+   silently disagreeing with the base about the calling convention.  Keep the
+   feature code on `VentureCore.props` or spell `__cdecl` on your own callbacks.
+2. **Review the INI behaviour changes** listed in `CHANGELOG.md` (the first
+   declaration wins for duplicate keys, the template dumps declared defaults, the
+   startup `invalid` count includes switch values, `[Groups]` is always a
+   platform-owned section, a group switch is read once per pass, duplicate
+   `[Features]` switches are de-duplicated, `BeginFeature`/`EndFeature` must
+   pair, legacy getters mark keys known).  Mis-typed keys can now produce more
+   startup warnings; existing user INI files keep working.
+3. **Update hook-aware tooling**: the table is now 21 records / 20 distinct
+   handlers (one diagnostic post-registration command hook, `0x533C3E`); all
+   existing addresses and sizes are unchanged.  `docs/HookCatalogue.md` is the
+   current table.
+4. **Re-run the acceptance checklist** from §2/§8 with
+   `VCS_GAMEMD_EXE=<pinned gamemd.exe>`, then the in-game retest list from the
+   release notes (normal startup, co-load, save/load, event numbers).
+5. **Savegames stay compatible in both directions**: a 2.0 save loads under 2.1
+   and a 2.1 save loads under 2.0, extension state preserved.  The 2.1 loader
+   additionally rejects structurally impossible payloads (per-store row count,
+   per-row data size and payload-size limits).
+6. **Scope decisions**: savegames are treated as trusted input (no
+   anti-tamper/malicious-save guarantee), and the lineage marker remains a
+   VENTURE-lineage internal contract whose scan does not contain crashes inside
+   foreign DLLs.  See `docs/SaveFormat.md` and `docs/Lineage.md`.

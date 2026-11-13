@@ -11,17 +11,20 @@ scripts).
 
 It is a template, not a mod: it deliberately contains **no gameplay features**.
 
-> **Status: v2.0.0 (stable, 2026-11-12)** - a feature-complete starter base plus
+> **Status: v2.1.0 (stable, 2026-11-13)** - a feature-complete starter base plus
 > two Example modules.  The base machinery (startup, logging, config, the INI key
 > registry, extension storage with savegame persistence, event channel, command
 > registration, lineage detection, the host registry + self-identifying host
-> marker, the YRpp binding gate and the verification tooling) is implemented,
-> in-game verified, and the 1.x line was hardened by an independent blind review
-> (`CHANGELOG.md`).  2.0 changes the host model and the INI layer and keeps the
-> same verification suite (16 engine-free tests, 12 static checks, two Wine
-> probes); its delta still needs the independent review pass planned in the
-> roadmap.  The automated checks for each layer are named in this README and in
-> `docs/`; they do not replace an in-game check.
+> marker, the YRpp binding gate and the verification tooling) is implemented and
+> in-game verified.  v2.1.0 is the **second independent-review remediation
+> release**: 82 findings were triaged - 74 true issues (54 fixed in
+> code/build/tests, 17 resolved by documentation, 3 recorded as no-fix), 4 false
+> positives, 1 design decision and 3 in-game/interop retest items.  The
+> verification suite is 16 engine-free tests (1,353 checks), 12 static checks and
+> two Wine probes; the savegame frame/payload, event channel and command
+> registry are unchanged, and the hook table grew by one diagnostic hook
+> (20 -> 21 records).  The automated checks for each layer are named in this
+> README and in `docs/`; they do not replace an in-game check.
 
 ## What this base provides
 
@@ -121,7 +124,7 @@ named with it (an in-game run is still the only end-to-end check - see
 
 ## Stability and versioning
 
-`v2.0.0` is the current stable release of the base.  Within 2.x the following are
+`v2.1.0` is the current stable release of the base.  Within 2.x the following are
 **stable contracts** (changing one requires a major release or a documented
 migration):
 
@@ -140,6 +143,13 @@ migration):
   behaviour (validation warnings, the startup unknown-key scan, `[Groups]`).
 
 Changing a contract above requires a major release or a documented migration.
+2.1.0 keeps the 2.x contracts; a derived platform needs one source-level
+adjustment and a recompile: the feature-API callbacks are pinned `__cdecl`, so a
+callback defined without an explicit `__cdecl` under the project's `/Gz` default
+now fails to compile instead of silently mismatching (keep feature code on
+`VentureCore.props` or spell `__cdecl`).  The INI registry also emits more
+startup diagnostics.  The savegame frame/payload and the event/command wire
+contracts are unchanged, so a 2.0 save loads under 2.1 and vice versa.
 
 ## Requirements
 
@@ -235,13 +245,14 @@ explicit SKIP):
 VCS_GAMEMD_EXE=/path/to/gamemd.exe python3 scripts/verify_build.py
 ```
 
-The v2.0.0 source passes the 2.0 acceptance suite; the batch-A hardening adds the
-provenance, binary-assert, offline hook-window and tooling self-check items
-described below.  `scripts/linux/bench_store.sh` runs the extension-store
-microbenchmark and `scripts/linux/test_fetch_yrpp.sh` /
-`scripts/linux/verify_incremental.sh` cover the tooling.  A rebuilt DLL is not
-byte-identical to a released one (embedded timestamp / debug path), so the
-checks - not a file hash - are the provenance.
+The v2.1.0 source passes the full acceptance suite: 26 translation units with
+**0 warnings**, **16 engine-free tests (1,353 checks)**, **12 static checks**,
+two Wine probes, **21 hook records / 20 distinct handlers**, and the provenance,
+binary-assert, offline hook-window and tooling self-check items described below.
+`scripts/linux/bench_store.sh` runs the extension-store microbenchmark and
+`scripts/linux/test_fetch_yrpp.sh` / `scripts/linux/verify_incremental.sh` cover
+the tooling.  A rebuilt DLL is not byte-identical to a released one (embedded
+timestamp / build stamp), so the checks - not a file hash - are the provenance.
 
 `verify_build.py` checks the PE format (PE32/i386), the `.syhks00` hook records
 against the catalogue, the hook handler exports (exact match, with stale or
@@ -316,8 +327,14 @@ Upgrading from a 1.x build: 2.0 changes the feature API and the host model, but
 the savegame frame, event protocol, command registry and hook table are
 unchanged - a 1.x save keeps loading and its extension state is preserved.  The
 `<Platform>.ini` keys stay backward compatible (an old file keeps working;
-unknown keys are warnings only).  See `docs/Updating.md` for the 2.0 migration
-checklist.
+unknown keys are warnings only).  See `docs/Updating.md` §8 for the 1.x -> 2.0
+migration checklist.
+
+Upgrading from a 2.0 build to 2.1: recompile (the feature-API callbacks are
+pinned `__cdecl`), update hook-aware tooling to the 21-record catalogue, and
+review the INI diagnostics changes - the savegame frame/payload is unchanged, so
+2.0 saves load under 2.1 and 2.1 saves load under 2.0 with extension state
+preserved.  See `docs/Updating.md` §9 and `CHANGELOG.md`.
 
 The base has no unload hook; every line is written immediately with a synchronous
 `WriteFile` (no user-mode buffering), so a normal process exit does not lose
@@ -418,13 +435,17 @@ VentureCore 是一个 MIT 授权的“起始基座/模板”：复制仓库 → 
 编译成你自己的单一平台 DLL，不需要改 Ares / Phobos / Kratos，也不用重复造
 启动、日志、INI、宿主检测、功能开关、扩展存储、存档、事件、命令这些基础设施。
 
-当前版本 **`v2.0.0`（2026-11-12）** 是**空基座 + 两个示例模块**：示例只统计
+当前版本 **`v2.1.0`（2026-11-13）** 是**空基座 + 两个示例模块**：示例只统计
 UnitClass 的创建/销毁、读取一个 rules 键，没有任何玩法功能。2.0 的变更：宿主模型改为
 “事实集合 + 功能声明”（删除 tier，改用 `requiredHosts`/`anyOfHosts`，新增自识别宿主
 marker）；`<Platform>.ini` 升级为声明式键注册表（校验/未知键扫描/`[Groups]`/模板 dump）。
-1.x 已经过独立盲审与实机验证；2.0 沿用同一套自动化检查（15 个引擎无关单测、12 项静态检查、
-两个 Wine 探针），其增量仍待计划中的独立盲审。每层对应的自动化检查写在本 README 与
-`docs/` 里，这些检查不能替代一次实机运行：
+2.1 是**第二轮独立盲审的复核修复版**：82 条发现经分诊为 74 条真问题（54 条代码/构建/测试
+修复、17 条文档处置、3 条记录不修）、4 条误报、1 条设计取舍、3 条需实机/互操作复测；加固了
+验收链、宿主 marker 协议、INI 语义/诊断、Feature API 契约与存档加载器。升级注意：Feature
+API 回调已 pin `__cdecl`（派生平台需重编；不显式写 `__cdecl` 的回调会编译失败）；hook 表
+20→21（新增 1 条诊断 hook，既有地址不变）；存档帧/payload 未变（2.0↔2.1 双向兼容）。
+自动化检查：16 个引擎无关单测（1,353 checks）、12 项静态检查、两个 Wine 探针；每层对应的
+自动化检查写在本 README 与 `docs/` 里，这些检查不能替代一次实机运行：
 日志分级、`<Platform>.ini`、rules/art INI 读取与同名键接管、宿主集合、血统互斥、
 扩展存储（继承链 + 存档持久化，顺序帧 + store 集签名）、事件通道 `0x70–0x7F`、
 玩家命令注册。指针失效通知目前只有计数/清理，没有订阅 API。

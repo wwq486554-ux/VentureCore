@@ -7,6 +7,209 @@ The project uses semantic versioning.  The pre-1.0 samples carried an
 `-experimental` suffix in the DLL version resource; **`1.0.0` (2026-11-11) is the
 first stable release** and the stable contracts are listed in `README.md`.
 
+## [2.1.0] - 2026-11-13
+
+**Remediation release from the second independent blind review.**  The review
+produced 82 findings; triage classified 74 as true issues (54 fixed in
+code/build/tests, 17 resolved by documentation, 3 recorded as no-fix), 4 as false
+positives, 1 as a design decision and 3 as needing in-game/interop retesting.
+The release hardens the verification chain, the host-marker protocol, the
+platform INI layer, the feature API contract, the startup/lifecycle path and the
+savegame loader, and corrects documentation claims that did not match the code.
+
+**Upgrade notes - read before deploying:**
+
+* **Feature API callbacks are pinned `__cdecl`.**  A derived platform must
+  recompile; a feature callback defined without an explicit `__cdecl` in a
+  translation unit built with the project's `/Gz` (stdcall default) now fails to
+  compile instead of silently disagreeing with the base about the calling
+  convention.  Keep feature code on `VentureCore.props` (recommended) or spell
+  `__cdecl` on your own callbacks.
+* **INI semantics changed.**  Duplicate declarations resolve through the first
+  declaration; the R1 template dump lists declared defaults instead of local
+  effective values; the startup `invalid` count includes bad `[Features]` and
+  `[Groups]` switches; `[Groups]` is always a platform-owned section; a group
+  switch is read once per initialization pass.  Existing user INI files keep
+  working - mis-typed keys now warn more often, by design.
+* **The hook table grew from 20 to 21 records** (one diagnostic
+  post-registration command hook).  Existing hook addresses and sizes are
+  unchanged; a derived platform that hard-codes the count or parses the
+  catalogue must update.
+* **The savegame frame/payload is unchanged**: a 2.0 save loads under 2.1 and a
+  2.1 save loads under 2.0, extension state preserved in both directions.  New
+  load-time limits reject structurally impossible payloads.
+* **SAVE-01 scope decision:** savegames are treated as **trusted input**.  The
+  trailer checks are structural validity, not authentication; defending against
+  tampered or malicious savegames is out of scope, and the platform does not
+  promise that such a save is safe.
+* **HOST-03 scope decision:** the lineage scan does not promise to contain a
+  crash inside a foreign DLL.  The lineage marker is a VENTURE-lineage-internal
+  contract, not an interoperability guarantee for arbitrary private forks.
+* HOOK-01 (savegame block read order), HOOK-02 (event-channel co-load order) and
+  HOOK-06 (no injector-side executable pin) remain documented contracts; their
+  in-game/compatibility retest is part of the release verification.
+
+### Added
+
+- **Verification chain (batch A).**  New `scripts/verify_hook_windows.py`, an
+  offline hook-window validator (PE base, `.text` range, instruction-boundary
+  coverage, non-overlap), wired into `scripts/verify_build.py` as check 10 - an
+  explicit SKIP, never a PASS, without the pinned `gamemd.exe`.  The verifier
+  gained build provenance/build-type assertions (`PlatformBuildType=RELEASE`,
+  `GitCommit` matching the working copy), a "no live CRT assert machinery in the
+  release image" check, exact export matching with stale-export warnings, and an
+  INI-tooling self-check (check 12).  `build_linux.sh` counts and reports
+  compiler warnings; `run_tests.sh` requires a completion marker and a positive
+  check count per test; `check_eol.py` implements git's last-match-wins `-text`
+  semantics; `fetch_yrpp.sh`/`check_yrpp.py` verify the full 40-hex pin and a
+  committed per-file sha256 manifest (`external/YRpp.sha256`).
+- **New/expanded engine-free tests:** `tests/test_ini_adapter.cpp` (production
+  Win32 profile adapter: sentinels, empty values, case, 511/512 truncation,
+  enumeration limits), `tests/test_platform_startup.cpp` (real `Platform.cpp`
+  startup/shutdown/restart/refused paths),
+  `tests/test_feature_registry_validation.cpp` (descriptor validation,
+  uniqueness, registration phase, `__cdecl` pins), plus expanded coverage in the
+  host, INI, lineage, command, event, savegame and payload-safety tests.
+- **Host markers (batch B).**  `ReadHostMarker()` - one POD-only
+  `__try/__except` region covers the foreign export call, the magic/ABI reads
+  and the bounded `name`/`version` copies; the input is validated only after the
+  copy.  Bounded host-diagnostic formatting with a truncation marker and an
+  optional `truncated` out-parameter; a 63-character registration cap; a
+  cursor-style `HostRegistry::ReportNewProblems()` drain; temporary
+  `GetModuleHandleEx` pinning during the marker probe.
+- **INI registry (batches B/D).**  `IniRegistry::MarkKnown()` bridge for the
+  legal legacy getters; invalid-switch and late-invalid counters; truncation and
+  enumeration-limit counters; `TemplateRowCount()`; per-pass `[Groups]` switch
+  cache; an `id` stack for `BeginFeature`/`EndFeature`.
+- **Feature registry (batch B).**  Descriptor validation (null/empty id, iniKey,
+  name, null callbacks), duplicate `id`/`iniKey` rejection, and a registration
+  phase that closes when feature initialization starts; every rejection is
+  reported in the startup log.
+- **Logging/startup (batches B/D).**  A bounded, allocation-free pre-open
+  message queue (8 lines) flushes `Warn`/`Error` lines written by static
+  initializers after the log's separator header; `Log::PendingCount()` /
+  `DiscardPending()` expose it.  A 16-entry ext-type problem queue plus
+  `ExtTypeProblemDrain()` means static-registration problems are no longer
+  dropped.  `PlatformGate::Finished` makes `Shutdown()` final for the process.
+- **Savegame loader (batch C).**  Load-time hard limits (65,535 rows per store,
+  1 MiB of row data, 16 MiB payload; an over-limit value is a structural
+  `Invalid` and rejects the whole payload); bounded two-pass processing of
+  deferred allocations; re-entrancy-safe `ExtensionStore::Clear()`; built-in
+  extension type ids are never poisoned and a poisoned intermediate node
+  invalidates the derived-view chain.
+- **Command/event guards (batch C).**  A second command hook (`0x533C3E`, size
+  5) snapshots the finished shared command list and warns about name collisions
+  in both shadowing directions; `TryEventHouseIndex()` and a send-side guard
+  ensure the example command never sends `HouseIndex = -1` (the engine would
+  index `HouseClass::Array` with it before the event-type switch).
+
+### Changed
+
+- **Build configuration (batch A).**  There is a single source of compile flags
+  (`scripts/linux/common.sh`'s `vcs_cl_flags`) shared by the DLL, tests, probes
+  and benchmark, with a flag-hash parity gate.  C++ exceptions are disabled for
+  real: no `/EH` on either build path, `_HAS_EXCEPTIONS=0`, and
+  `include/platform/BuildGuards.h` is force-included in every translation unit
+  (`#error` if `_CPPUNWIND` reappears).  Release builds define `/DNDEBUG` and no
+  longer use `/FC` (no build-machine absolute paths in the binary).  The YRpp
+  gate now validates the pinned tree's content, not just its commit id.
+- **Host detection (batch B).**  Registration is frozen after detection;
+  cross-translation-unit static registration order is documented as unspecified
+  (first definition wins, conflicts are reported); built-in host bits and names
+  are reserved by contract, so a derived platform shadowing one is a declaration
+  error (not an override) and a feature descriptor that references an unknown
+  host bit produces a `feature : ...` startup error instead of silently
+  disabling the feature.
+- **INI behaviour (batches B/D).**  Duplicate declarations resolve through the
+  first declaration everywhere (value, range, invalid count, template and
+  warning); the template dumps declared defaults; size-limit truncation is
+  diagnosed; legacy getters mark keys known (lenient parsing, listed in the
+  template as a legacy read); `[Groups]` is always a platform-owned section; a
+  group switch is read and warned once per pass; duplicate `[Features]` switches
+  are de-duplicated; `minValue > maxValue` means "no range" and renders no range
+  annotation; `BeginFeature`/`EndFeature` nesting is warned about;
+  `VC_DEFAULT_FEATURE_ENABLED` is a historical name only (use
+  `FeatureDescriptor::defaultEnabled`).
+- **Startup/lifecycle (batches B/D).**  A mis-spelled `LineagePolicy` warns
+  instead of silently falling back to `refuse`; the event-channel startup block
+  is announced after feature initialization; `LineageDecision::allowStartup` is
+  the single startup gate; a successful savegame load logs the load-window close
+  once instead of twice.
+- **Hook table:** 20 -> 21 hook records / 20 distinct handlers; the catalogue
+  header no longer carries a version number.  The new hook's window and the
+  `0x533B00`-`0x533E00` region were audited against the five ecosystem
+  `.syhks00` tables.
+- **Tooling:** all Wine invocations are timeout-wrapped and take the toolchain
+  lock; the Linux build has a `--check` mode comparing project files to the
+  build inputs; `TEST_DEPS` parsing is quoted/array-based; the benchmark is
+  rebuilt on any relevant header change.
+
+### Fixed
+
+- Host marker faults no longer take the game down: a wild `name`/struct pointer
+  from a malformed marker is caught inside the SEH region and becomes a logged
+  problem (HOST-01); an over-numerous or over-long detected-host list no longer
+  terminates the process through the CRT invalid-parameter handler (HOST-02).
+- A host registered after detection is rejected instead of mutating the frozen
+  set (HOST-04); problems recorded after the first drain are reported after
+  feature initialization (HOST-05); a descriptor referencing an undefined host
+  bit is reported (HOST-07).
+- `RegisterFeature` during `InitializeFeatures` no longer iterates a vector it
+  can reallocate (undefined behaviour) and a late registration is rejected
+  (API-07).
+- INI: a later caller's default/range can no longer overwrite the stored value
+  of a duplicate declaration (INI-01); the startup summary counts invalid
+  `[Features]`/`[Groups]` values and reports `IniTakeover` (read at the rules-INI
+  stage) separately (INI-03); the template no longer mixes effective and default
+  values (INI-04); silent size truncation is diagnosed (INI-06); keys read only
+  through the legacy getters are no longer reported unknown (INI-08).
+- Startup: static-initializer `Warn`/`Error` lines are not lost (START-01); the
+  rules-INI deny-list covers the engine's type-list sections (START-02); a
+  mis-spelled `LineagePolicy` warns (START-03); a second `Startup()` after
+  `Shutdown()` is refused instead of re-initializing features (START-04); the
+  event-channel announce includes types registered from `Initialize()`
+  (START-06).
+- Savegame: deferred-allocation callbacks can no longer invalidate the vector
+  being processed (SAVE-02); `ExtensionStore::Clear()` is safe against
+  destructor re-entry (SAVE-03); a poisoned extension type id can no longer let
+  a derived-view cast succeed through the poisoned node (SAVE-04); an untrusted
+  `rowCount`/`dataSize` no longer allows a memory/CPU denial of service
+  (SAVE-05); the test fake swizzle manager matches the engine's slot/trap
+  semantics (SAVE-07).
+- Commands/events: a command colliding with one the engine registers after the
+  platform hook is detected by the new post-registration check, with the
+  shadowing direction reported (HOOK-03); the example command no longer sends a
+  negative house index that every receiver would use as an `HouseClass::Array`
+  index before the event-type switch (HOOK-08).
+- `PlatformPaths::GetGameFilePath` returns `false` for an undersized buffer
+  instead of letting the safe CRT terminate the process (acceptance finding).
+- Documentation claims that did not match the code were corrected: the
+  exception-handling description (DOC-01), the marker crash-containment and name
+  promises (DOC-03), the Windows build-time YRpp gate (DOC-05), the engine
+  boolean parse (DOC-07), the `abi_probe` wording (DOC-09), the host-matrix
+  table (DOC-11), the Updating list numbering (DOC-12) and the savegame/
+  extension claims (SAVE-09/DOC-02).
+
+### Documentation
+
+- New/rewritten contracts: savegame **trust boundary** (structural checks, not
+  authentication; trusted input; load-time limits), savegame **order contract**
+  (known co-load platforms, failure mode, in-game retest checklist), event-
+  channel **co-load verification** checklist and fail-closed trade-off, engine
+  **target-executable** trust boundary (no `.syexe00`/`SyringeHandshake`/
+  `declhost`; corrected ImageBase/relocation facts), lineage marker scope and
+  known limitations (HOST-03), host built-in priority and registration order
+  (HOST-09), INI registry semantics (`[Groups]`, template defaults, legacy
+  getters, size limits), the `FeatureContext`/descriptor contracts, the current
+  hook catalogue and the command registration/collision behaviour.
+- Verification documentation updated to the 12-check verifier, the
+  provenance/offline-hook-window requirements and the in-game retest list
+  (normal startup, co-load, save/load, event numbers, mismatched executable).
+- Record correction: the second review's finding count is **82** (an earlier
+  "83" in the review material was a transcription error); the 2026-11-13 scope
+  revision records SAVE-01 as a documented trusted-input decision and HOST-03 as
+  out of scope.
+
 ## [2.0.0] - 2026-11-12
 
 **Breaking host-model release, plus the INI key registry and the host marker
