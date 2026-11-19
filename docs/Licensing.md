@@ -11,7 +11,7 @@ components are **not** covered by the MIT grant.
 | VentureCore base source (this repository) | MIT - see `LICENSE.md` | yes |
 | Venture feature packs (a separate repository) | GPL-3.0 (project policy) | no |
 | A platform you build from this base ("derived platform") | your choice, see below | your repository |
-| YRpp (engine wrapper headers) | *no license declaration* - not redistributed | no |
+| YRpp (engine wrapper headers) | no repository-level license; 1 of 337 files (`QueueClass.h`) is GPL-3.0-or-later and is never instantiated | no |
 | SyringeEx (`Syringe.exe`) | not covered; not redistributed | no |
 | Ares / Phobos / Kratos | their own licenses; not redistributed | no |
 | `gamemd.exe` and game assets | proprietary (EA / Westwood) | no |
@@ -46,21 +46,38 @@ You may license your own platform however you like - MIT, GPL, proprietary -
   viral in that direction: MIT-licensed base code can go into a GPL-3.0 work, but
   GPL-3.0 code cannot be relicensed as MIT/proprietary.
 
-If in doubt, the safe combination for a closed-source platform is: base code + only
-MIT code you wrote yourself, no GPL-3.0 modules.
+If in doubt, the safe combination for a closed-source platform is: the base code
+plus only MIT code you wrote yourself, no GPL-3.0 modules.  The base is safe
+because it compiles no third-party copyleft implementation: `QueueClass.h` is
+GPL-3.0-or-later and the base appends to the engine event queue with its own code
+instead of instantiating that header (see the YRpp section).
 
 ## YRpp is not covered by the MIT license
 
 YRpp is the C++ wrapper around `gamemd.exe` that the platform compiles against.
-It has **no license declaration**; the community uses it in practice but there is
-no formal grant.  To stay unambiguous:
+**At the repository level it has no license file**; the community uses it in
+practice but there is no formal grant.  **At the file level one header is
+copyleft:** `QueueClass.h` - derived from TS++, credited there to CCHyper and
+ZivDero - carries a GPL-3.0-or-later notice and defines every queue member
+function inline, so calling one of them would compile that implementation into
+the DLL and make the distributed binary a GPL-3.0 work.  The platform therefore
+does not instantiate that header: the engine event queue is appended to by
+`src/Engine/Hooks.Events.cpp` with its own code, written against the layout
+measured in `gamemd.exe`, and `QueueClass.h` is used only as a declaration (the
+type of the engine object).  `scripts/check_copyleft.py` enforces both halves -
+no member of a copyleft-marked header is instantiated, and the set of
+copyleft-marked files in the pinned tree is exactly the one audited file.
+
+The rest stays as it was:
 
 * YRpp is **not** distributed in this repository (`external/YRpp/` is gitignored);
 * it is an external build dependency, fetched locally with
   `scripts/linux/fetch_yrpp.sh` and pinned by commit in `src/Core/EnginePin.h`;
 * the MIT grant above covers VentureCore's own code only - it does not make YRpp
   MIT, and it does not grant anything on YRpp's behalf;
-* a derived platform must keep the same separation and must not vendor YRpp.
+* a derived platform must keep the same separation, must not vendor YRpp, and
+  must not instantiate the copyleft-marked header either: replace the call with
+  your own code against the engine layout, or license the result GPL-3.0.
 
 See `NOTICE.md` for the full statement.
 
@@ -89,9 +106,14 @@ outbound), unless a contribution file says otherwise.
 ## Questions this document answers
 
 * *Can I use the base in a closed-source platform?* - Yes; keep the MIT notice.
+  The base compiles no third-party copyleft implementation (see the YRpp section),
+  so the built DLL is MIT-licensed code only.
 * *Can I sell a platform built on the base?* - The base allows it; the game,
   YRpp and optional host terms are separate and may forbid aspects of that.
 * *Can I copy GPL-3.0 modules into my MIT platform?* - No; the combined work
   becomes GPL-3.0.
+* *Can I call `EventClass::OutList.Add()` / other `QueueClass` members?* - No:
+  that header is GPL-3.0-or-later, and the call compiles it into your DLL.
+  `scripts/check_copyleft.py` fails the release gate when you do.
 * *Can I redistribute YRpp?* - No; the repository does not distribute it and the
   project makes no claim that it may be redistributed.

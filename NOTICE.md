@@ -12,7 +12,7 @@ distributed here.
 | --- | --- | --- | --- |
 | VentureCore base source | yes | MIT (`LICENSE.md`) | Copyright (c) 2026 The VentureCore Contributors |
 | `gamemd.exe` and game assets | no | proprietary (EA / Westwood) | the user must own a copy of Yuri's Revenge 1.001 |
-| YRpp (engine wrapper headers) | no | no license declaration | external build dependency, fetched locally, pinned by commit |
+| YRpp (engine wrapper headers) | no | no repository-level license; 1 of 337 files (`QueueClass.h`) is GPL-3.0-or-later, and that file is never instantiated | external build dependency, fetched locally, pinned by commit |
 | SyringeEx (`Syringe.exe`) | no | not covered; interface format only | used at run time; only the documented section format is used |
 | Ares | no | per its own project | optional host, detected at run time only |
 | Phobos | no | per its own project | optional host, detected at run time only |
@@ -21,8 +21,28 @@ distributed here.
 ## YRpp
 
 `external/YRpp/` is the YRpp engine wrapper that provides the C++ view of
-`gamemd.exe`.  YRpp carries **no license declaration**; the community uses it in
-practice without a formal grant.  For that reason:
+`gamemd.exe`.  **Repository level: no license.**  YRpp ships no `LICENSE` /
+`COPYING` file and its README states no terms; the community uses it in practice
+without a formal grant.  **File level: not uniform.**  In the pinned revision
+`QueueClass.h` carries an explicit **GPL-3.0-or-later** notice (the file comes
+from TS++, credited there to CCHyper and ZivDero) and defines every queue member
+function **inline in the header**, so any call to one of those members compiles a
+GPL implementation into the calling binary.  An audit of the pinned tree
+(`scripts/check_copyleft.py`) finds exactly that one file carrying a copyleft
+notice among 337 source files; no other file states any terms.
+
+This platform therefore **instantiates nothing from `QueueClass.h`**.  The one
+place that needs the engine's event out queue - `EventClass::OutList`, in
+`src/Engine/Hooks.Events.cpp` - appends to the queue with its own code, written
+against the queue layout measured in `gamemd.exe` (`Count` at `0x00A802C8`,
+timestamps at `0x00A83A54`, i.e. `+0x378C`); `QueueClass.h` is used only for its
+declaration, as the type of the engine object.  The release gate fails when a
+copyleft-marked YRpp header is used through one of its members, and when the set
+of copyleft-marked files in the pinned tree changes (`scripts/check_copyleft.py`,
+wired into `scripts/verify_build.py`).  The distributed DLL is consequently built
+from MIT-licensed code only, and is offered under the MIT grant in `LICENSE.md`.
+
+The rest of the dependency is handled as before:
 
 * this repository does **not** redistribute YRpp - `external/YRpp/` and
   `external/YRpp.commit` are excluded by `.gitignore`.  The one committed file
@@ -37,7 +57,9 @@ practice without a formal grant.  For that reason:
   compiled - no YRpp source is copied into this repository.
 
 The MIT grant above therefore covers VentureCore's own code, not YRpp.  A derived
-platform must make the same separation and must not vendor YRpp either.
+platform must make the same separation, must not vendor YRpp, and must not
+instantiate the copyleft-marked header either; run `scripts/check_copyleft.py`
+after a pin update or before adding a new engine call.
 
 ## SyringeEx
 

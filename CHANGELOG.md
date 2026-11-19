@@ -7,6 +7,59 @@ The project uses semantic versioning.  The pre-1.0 samples carried an
 `-experimental` suffix in the DLL version resource; **`1.0.0` (2026-11-11) is the
 first stable release** and the stable contracts are listed in `README.md`.
 
+## [2.1.1] - 2026-11-19
+
+**Licensing remediation (issue #1).**  The report asked how the GPL-3.0-or-later
+notice in the pinned YRpp `QueueClass.h` is accounted for, given that the
+documentation permits a proprietary licence for derived platforms.  The audit
+confirmed it: `QueueClass.h` is the one source file out of 337 in the pinned YRpp
+tree that carries a copyleft notice, its queue member functions are defined
+**inline in that header**, and `SendFrameToEngine()` called
+`EventClass::OutList.Add(...)` - so that implementation was compiled into every
+distributed `VentureCore.dll`.  The MIT grant covers this platform's own code and
+did not, on its own, put that combined binary under MIT terms.
+
+### Fixed
+
+- **The engine event queue is appended to by the platform itself.**
+  `src/Engine/Hooks.Events.cpp` no longer instantiates any `QueueClass` member.
+  The push is written against the queue layout measured in `gamemd.exe`
+  (`Count` at `0x00A802C8`, event slots at `+0x0C`, tick stamps at `+0x378C`,
+  128 records of 111 bytes) and pinned by `static_assert`s, including one against
+  `sizeof(EventClass::OutList)` so a pin that changes the layout fails the build.
+  The published v2.1.0 image contained the instantiated implementation as a
+  distinct function (`0x10017CF0` in the assessed build); the 2.1.1 image does
+  not.  Behaviour is unchanged - same queue, same tick stamp, same full-queue
+  rejection - so event traffic, multiplayer and savegames are unaffected.
+- **The licensing text no longer overstates YRpp's position.**  `NOTICE.md`,
+  `docs/Licensing.md`, `README.md`, `docs/Updating.md`, `docs/EventChannel.md`,
+  `src/Core/EnginePin.h` and `scripts/linux/fetch_yrpp.sh` now distinguish "no
+  repository-level licence file" from "one file carries an explicit
+  GPL-3.0-or-later notice", and say what the platform does about it.
+
+### Added
+
+- **`scripts/check_copyleft.py`** - the audit gate.  It fails when the set of
+  copyleft-marked files in the pinned YRpp tree changes (a new one is a licensing
+  review, not a routine pin update), when this repository names a copyleft type,
+  or when it calls a member of an engine queue object (`OutList` / `DoList` /
+  `MegaMissionList`, plus the deprecated `AddEvent`).  Comments and string
+  literals are stripped before the scan, so the documentation that explains the
+  rule does not trip it; `--self-check` verifies the detector against fixtures,
+  including the `OwningPlayer`-style false positive a bare "GPL" match produces.
+  Wired into `scripts/verify_build.py` as check 13 and into
+  `scripts/linux/build_linux.sh` before compiling.
+- `docs/Updating.md` records the audit as part of a YRpp pin update.
+
+### Upgrade notes
+
+- **A derived platform that calls `EventClass::OutList.Add(...)` (or another
+  `QueueClass` member) now fails the release gate.**  That call compiles
+  GPL-3.0 code into your DLL; either write the push yourself against the engine
+  layout, as the base does, or license the result GPL-3.0.
+- No API, INI key, hook address, export, event format or savegame change; the
+  version resource is `2.1.1.0` and the display string `v2.1.1.0`.
+
 ## [2.1.0] - 2026-11-13
 
 **Remediation release from the second independent blind review.**  The review

@@ -3,9 +3,10 @@
 // ---------------------------------------------------------------------------
 // Platform version metadata, shared by the C++ code and src/version.rc.
 //
-// Bump these when publishing.  2.1.0 is the current stable line (the second
-// independent-review remediation release; 2.0.0 was the previous stable line and
-// 1.0.0 the one before it).  VC_PRERELEASE_SUFFIX is commented out for a stable
+// Bump these when publishing.  2.1.1 is the current stable line (a licensing
+// remediation on top of 2.1.0, which was the second independent-review
+// remediation release; 2.0.0 was the previous stable line and 1.0.0 the one
+// before it).  VC_PRERELEASE_SUFFIX is commented out for a stable
 // release (define it - e.g. "experimental" - for a non-stable build; the version
 // resource then sets VS_FF_PRERELEASE).
 // ---------------------------------------------------------------------------
@@ -14,7 +15,7 @@
 
 #define VC_VERSION_MAJOR    2
 #define VC_VERSION_MINOR    1
-#define VC_VERSION_REVISION 0
+#define VC_VERSION_REVISION 1
 #define VC_VERSION_PATCH    0
 // #define VC_PRERELEASE_SUFFIX "experimental"
 

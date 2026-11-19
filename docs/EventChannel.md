@@ -217,10 +217,20 @@ the same rule to the example command.
 
 `Send` validates the type and payload size, serializes the 111-byte frame and
 hands it to the engine sender installed at load time by
-`src/Engine/Hooks.Events.cpp`. That sender queues the frame as a regular engine
-event with `EventClass::OutList.Add(...)`, which is how the reference ecosystem
+`src/Engine/Hooks.Events.cpp`. That sender appends the frame to the engine's
+event out queue (`EventClass::OutList`), which is how the reference ecosystem
 raises the custom events it defines: the event then travels the normal event
 transport and is executed on every machine, including the sender's own.
+
+The append is the platform's own code, not `QueueClass::Add`. `QueueClass.h` is
+the one GPL-3.0-or-later header in the pinned YRpp tree and defines its member
+functions inline, so calling one would compile that implementation into this DLL
+(see `NOTICE.md`). The sender therefore writes the queue itself - copy the record
+into the slot at the tail, stamp the engine tick counter, wrap the tail, bump the
+count - against the layout the engine uses (`Count` 0x00, `Head` 0x04, `Tail`
+0x08, slots 0x0C, timestamps 0x378C, 128 slots of 111 bytes); the
+`static_assert`s in `src/Engine/Hooks.Events.cpp` pin that layout and fail the
+build if a YRpp pin changes it.
 
 Helpers: `WriteFrame` serializes one event into a caller buffer and is the codec
 `Send` uses to build the engine event record; `ReadFrame` validates and decodes

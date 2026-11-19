@@ -7,6 +7,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 
 // ---------------------------------------------------------------------------
 // Event channel - engine adapter.
@@ -65,17 +66,84 @@ constexpr std::uint32_t kReturnGetSize1 = 0x64B71D; // last vanilla size-table i
 constexpr std::uint32_t kReturnGetSize2 = 0x64BE97;
 constexpr std::uint32_t kReturnGetSize3 = 0x64C321;
 
+// --- the engine event queue, written locally -------------------------------
+// Licensing constraint - see the "YRpp" section of NOTICE.md.  In the pinned
+// YRpp revision exactly one header carries an explicit copyleft notice:
+// QueueClass.h is GPL-3.0-or-later and defines every queue member function
+// inline.  Calling one of those members (OutList.Add(...)) compiles that
+// implementation into this DLL and puts the *distributed binary* under
+// GPL-3.0, which the MIT grant in LICENSE.md does not do.  The push is
+// therefore written here, against the engine's queue layout and behaviour, and
+// no member of QueueClass is instantiated - the declaration is used only to
+// reach the engine object at EventClass::OutList (0x00A802C8).  A build that
+// reintroduces such a call fails scripts/check_copyleft.py.
+//
+// EventClass::OutList is the engine's QueueClass<EventClass, 128>.  The layout
+// below is the engine's, and the static_asserts pin it two ways: against the
+// concrete offsets the engine's own code uses, and against YRpp's declaration,
+// so a future pin that changes either fails the build instead of making the
+// push write into the wrong slot.
+struct EventOutQueue
+{
+	int Count;          // 0x00 - records queued
+	int Head;           // 0x04 - index the engine drains from
+	int Tail;           // 0x08 - index this file appends at
+	EventClass Array[EventClass::MAX_EVENTS];   // 0x0C
+	int Timings[EventClass::MAX_EVENTS];        // 0x378C
+};
+
+static_assert(EventClass::MAX_EVENTS == 128,
+	"the engine event queue holds 128 records - re-check the YRpp pin");
+static_assert(offsetof(EventOutQueue, Array) == 0x0C,
+	"the engine event slots start at 0x0C");
+static_assert(offsetof(EventOutQueue, Timings) == 0x378C,
+	"the engine queue timestamps start at 0x378C");
+static_assert(sizeof(EventOutQueue) == 0x398C,
+	"the engine event queue is 0x398C bytes");
+static_assert(sizeof(EventOutQueue) == sizeof(EventClass::OutList),
+	"this mirror must stay the size of the engine's queue type");
+
+// The engine's timeGetTime import thunk (gamemd.exe 0x7E1530 - the tick counter
+// a queued event is stamped with).  YRpp declares the same thunk as
+// Imports::TimeGetTime, but only through the deprecated reference<> helper, so it
+// is spelled here with the supported macro instead of suppressing C4996 at the
+// use site; the address is an engine fact, not a YRpp implementation.
+DEFINE_REFERENCE(Imports::FP_TimeGetTime, EngineTimeGetTime, 0x7E1530u)
+
+// Append one record to the engine's out queue.  Same data flow as the engine
+// performs for a vanilla event: copy the record into the slot the tail points
+// at, stamp it with the engine tick counter, advance the tail modulo the queue
+// size and bump the count.  Returns false when the queue is full.
+bool QueueEventForEngine(const EventClass& event)
+{
+	EventOutQueue& queue = *reinterpret_cast<EventOutQueue*>(&EventClass::OutList);
+
+	// A negative count is corrupt state rather than "space available": treat it
+	// like a full queue instead of writing outside the slot array.
+	if (static_cast<unsigned>(queue.Count) >= EventClass::MAX_EVENTS)
+		return false;
+
+	constexpr int slotMask = EventClass::MAX_EVENTS - 1;
+	const int slot = queue.Tail & slotMask;
+
+	std::memcpy(&queue.Array[slot], &event, sizeof(EventClass));
+	queue.Timings[slot] = static_cast<int>(EngineTimeGetTime());
+	queue.Tail = (slot + 1) & slotMask;
+	queue.Count += 1;
+
+	return true;
+}
+
 // The engine-side half of EventChannel::Send: queue one serialized channel
-// frame as a regular engine event.  EventClass::OutList is the engine's event
-// out queue; this is exactly how the reference ecosystem raises the custom
-// events it defines (an EventClass-shaped record added to OutList).
+// frame as a regular engine event.  This is exactly how the reference ecosystem
+// raises the custom events it defines - an EventClass-shaped record added to
+// the engine's out queue.
 bool SendFrameToEngine(const std::uint8_t* const frame, const std::uint32_t frameSize)
 {
 	if (!frame || frameSize != sizeof(EventClass))
 		return false;
 
-	const EventClass* const pEvent = reinterpret_cast<const EventClass*>(frame);
-	return EventClass::OutList.Add(*pEvent);
+	return QueueEventForEngine(*reinterpret_cast<const EventClass*>(frame));
 }
 
 // Installed at load time, before the game can execute a command that raises an

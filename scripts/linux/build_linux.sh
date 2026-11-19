@@ -107,6 +107,14 @@ if [[ -z $compile_one ]]; then
     || vcs_die "YRpp pin check failed - run scripts/linux/fetch_yrpp.sh to (re)fetch the pinned YRpp"
 fi
 
+# Licensing gate: no implementation from a copyleft-marked YRpp header may be
+# compiled in.  QueueClass.h is GPL-3.0-or-later and defines its members inline;
+# see NOTICE.md and scripts/check_copyleft.py.
+if [[ -z $compile_one ]]; then
+  python3 "$VCS_ROOT/scripts/check_copyleft.py" --quiet \
+    || vcs_die "copyleft gate failed - a copyleft-marked YRpp type is instantiated (see NOTICE.md)"
+fi
+
 # ---------------------------------------------------------------------------
 # Derived paths (kept identical in the --compile-one child)
 # ---------------------------------------------------------------------------

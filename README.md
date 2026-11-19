@@ -11,19 +11,24 @@ scripts).
 
 It is a template, not a mod: it deliberately contains **no gameplay features**.
 
-> **Status: v2.1.0 (stable, 2026-11-13)** - a feature-complete starter base plus
+> **Status: v2.1.1 (stable, 2026-11-19)** - a feature-complete starter base plus
 > two Example modules.  The base machinery (startup, logging, config, the INI key
 > registry, extension storage with savegame persistence, event channel, command
 > registration, lineage detection, the host registry + self-identifying host
 > marker, the YRpp binding gate and the verification tooling) is implemented and
-> in-game verified.  v2.1.0 is the **second independent-review remediation
+> in-game verified.  v2.1.0 was the **second independent-review remediation
 > release**: 82 findings were triaged - 74 true issues (54 fixed in
 > code/build/tests, 17 resolved by documentation, 3 recorded as no-fix), 4 false
-> positives, 1 design decision and 3 in-game/interop retest items.  The
-> verification suite is 16 engine-free tests (1,353 checks), 12 static checks and
-> two Wine probes; the savegame frame/payload, event channel and command
-> registry are unchanged, and the hook table grew by one diagnostic hook
-> (20 -> 21 records).  The automated checks for each layer are named in this
+> positives, 1 design decision and 3 in-game/interop retest items.
+> **v2.1.1 is a licensing remediation**: the engine event queue is no longer
+> appended to through YRpp's GPL-3.0-or-later `QueueClass.h` (that implementation
+> used to be compiled into the distributed DLL), and the licensing text now
+> separates "no repository-level YRpp licence" from "one header carries an
+> explicit GPL notice" (see `NOTICE.md`).  No API, INI key, hook address, export
+> or savegame change.  The verification suite is 16 engine-free tests (1,353
+> checks), 13 static checks and two Wine probes; the savegame frame/payload,
+> event channel and command registry are unchanged, and the hook table is 21
+> records.  The automated checks for each layer are named in this
 > README and in `docs/`; they do not replace an in-game check.
 
 ## What this base provides
@@ -124,7 +129,7 @@ named with it (an in-game run is still the only end-to-end check - see
 
 ## Stability and versioning
 
-`v2.1.0` is the current stable release of the base.  Within 2.x the following are
+`v2.1.1` is the current stable release of the base.  Within 2.x the following are
 **stable contracts** (changing one requires a major release or a documented
 migration):
 
@@ -245,8 +250,8 @@ explicit SKIP):
 VCS_GAMEMD_EXE=/path/to/gamemd.exe python3 scripts/verify_build.py
 ```
 
-The v2.1.0 source passes the full acceptance suite: 26 translation units with
-**0 warnings**, **16 engine-free tests (1,353 checks)**, **12 static checks**,
+The v2.1.1 source passes the full acceptance suite: 26 translation units with
+**0 warnings**, **16 engine-free tests (1,353 checks)**, **13 static checks**,
 two Wine probes, **21 hook records / 20 distinct handlers**, and the provenance,
 binary-assert, offline hook-window and tooling self-check items described below.
 `scripts/linux/bench_store.sh` runs the extension-store microbenchmark and
@@ -264,7 +269,9 @@ ASCII literal - the YRpp pin, `PlatformBuildType=RELEASE`, and a `GitCommit` tha
 matches the working copy), the registered Example feature id, the log-policy
 source hygiene, the absence of the removed 2.0 host level API, the absence of the
 removed closed-source host's name, the absence of live CRT assert machinery from
-the release image, and the offline self-checks of the two in-game INI tools.  It
+the release image, the offline self-checks of the two in-game INI tools, and the
+copyleft separation from the pinned YRpp headers (no member of the
+GPL-3.0-or-later `QueueClass.h` is instantiated).  It
 exits 0 only when every check passes.
 
 `load_probe.sh` performs `LoadLibrary` -> `GetProcAddress` for the base hook
@@ -414,19 +421,21 @@ reported.  See `VentureCore.ini.example` and `docs/Ini.md`.
 | `docs/Commands.md` | registering player commands and binding hotkeys |
 | `docs/Lineage.md` | the lineage marker and the mutual-exclusion check |
 | `docs/Logging.md` | log levels, debugger output gating, sampling, measured cost |
-| `docs/Licensing.md` | MIT base, GPL-3.0 feature packs, derived-platform rules |
+| `docs/Licensing.md` | MIT base, GPL-3.0 feature packs, the YRpp copyleft separation, derived-platform rules |
 | `docs/Updating.md` | updating the YRpp pin, the platform and the version |
 | `CHANGELOG.md` | release history |
 | `NOTICE.md` | third-party components and their terms |
 
 ## Licensing
 
-The base is **MIT** (`LICENSE.md`, `NOTICE.md`).  YRpp is not distributed and has
-no license declaration; SyringeEx and the optional host platforms are not
-distributed either.  Feature packs under the Venture umbrella are **GPL-3.0**; a
+The base is **MIT** (`LICENSE.md`, `NOTICE.md`).  YRpp is not distributed: it has
+no repository-level license, and the one file that carries a GPL-3.0-or-later
+notice (`QueueClass.h`) is never instantiated - the base appends to the engine
+event queue with its own code, so the built DLL compiles no third-party copyleft
+implementation.  SyringeEx and the optional host platforms are not distributed
+either.  Feature packs under the Venture umbrella are **GPL-3.0**; a
 derived platform may pick its own license, but copying GPL-3.0 modules into it
-makes the combined work GPL-3.0.  Details:
-`docs/Licensing.md`.
+makes the combined work GPL-3.0.  Details: `docs/Licensing.md`.
 
 ## 中文简介
 
@@ -435,7 +444,7 @@ VentureCore 是一个 MIT 授权的“起始基座/模板”：复制仓库 → 
 编译成你自己的单一平台 DLL，不需要改 Ares / Phobos / Kratos，也不用重复造
 启动、日志、INI、宿主检测、功能开关、扩展存储、存档、事件、命令这些基础设施。
 
-当前版本 **`v2.1.0`（2026-11-13）** 是**空基座 + 两个示例模块**：示例只统计
+当前版本 **`v2.1.1`（2026-11-19）** 是**空基座 + 两个示例模块**：示例只统计
 UnitClass 的创建/销毁、读取一个 rules 键，没有任何玩法功能。2.0 的变更：宿主模型改为
 “事实集合 + 功能声明”（删除 tier，改用 `requiredHosts`/`anyOfHosts`，新增自识别宿主
 marker）；`<Platform>.ini` 升级为声明式键注册表（校验/未知键扫描/`[Groups]`/模板 dump）。
@@ -444,7 +453,11 @@ marker）；`<Platform>.ini` 升级为声明式键注册表（校验/未知键�
 验收链、宿主 marker 协议、INI 语义/诊断、Feature API 契约与存档加载器。升级注意：Feature
 API 回调已 pin `__cdecl`（派生平台需重编；不显式写 `__cdecl` 的回调会编译失败）；hook 表
 20→21（新增 1 条诊断 hook，既有地址不变）；存档帧/payload 未变（2.0↔2.1 双向兼容）。
-自动化检查：16 个引擎无关单测（1,353 checks）、12 项静态检查、两个 Wine 探针；每层对应的
+2.1.1 是**许可整改版**：引擎事件队列不再调用 YRpp 中带 GPL-3.0-or-later 声明的
+`QueueClass.h`（此前那段实现会被编译进分发的 DLL），改为平台自己按 `gamemd.exe`
+里的队列布局写入；许可文档同时区分“仓库级无许可证文件”与“单个文件带明确 GPL 声明”，
+并加了 `scripts/check_copyleft.py` 审计门禁。无 API/INI/hook/导出/存档变更。
+自动化检查：16 个引擎无关单测（1,353 checks）、13 项静态检查、两个 Wine 探针；每层对应的
 自动化检查写在本 README 与 `docs/` 里，这些检查不能替代一次实机运行：
 日志分级、`<Platform>.ini`、rules/art INI 读取与同名键接管、宿主集合、血统互斥、
 扩展存储（继承链 + 存档持久化，顺序帧 + store 集签名）、事件通道 `0x70–0x7F`、

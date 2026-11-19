@@ -158,6 +158,21 @@ What is checked
        template-freshness rule or platform-name derivation fails this check even
        when no game is available.
 
+13. Copyleft-marked YRpp implementation not instantiated (source)
+       One header in the pinned YRpp tree carries an explicit
+       ``GPL-3.0-or-later`` notice - ``QueueClass.h``, which defines every queue
+       member function inline - so calling one of those members would compile
+       GPL code into the distributed DLL (see the "YRpp" section of
+       ``NOTICE.md``).  ``scripts/check_copyleft.py`` enforces the separation:
+       the set of copyleft-marked files in the pinned tree must stay exactly the
+       audited one, and this repository's own sources (``src/``, ``include/``,
+       ``tests/``) may neither name the audited type nor call a member of an
+       engine queue object (``OutList`` / ``DoList`` / ``MegaMissionList``).
+       Comments are stripped before the scan, so the documentation that explains
+       the rule does not trip it.  Without an installed ``external/YRpp`` the
+       file-set half cannot run: the check is reported as ``[SKIP]``, never as a
+       pass.
+
 Exit status is 0 when no check fails and 1 otherwise.  A skipped check (see
 check 10) is reported as ``[SKIP]`` and counted in the result line - it is not a
 pass, but it does not fail the run either.  The expected strings and ids live in
@@ -176,6 +191,7 @@ import sys
 from typing import Dict, List, Optional, Sequence, Tuple
 
 import verify_hook_windows
+import check_copyleft
 
 # ---------------------------------------------------------------------------
 # Expected values / fixed facts
@@ -194,7 +210,7 @@ PLATFORM_NAME = "VentureCore"
 # For a non-stable build the display also carries the prerelease suffix
 # ("v2.0.0.0-alpha"); add that spelling here too.
 # See check_version_strings() for why both encodings of the version are required.
-VERSION_STRINGS: Tuple[str, ...] = ("2.1.0.0", "2.1.0")
+VERSION_STRINGS: Tuple[str, ...] = ("2.1.1.0", "2.1.1")
 
 # The three-gate YRpp pin (src/Core/EnginePin.h).
 YRPP_PIN = "c6c522f77b58508588d9a8652c53356e4aef7a96"
@@ -1495,6 +1511,20 @@ def check_ini_tooling_self_checks() -> Check:
 
 
 # ---------------------------------------------------------------------------
+# Check 13: copyleft-marked YRpp implementation not instantiated (source)
+# ---------------------------------------------------------------------------
+
+
+def check_copyleft_instantiation() -> Check:
+    """No copyleft-marked YRpp member may be compiled in (see NOTICE.md)."""
+    title = "Copyleft-marked YRpp headers not instantiated (source)"
+    status, detail, extra = check_copyleft.audit()
+    if status == "skip":
+        return Check(True, title, detail, extra, skipped=True)
+    return Check(status == "pass", title, detail, extra)
+
+
+# ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
 
@@ -1557,13 +1587,14 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 % dll_path)]
         else:
             report = [Check(False, "PE image format", str(exc))]
-        # The source checks (7/8/9/12) inspect the source tree, not the DLL:
+        # The source checks (7/8/9/12/13) inspect the source tree, not the DLL:
         # keep them in the report so a missing or stale binary cannot hide a
         # release-source violation.
         report.append(check_log_policy_source())
         report.append(check_legacy_tier_removed())
         report.append(check_closed_source_host_removed())
         report.append(check_ini_tooling_self_checks())
+        report.append(check_copyleft_instantiation())
         print_report(report)
         return 1
 
@@ -1635,6 +1666,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     # The in-game log/template tools are what the human probe run is judged
     # with; their offline self-checks belong to the automatic gate (INI-07).
     checks.append(check_ini_tooling_self_checks())
+
+    # -- check 13 --------------------------------------------------------
+    # Licensing: one YRpp header (QueueClass.h) is GPL-3.0-or-later with inline
+    # members, so calling one of them would put the shipped DLL under GPL-3.0.
+    checks.append(check_copyleft_instantiation())
 
     print_report(checks)
     return 0 if all(check.ok for check in checks) else 1

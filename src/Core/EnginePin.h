@@ -4,8 +4,10 @@
 // Engine bindings pin (single source of truth).
 //
 // This platform compiles against a *specific* YRpp revision. YRpp has no
-// license declaration and is not vendored in this repository; it is fetched
+// repository-level license and is not vendored in this repository; it is fetched
 // into external/YRpp as an external build dependency (see external/README.md).
+// One header, QueueClass.h, carries a GPL-3.0-or-later notice - see NOTICE.md:
+// no member of it may be instantiated (scripts/check_copyleft.py).
 //
 // Three gates enforce the pin:
 //   1. build time  - scripts/linux/check_yrpp.py compares the local revision

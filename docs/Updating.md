@@ -59,6 +59,12 @@ and macro behaviour may all change.  The procedure, in order:
    this gate itself before compiling; the Visual Studio build does not, so run
    the script (or add it as a pre-build step) when you build on Windows.
 
+   A pin update also re-runs the copyleft audit: `scripts/check_copyleft.py`
+   reports the set of files in the new tree that carry a GPL/LGPL/AGPL notice.
+   The current tree has exactly one (`QueueClass.h`, see `NOTICE.md`); a second
+   one is a licensing review, not a routine bump.  The same script fails the
+   release gate when the platform instantiates a member of such a header.
+
 7. Clean build and verify:
 
    ```bash
@@ -131,7 +137,7 @@ Checklist for a version bump:
 3. Rebuild with `--build-type RELEASE` for a release artefact and verify it with
    `VCS_GAMEMD_EXE=<pinned gamemd.exe> python3 scripts/verify_build.py` (the
    verifier expects the `VERSION_STRINGS` at the top of that file - currently
-   `2.1.0.0` / `2.1.0`; update them in the same change as the version bump, and
+   `2.1.1.0` / `2.1.1`; update them in the same change as the version bump, and
    pass the engine executable so the offline hook-window check runs instead of
    being skipped).
 4. Run `scripts/linux/load_probe.sh`.
@@ -210,8 +216,9 @@ Host detection is a registry, not a hard-coded table:
   `scripts/linux/check_eol.py` (report) or `scripts/linux/check_eol.py --fix`
   (rewrite offending files).
 * `external/YRpp/` and `external/YRpp.commit` are gitignored - never commit
-  YRpp, it is an external dependency without a license declaration (see
-  `NOTICE.md`).  `external/YRpp.sha256` **is** committed: it is the content
+  YRpp.  It has no repository-level license, and one header (`QueueClass.h`) is
+  GPL-3.0-or-later and must not be instantiated (see `NOTICE.md`).
+  `external/YRpp.sha256` **is** committed: it is the content
   manifest (file hashes only, no YRpp content) and must be regenerated with
   `fetch_yrpp.sh --write-manifest` whenever the pin changes.
 * Build output (`Release/`, `Debug/`, `*.pdb`, `*.obj`, ...) is gitignored; do
