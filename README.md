@@ -439,30 +439,20 @@ makes the combined work GPL-3.0.  Details: `docs/Licensing.md`.
 
 ## 中文简介
 
-VentureCore 是一个 MIT 授权的“起始基座/模板”：复制仓库 → 改
+VentureCore 是一个 **MIT 授权**的“起始基座/模板”：复制仓库 → 改
 `src/Core/PlatformConfig.h` 的平台名 → 在 `src/Features/` 下加自己的功能模块 →
-编译成你自己的单一平台 DLL，不需要改 Ares / Phobos / Kratos，也不用重复造
-启动、日志、INI、宿主检测、功能开关、扩展存储、存档、事件、命令这些基础设施。
+编译成你自己的单一平台 DLL。不用改 Ares / Phobos / Kratos，也不用重写启动、日志、
+INI、宿主检测、功能开关、扩展存储、存档、事件、命令这些基础设施。
 
-当前版本 **`v2.1.1`（2026-11-19）** 是**空基座 + 两个示例模块**：示例只统计
-UnitClass 的创建/销毁、读取一个 rules 键，没有任何玩法功能。2.0 的变更：宿主模型改为
-“事实集合 + 功能声明”（删除 tier，改用 `requiredHosts`/`anyOfHosts`，新增自识别宿主
-marker）；`<Platform>.ini` 升级为声明式键注册表（校验/未知键扫描/`[Groups]`/模板 dump）。
-2.1 是**第二轮独立盲审的复核修复版**：82 条发现经分诊为 74 条真问题（54 条代码/构建/测试
-修复、17 条文档处置、3 条记录不修）、4 条误报、1 条设计取舍、3 条需实机/互操作复测；加固了
-验收链、宿主 marker 协议、INI 语义/诊断、Feature API 契约与存档加载器。升级注意：Feature
-API 回调已 pin `__cdecl`（派生平台需重编；不显式写 `__cdecl` 的回调会编译失败）；hook 表
-20→21（新增 1 条诊断 hook，既有地址不变）；存档帧/payload 未变（2.0↔2.1 双向兼容）。
-2.1.1 是**许可整改版**：引擎事件队列不再调用 YRpp 中带 GPL-3.0-or-later 声明的
-`QueueClass.h`（此前那段实现会被编译进分发的 DLL），改为平台自己按 `gamemd.exe`
-里的队列布局写入；许可文档同时区分“仓库级无许可证文件”与“单个文件带明确 GPL 声明”，
-并加了 `scripts/check_copyleft.py` 审计门禁。无 API/INI/hook/导出/存档变更。
-自动化检查：16 个引擎无关单测（1,353 checks）、13 项静态检查、两个 Wine 探针；每层对应的
-自动化检查写在本 README 与 `docs/` 里，这些检查不能替代一次实机运行：
-日志分级、`<Platform>.ini`、rules/art INI 读取与同名键接管、宿主集合、血统互斥、
-扩展存储（继承链 + 存档持久化，顺序帧 + store 集签名）、事件通道 `0x70–0x7F`、
-玩家命令注册。指针失效通知目前只有计数/清理，没有订阅 API。
-硬依赖只有 `gamemd.exe` + SyringeEx；Ares / Phobos / Kratos 只做检测和日志（派生平台可注册自己的私有宿主）。
+当前 `v2.1.1` 是**空基座 + 两个示例模块**（示例只统计 `UnitClass` 创建/销毁、读一个
+rules 键），本身不含玩法功能。硬依赖只有 `gamemd.exe` + SyringeEx；Ares / Phobos /
+Kratos 只做检测和日志，派生平台可注册自己的私有宿主。许可：基座 MIT，产物中不含任何
+第三方 copyleft 实现（`QueueClass.h` 带 GPL 声明但从不被实例化，见 `NOTICE.md`）。
+各版本的具体变更见 `CHANGELOG.md`。
+
+自动化检查：16 个引擎无关单测（1,353 checks）、13 项静态检查、两个 Wine 探针；
+这些检查不能替代一次实机运行。
+
 构建与自检：
 
 ```bash
